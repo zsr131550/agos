@@ -21,6 +21,9 @@ class AgosPaths:
     status_json: Path
     ledger: Path
     evidence: Path
+    reviews: Path
+    proof_json: Path
+    proof_md: Path
     hooks: Path
 
 
@@ -39,6 +42,9 @@ def task_paths(repo_root: Path, task_dir: Path) -> AgosPaths:
         status_json=task_dir / "status.json",
         ledger=task_dir / "ledger.jsonl",
         evidence=task_dir / "evidence",
+        reviews=task_dir / "reviews",
+        proof_json=task_dir / "proof.json",
+        proof_md=task_dir / "proof.md",
         hooks=agos / "hooks",
     )
 
