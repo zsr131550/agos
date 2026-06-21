@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import pytest
 
 from agos.core.repo import repo_paths
 from agos.core.review import Finding, ReviewPacket, ReviewReport
@@ -62,3 +63,30 @@ def test_review_store_reads_latest_reports(tmp_repo):
         store.write_report(report)
 
     assert [report.review_id for report in store.read_reports()] == ["review-01", "review-02"]
+
+
+def test_review_store_rejects_unsafe_review_id(tmp_repo):
+    paths = repo_paths(tmp_repo)
+    store = ReviewStore(paths)
+    packet = ReviewPacket(
+        review_id="../escape",
+        task_id="agos-01",
+        task_title="Task",
+        diff_kind="governed_repo_diff",
+        ledger_head_hash="head",
+    )
+
+    with pytest.raises(ValueError, match="review_id"):
+        store.write_packet(packet)
+
+    assert not (paths.reviews.parent / "escape").exists()
+
+
+def test_review_store_rejects_unsafe_reviewer(tmp_repo):
+    paths = repo_paths(tmp_repo)
+    store = ReviewStore(paths)
+
+    with pytest.raises(ValueError, match="reviewer"):
+        store.write_raw_output("review-01", "../../pwn", {"ok": True})
+
+    assert not (paths.reviews.parent.parent / "pwn.json").exists()

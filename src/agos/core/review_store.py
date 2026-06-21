@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import json
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 
 from agos.core.repo import AgosPaths
 from agos.core.review import ReviewPacket, ReviewReport
@@ -18,7 +18,8 @@ class ReviewStore:
         return ref
 
     def write_raw_output(self, review_id: str, reviewer: str, payload: dict) -> str:
-        ref = self._review_ref(review_id, "raw", f"{reviewer}.json")
+        safe_reviewer = _safe_component(reviewer, "reviewer")
+        ref = self._review_ref(review_id, "raw", f"{safe_reviewer}.json")
         path = self.paths.current_task / ref
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
@@ -37,7 +38,7 @@ class ReviewStore:
         return ref
 
     def read_report(self, review_id: str) -> ReviewReport:
-        path = self.paths.reviews / review_id / "findings.json"
+        path = self.paths.reviews / _safe_component(review_id, "review_id") / "findings.json"
         return ReviewReport.model_validate_json(path.read_text(encoding="utf-8"))
 
     def read_reports(self) -> list[ReviewReport]:
@@ -54,7 +55,7 @@ class ReviewStore:
         path.write_text(model.model_dump_json(indent=2) + "\n", encoding="utf-8")
 
     def _review_ref(self, review_id: str, *parts: str) -> str:
-        return "/".join(("reviews", review_id, *parts))
+        return "/".join(("reviews", _safe_component(review_id, "review_id"), *parts))
 
     def _render_markdown_report(self, report: ReviewReport) -> str:
         lines = [
@@ -87,3 +88,15 @@ class ReviewStore:
                 ]
             )
         return "\n".join(lines)
+
+
+def _safe_component(name: str, label: str) -> str:
+    if not name:
+        raise ValueError(f"{label} must be a non-empty path component")
+    if "/" in name or "\\" in name:
+        raise ValueError(f"{label} must not contain path separators")
+    if name == "." or ".." in name:
+        raise ValueError(f"{label} must not contain special path components")
+    if PurePosixPath(name).is_absolute() or PureWindowsPath(name).is_absolute():
+        raise ValueError(f"{label} must not be an absolute path")
+    return name
