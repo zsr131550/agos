@@ -34,6 +34,10 @@ def review_command(
         typer.echo(str(exc), err=True)
         raise typer.Exit(code=1) from exc
 
+    if packet_only and ingest is not None:
+        typer.echo("--packet-only and --ingest cannot be used together", err=True)
+        raise typer.Exit(code=2)
+
     service = ReviewService(repo_paths(repo_root))
 
     if packet_only:

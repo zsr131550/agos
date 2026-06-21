@@ -85,3 +85,26 @@ def test_review_ingest_writes_report_and_prints_findings(monkeypatch, tmp_repo):
     assert f"reviews/{review_id}/findings.json" in result.stdout
     assert "finding-01: Risk" in result.stdout
     assert (paths.reviews / review_id / "findings.json").exists()
+
+
+def test_review_rejects_packet_only_with_ingest(monkeypatch, tmp_repo):
+    paths = _active_task(tmp_repo)
+    monkeypatch.chdir(tmp_repo)
+    ingest_path = tmp_repo / "findings.json"
+    ingest_path.write_text(json.dumps({"findings": []}), encoding="utf-8")
+
+    result = runner.invoke(
+        app,
+        [
+            "review",
+            "--packet-only",
+            "--ingest",
+            str(ingest_path),
+            "--review-id",
+            "review-conflicting",
+        ],
+    )
+
+    assert result.exit_code == 2
+    assert "--packet-only and --ingest cannot be used together" in result.stderr
+    assert not (paths.reviews / "review-conflicting" / "findings.json").exists()
