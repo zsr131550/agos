@@ -7,6 +7,7 @@ from agos import __version__
 from agos.cli.cmd_ci import ci_local_command
 from agos.cli.cmd_checkpoint import checkpoint_command
 from agos.cli.cmd_init import init_command
+from agos.cli.cmd_review import review_command
 from agos.cli.cmd_start import start_command
 from agos.cli.cmd_task import task_app
 
@@ -32,6 +33,7 @@ app.command("init")(init_command)
 app.command("start")(start_command)
 app.command("checkpoint")(checkpoint_command)
 app.command("ci")(ci_local_command)
+app.command("review")(review_command)
 app.add_typer(task_app, name="task")
 
 
