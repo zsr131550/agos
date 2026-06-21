@@ -4,6 +4,8 @@ from __future__ import annotations
 import typer
 
 from agos import __version__
+from agos.cli.cmd_ci import ci_local_command
+from agos.cli.cmd_checkpoint import checkpoint_command
 from agos.cli.cmd_init import init_command
 from agos.cli.cmd_start import start_command
 
@@ -27,6 +29,8 @@ def version() -> None:
 
 app.command("init")(init_command)
 app.command("start")(start_command)
+app.command("checkpoint")(checkpoint_command)
+app.command("ci")(ci_local_command)
 
 
 if __name__ == "__main__":
