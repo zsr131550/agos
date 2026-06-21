@@ -4,6 +4,8 @@ from __future__ import annotations
 import typer
 
 from agos import __version__
+from agos.cli.cmd_init import init_command
+from agos.cli.cmd_start import start_command
 
 app = typer.Typer(
     name="agos",
@@ -21,6 +23,10 @@ def main() -> None:
 def version() -> None:
     """Print the AGOS version and exit."""
     typer.echo(__version__)
+
+
+app.command("init")(init_command)
+app.command("start")(start_command)
 
 
 if __name__ == "__main__":
