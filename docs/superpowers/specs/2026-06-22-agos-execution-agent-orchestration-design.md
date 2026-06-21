@@ -1,0 +1,508 @@
+# AGOS Execution Agent Orchestration Design
+
+**Status:** Draft approved for spec capture
+**Date:** 2026-06-22
+**Scope:** v0.3 minimal closed loop
+
+## Context
+
+AGOS is a governance layer. It records, verifies, arbitrates, and enforces; it
+does not become another coding agent.
+
+The v0.2 Review layer is already in place. It creates deterministic review
+packets, ingests normalized findings, resolves findings with evidence, and
+blocks closeout while blocking findings remain open.
+
+The execution layer should now add the smallest useful closed loop:
+
+```text
+execution plan
+  -> isolated worktree
+  -> candidate patch
+  -> candidate test
+  -> candidate review
+  -> arbiter decision
+  -> controlled apply
+```
+
+The first backend is local git worktrees plus fake/local workers. This lets AGOS
+prove the candidate patch protocol before connecting Codex, Multica, LangGraph,
+or remote worker platforms.
+
+## Goals
+
+- Add execution orchestration without weakening Review layer guarantees.
+- Ensure workers never write directly to the governed main working tree.
+- Represent each worker output as a hash-addressed candidate patch.
+- Test, review, decide, and apply candidates through explicit commands.
+- Ledger every state transition that affects governance.
+- Keep the first implementation filesystem-first and easy to test.
+
+## Non-Goals
+
+- No automatic code generation by AGOS.
+- No LangGraph dependency.
+- No automatic merge of multiple competing patches.
+- No direct concurrent writes into the governed working tree.
+- No replacement for Codex, Multica, Aider, Cline, OpenHands, or other coding
+  agents.
+- No cloud coordination service.
+
+## Recommended Approach
+
+Use a native minimal closed-loop execution orchestrator:
+
+1. `agos execute-plan --plan <file>` validates a plan and creates isolated
+   workspaces for subtasks.
+2. A fake/local worker or human/agent edits only the isolated worktree.
+3. `agos candidate submit <subtask-id>` captures the worktree diff as a
+   candidate patch evidence artifact.
+4. `agos candidate test <candidate-id>` applies the candidate in a temporary
+   verification workspace and records gate output.
+5. `agos candidate review <candidate-id>` reuses the Review layer with
+   `diff_kind="candidate_patch"`.
+6. `agos candidate decide <candidate-id>` records an arbiter decision.
+7. `agos candidate apply <candidate-id>` verifies all guards and applies the
+   patch to the governed repo.
+
+This keeps the first version useful even before real coding-agent adapters are
+connected.
+
+## Architecture
+
+```text
+                          AGOS CLI
+       execute-plan / candidate submit / test / review / decide / apply
+                              |
+                              v
+                    Execution Orchestration Core
+                              |
+          +-------------------+-------------------+
+          |                                       |
+          v                                       v
+   Workspace Manager                      Candidate Store
+   git worktree creation                  patches + metadata
+          |                                       |
+          v                                       v
+   isolated worker dirs             tests + Review reports + decisions
+          |                                       |
+          +-------------------+-------------------+
+                              |
+                              v
+                    Controlled Apply Guard
+                              |
+                              v
+                  governed repo + task ledger
+```
+
+The execution core depends on existing task, status, ledger, repo, gates, and
+Review services. The Review layer does not depend on execution internals except
+for receiving candidate patch refs as review packet input.
+
+## Core Models
+
+### ExecutionPlan
+
+An execution plan is a user-authored or planner-authored document:
+
+```yaml
+id: execution-plan-01
+task_id: agos-...
+max_parallel: 2
+requires_candidate_review: true
+subtasks:
+  - id: subtask-core-models
+    title: Add execution models
+    intent: Define execution plan, candidate, and decision schemas.
+    depends_on: []
+    write_scope:
+      - src/agos/core/execution.py
+      - tests/core/test_execution.py
+    worker:
+      adapter: local_worktree
+      role: worker_agent
+```
+
+Rules:
+
+- `task_id` must match the active AGOS task.
+- `max_parallel` controls workspace setup and later worker dispatch.
+- `requires_candidate_review` defaults to true.
+- Every subtask must declare a non-empty `write_scope`.
+- Overlapping write scopes are allowed only when subtasks are serialized by
+  dependencies or when the plan explicitly marks them as requiring arbiter
+  merge review.
+
+### ExecutionSubtask
+
+Each subtask is a bounded unit of writable work:
+
+```yaml
+id: subtask-core-models
+title: Add execution models
+intent: Define data models for the execution layer.
+depends_on: []
+write_scope:
+  - src/agos/core/execution.py
+status: pending
+workspace_ref: execution/workspaces/subtask-core-models.json
+```
+
+Statuses:
+
+```text
+pending
+workspace_ready
+running
+completed
+blocked
+cancelled
+```
+
+The v0.3 implementation does not need to run a real autonomous worker. It only
+needs to create the workspace, record the assignment, and let a local/fake
+worker produce a diff.
+
+### WorkspaceBinding
+
+A workspace binding records where isolated work happens:
+
+```yaml
+subtask_id: subtask-core-models
+kind: git_worktree
+path: ../.agos-worktrees/agos-.../subtask-core-models
+base_ref: main
+base_commit: abc123
+created_at: "2026-06-22T00:00:00Z"
+```
+
+Rules:
+
+- The path must be outside the governed working tree root.
+- The resolved path must be under a task-owned configured worktree root such as
+  `../.agos-worktrees/<task-id>/<subtask-id>/`.
+- The workspace base commit must be recorded.
+- AGOS must reject any workspace path that resolves inside the governed working
+  tree root.
+
+### CandidatePatch
+
+A candidate patch is the only artifact that can move from an isolated workspace
+toward the governed repo:
+
+```yaml
+id: candidate-01
+task_id: agos-...
+subtask_id: subtask-core-models
+source_agent: local_worktree
+workspace_ref: execution/workspaces/subtask-core-models.json
+patch_ref: evidence/candidate_patches/candidate-01.patch
+patch_sha256: ...
+base_commit: abc123
+summary: Add execution data models and validation.
+status: proposed
+test_refs: []
+review_refs: []
+decision_ref: null
+created_at: "2026-06-22T00:00:00Z"
+```
+
+Statuses:
+
+```text
+proposed
+testing
+tested
+reviewing
+reviewed
+accepted
+rejected
+applied
+superseded
+```
+
+Rules:
+
+- The patch file is immutable once submitted.
+- The stored SHA-256 must match the patch bytes before every test, review, or
+  apply action.
+- The patch must not touch files outside the subtask `write_scope`.
+- A candidate cannot be applied from `proposed` directly.
+
+### CandidateTestRun
+
+Candidate tests run outside the governed main tree:
+
+```yaml
+id: candidate-test-01
+candidate_id: candidate-01
+command: python -m pytest tests/core/test_execution.py -q
+state: passed
+evidence_ref: gates/candidate-01-tests_pass-....log
+started_at: "2026-06-22T00:00:00Z"
+completed_at: "2026-06-22T00:01:00Z"
+```
+
+Rules:
+
+- Gate commands should reuse the existing AGOS gate command runner.
+- Tests apply the candidate to a temporary verification workspace, not directly
+  to the governed main tree.
+- A failing test keeps the candidate test evidence but prevents acceptance
+  unless a human arbiter explicitly rejects or supersedes it.
+
+### ArbiterDecision
+
+The arbiter records why a candidate may or may not be applied:
+
+```yaml
+id: decision-01
+candidate_id: candidate-01
+decision: accepted
+reason: Tests pass, no open blocking candidate review findings, patch is in scope.
+evidence_refs:
+  - evidence/candidate_patches/candidate-01.patch
+  - reviews/review-.../findings.json
+  - gates/candidate-01-tests_pass-....log
+decided_by: local_user
+created_at: "2026-06-22T00:02:00Z"
+```
+
+Decision values:
+
+```text
+accepted
+rejected
+superseded
+needs_changes
+```
+
+## CLI Surface
+
+The minimal closed loop adds:
+
+```text
+agos execute-plan --plan execution-plan.json
+agos candidate list
+agos candidate submit <subtask-id> [--summary "..."]
+agos candidate test <candidate-id> [--gate tests_pass]
+agos candidate review <candidate-id>
+agos candidate decide <candidate-id> --decision accepted|rejected|superseded|needs-changes --reason "..."
+agos candidate apply <candidate-id>
+```
+
+Optional debug commands can be added after the loop is stable:
+
+```text
+agos candidate show <candidate-id>
+agos candidate diff <candidate-id>
+agos execute-plan status
+```
+
+## Filesystem Layout
+
+Execution artifacts live under the active task:
+
+```text
+.agos/tasks/current/
+  execution/
+    plan.json
+    subtasks/
+      subtask-core-models.json
+    workspaces/
+      subtask-core-models.json
+    candidates/
+      candidate-01.json
+    tests/
+      candidate-test-01.json
+    decisions/
+      decision-01.json
+  evidence/
+    candidate_patches/
+      candidate-01.patch
+    execution/
+      execute-plan-....log
+      candidate-apply-....log
+```
+
+Git worktrees may be created under a sibling task-owned directory such as:
+
+```text
+../.agos-worktrees/<task-id>/<subtask-id>/
+```
+
+The execution metadata under `.agos/tasks/current/execution/workspaces/` stores
+the binding record, while the actual git worktree lives outside the governed
+working tree.
+
+## Ledger Events
+
+Add these event types:
+
+```text
+execution_plan_created
+subtask_workspace_created
+subtask_started
+subtask_completed
+subtask_blocked
+candidate_patch_created
+candidate_test_started
+candidate_test_completed
+candidate_review_started
+candidate_review_completed
+candidate_decision_recorded
+candidate_applied
+candidate_rejected
+candidate_superseded
+```
+
+Every event that changes execution state must include:
+
+- `task_id`
+- relevant `subtask_id` or `candidate_id`
+- evidence refs when available
+- the current ledger hash produced by the ledger append
+
+## Candidate Apply Guards
+
+`agos candidate apply` must fail unless all conditions are true:
+
+1. The active task exists and is not closed out.
+2. The candidate exists and is not already applied.
+3. The candidate patch file exists.
+4. The patch SHA-256 matches `patch_sha256`.
+5. The candidate base commit is compatible with the current governed repo head,
+   or the patch applies cleanly with a recorded three-way strategy.
+6. The patch touches only files declared in the subtask `write_scope`.
+7. At least one required candidate test has passed.
+8. If `requires_candidate_review` is true, the candidate has a completed Review
+   packet/report with no open blocking findings.
+9. The latest arbiter decision for the candidate is `accepted`.
+10. No other accepted/applied candidate conflicts with the same files unless
+    the arbiter decision explicitly includes conflict evidence.
+
+After successful apply:
+
+- Apply the patch to the governed working tree.
+- Mark the candidate `applied`.
+- Append `candidate_applied`.
+- Preserve the patch, decision, review, and test evidence refs.
+
+## Review Integration
+
+Candidate review reuses the existing Review layer:
+
+```text
+ReviewService.create_packet(
+  diff_kind="candidate_patch",
+  diff_evidence_ref="evidence/candidate_patches/candidate-01.patch"
+)
+```
+
+The candidate metadata stores the resulting review refs. A candidate is
+review-ready only when the review report exists. A candidate is apply-ready only
+when no blocking finding in that candidate review remains open.
+
+The Review layer remains read-only. It never mutates workspaces, patches, or the
+governed repo.
+
+## Worker Backend
+
+The first worker backend is `local_worktree`.
+
+Responsibilities:
+
+- Create or validate an isolated git worktree for the subtask.
+- Record workspace metadata.
+- Allow an external human, fake worker, or local tool to edit that workspace.
+- Capture `git diff` from the workspace during `candidate submit`.
+
+Test-only fake workers may be used to create deterministic changes in temp repos
+so the execution protocol can be tested end to end. Production AGOS should treat
+fake workers as a test adapter, not as an autonomous implementation engine.
+
+Future worker backends can implement the same candidate patch contract:
+
+- `codex_worktree`
+- `multica_patch_export`
+- `remote_branch`
+- `pull_request`
+
+## Error Handling
+
+- Invalid plan: reject before creating workspaces.
+- Overlapping write scopes: reject unless dependencies serialize the subtasks or
+  explicit arbiter merge review is enabled.
+- Worktree creation failure: mark subtask `blocked` and record the error log.
+- Dirty governed repo at apply time: reject unless the dirty files are outside
+  the candidate patch scope and policy allows it.
+- Patch hash mismatch: hard block test, review, decide, and apply.
+- Patch outside write scope: reject the candidate.
+- Candidate test failure: keep evidence and prevent `accepted` decision unless
+  the user records a rejection, superseded candidate, or needs-changes decision.
+- Review with open blocking findings: prevent apply.
+- Patch conflict: reject apply and record conflict evidence.
+- Ledger mismatch: hard block execution commands until the existing ledger
+  repair or reset process is used.
+
+## Testing Strategy
+
+Core tests:
+
+- Execution plan validates active task id, subtasks, dependencies, and write
+  scopes.
+- Workspace binding rejects paths inside the governed working tree.
+- Candidate patch creation stores immutable patch bytes and SHA-256.
+- Candidate patch validation rejects hash mismatches.
+- Candidate patch validation rejects files outside `write_scope`.
+- Candidate state transitions reject invalid jumps such as `proposed -> applied`.
+- Arbiter decisions require non-empty reasons and evidence refs for accepted
+  candidates.
+
+Service tests:
+
+- `execute-plan` writes plan, subtask, workspace metadata, and ledger events.
+- `candidate submit` captures a worktree diff as patch evidence.
+- `candidate test` uses a temporary verification workspace and records gate
+  evidence.
+- `candidate review` creates a Review packet with `diff_kind="candidate_patch"`.
+- `candidate apply` blocks without tests, review, accepted decision, or valid
+  hash.
+- `candidate apply` applies a valid candidate and records `candidate_applied`.
+
+CLI tests:
+
+- `agos execute-plan --plan` creates workspaces.
+- `agos candidate list` shows candidate statuses.
+- `agos candidate submit/test/review/decide/apply` cover the happy path.
+- CLI errors are clear for missing task, missing candidate, invalid status, and
+  failed guards.
+
+Integration tests:
+
+- Use temp git repos and fake workers.
+- Avoid requiring Multica or Codex for v0.3 correctness.
+- Keep real executor smoke tests opt-in.
+
+## Acceptance Criteria
+
+- AGOS can create isolated workspaces from an execution plan.
+- AGOS can submit a worktree diff as a hash-addressed candidate patch.
+- Candidate tests run outside the governed main working tree.
+- Candidate review reuses the v0.2 Review layer.
+- Blocking candidate review findings prevent apply.
+- Candidate apply requires a valid patch hash, in-scope files, passing tests,
+  completed review, and accepted arbiter decision.
+- All execution state changes are persisted and ledgered.
+- The implementation can be tested end to end with a fake/local worker backend.
+
+## Implementation Order
+
+1. Add execution models and store.
+2. Add plan validation and workspace binding.
+3. Add candidate patch submission and hash validation.
+4. Add candidate test command using temporary verification workspaces.
+5. Add candidate review integration.
+6. Add arbiter decision recording.
+7. Add guarded candidate apply.
+8. Add README updates and full verification.
