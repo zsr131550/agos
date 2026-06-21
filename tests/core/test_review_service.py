@@ -126,6 +126,106 @@ def test_ingest_findings_rejects_missing_packet_review_id(tmp_repo):
     assert "review_completed" not in _ledger_types(paths)
 
 
+def test_ingest_findings_rejects_non_open_finding_without_ledger_events(tmp_repo):
+    paths = _active_task(tmp_repo)
+    service = ReviewService(paths)
+    _packet_ref, packet = service.create_packet(diff_kind="governed_repo_diff")
+    original_ledger_types = _ledger_types(paths)
+    finding = Finding(
+        id="finding-01",
+        review_id=packet.review_id,
+        source_agent="security_reviewer",
+        category="security",
+        severity="high",
+        blocking=True,
+        title="Risk",
+        body="Risk body.",
+        status="false_positive",
+        resolution=FindingResolution(
+            status="false_positive",
+            rationale="Reviewer says this is not exploitable.",
+        ),
+    )
+
+    with pytest.raises(ValueError, match="ingested findings must be open"):
+        service.ingest_findings(packet.review_id, [finding])
+
+    assert not (paths.reviews / packet.review_id / "findings.json").exists()
+    assert not (paths.reviews / packet.review_id / "report.md").exists()
+    assert _ledger_types(paths) == original_ledger_types
+
+
+def test_ingest_findings_rejects_accepted_risk_resolution_without_ledger_events(tmp_repo):
+    paths = _active_task(tmp_repo)
+    service = ReviewService(paths)
+    _packet_ref, packet = service.create_packet(diff_kind="governed_repo_diff")
+    original_ledger_types = _ledger_types(paths)
+    finding = Finding(
+        id="finding-01",
+        review_id=packet.review_id,
+        source_agent="security_reviewer",
+        category="security",
+        severity="high",
+        blocking=True,
+        title="Risk",
+        body="Risk body.",
+        status="accepted_risk",
+        resolution=FindingResolution(
+            status="accepted_risk",
+            rationale="Reviewer accepted the risk.",
+            approved_by="reviewer",
+        ),
+    )
+
+    with pytest.raises(ValueError, match="ingested findings must be open"):
+        service.ingest_findings(packet.review_id, [finding])
+
+    assert not (paths.reviews / packet.review_id / "findings.json").exists()
+    assert _ledger_types(paths) == original_ledger_types
+
+
+def test_ingest_findings_rejects_duplicate_review_report_and_keeps_open_blocker(tmp_repo):
+    paths = _active_task(tmp_repo)
+    service = ReviewService(paths)
+    _packet_ref, packet = service.create_packet(diff_kind="governed_repo_diff")
+    original_finding = Finding(
+        id="finding-01",
+        review_id=packet.review_id,
+        source_agent="test_reviewer",
+        category="test",
+        severity="medium",
+        blocking=True,
+        title="Missing test",
+        body="A test is missing.",
+    )
+    service.ingest_findings(packet.review_id, [original_finding])
+    original_report = (paths.reviews / packet.review_id / "findings.json").read_text(
+        encoding="utf-8"
+    )
+    original_ledger_types = _ledger_types(paths)
+    replacement_finding = Finding(
+        id="finding-02",
+        review_id=packet.review_id,
+        source_agent="test_reviewer",
+        category="test",
+        severity="low",
+        blocking=False,
+        title="Typo",
+        body="A typo is present.",
+    )
+
+    with pytest.raises(ValueError, match="review report already exists"):
+        service.ingest_findings(packet.review_id, [replacement_finding])
+
+    assert (paths.reviews / packet.review_id / "findings.json").read_text(
+        encoding="utf-8"
+    ) == original_report
+    assert service.open_blocking_findings()[0].id == "finding-01"
+    with pytest.raises(ValueError, match="open blocking findings: finding-01"):
+        service.closeout()
+    assert _ledger_types(paths) == original_ledger_types
+
+
 def test_ingest_findings_rejects_duplicate_finding_ids_across_reports(tmp_repo):
     paths = _active_task(tmp_repo)
     service = ReviewService(paths)

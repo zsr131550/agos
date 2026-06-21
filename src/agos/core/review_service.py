@@ -79,7 +79,9 @@ class ReviewService:
         packet_path = self._packet_path(review_id)
         if not packet_path.is_file():
             raise ValueError(f"review packet not found: {review_id}")
+        self._validate_report_not_existing(review_id)
         self._validate_unique_finding_ids(normalized)
+        self._validate_ingested_findings_are_open(normalized)
         report = ReviewReport(
             review_id=review_id,
             task_id=task.id,
@@ -226,6 +228,18 @@ class ReviewService:
 
     def _packet_path(self, review_id: str) -> Path:
         return self.paths.reviews / review_id / "packet.json"
+
+    def _report_path(self, review_id: str) -> Path:
+        return self.paths.reviews / review_id / "findings.json"
+
+    def _validate_report_not_existing(self, review_id: str) -> None:
+        if self._report_path(review_id).is_file():
+            raise ValueError(f"review report already exists: {review_id}")
+
+    def _validate_ingested_findings_are_open(self, findings: list[Finding]) -> None:
+        for finding in findings:
+            if finding.status != "open" or finding.resolution is not None:
+                raise ValueError("ingested findings must be open and unresolved")
 
     def _validate_unique_finding_ids(self, findings: list[Finding]) -> None:
         incoming_ids = [finding.id for finding in findings]
