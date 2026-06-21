@@ -57,7 +57,7 @@ def test_start_writes_task_status_and_dispatches(monkeypatch, tmp_repo):
     assert task_data["title"] == "Implement Task 9"
     assert task_data["intent"] == "Ship init/start"
     assert task_data["executor"]["agent"] == "Lambda"
-    assert [gate["id"] for gate in task_data["gates"]] == ["tests_pass", "build_clean"]
+    assert task_data["gates"] == ["tests_pass", "build_clean"]
 
     status = json.loads((tmp_repo / ".agos" / "tasks" / "current" / "status.json").read_text(encoding="utf-8"))
     assert status["phase"] == "executing"
@@ -106,7 +106,7 @@ def test_start_uses_gate_override_when_provided(monkeypatch, tmp_repo):
     task_data = yaml.safe_load(
         (tmp_repo / ".agos" / "tasks" / "current" / "task.yaml").read_text(encoding="utf-8")
     )
-    assert [gate["id"] for gate in task_data["gates"]] == ["build_clean"]
+    assert task_data["gates"] == ["build_clean"]
 
     ledger_path = tmp_repo / ".agos" / "tasks" / "current" / "ledger.jsonl"
     records = [json.loads(line) for line in ledger_path.read_text(encoding="utf-8").splitlines()]

@@ -1,53 +1,107 @@
-"""Task status models."""
+"""`status.json`: a derived cache of the ledger, never an independent truth source."""
 from __future__ import annotations
 
-import json
-from pathlib import Path
+from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 
 from agos.core.adapter import ExecutorRun
+from agos.core.ledger import Ledger
+from agos.core.repo import AgosPaths
 from agos.core.task import Task
 
 
-class GateState(BaseModel):
-    state: str = "unknown"
-    last_evaluated: str | None = None
+class ExecutorRunInfo(BaseModel):
+    """Pydantic mirror of `ExecutorRun` for `status.json` serialization."""
 
-
-class ExecutorRunState(BaseModel):
     adapter: str
     run_id: str
     issue_id: str | None = None
 
 
-class TaskStatus(BaseModel):
+class GateState(BaseModel):
+    """Derived state for one configured gate."""
+
+    state: Literal["unknown", "pass", "block"] = "unknown"
+    last_evaluated: str | None = None
+
+
+class Status(BaseModel):
+    """Current derived view of the active task."""
+
     task_id: str
-    phase: str
-    executor_run: ExecutorRunState
-    gates: dict[str, GateState] = Field(default_factory=dict)
+    phase: Literal["executing", "gated", "done", "blocked"] = "executing"
+    executor_run: ExecutorRunInfo | None = None
+    gates: dict[str, GateState]
     ledger_head_hash: str
+    last_event_seq: int | None = None
 
     @classmethod
     def for_started_task(
-        cls, *, task: Task, run: ExecutorRun, ledger_head_hash: str
-    ) -> "TaskStatus":
+        cls,
+        *,
+        task: Task,
+        run: ExecutorRun,
+        ledger_head_hash: str,
+    ) -> "Status":
         return cls(
             task_id=task.id,
             phase="executing",
-            executor_run=ExecutorRunState(
+            executor_run=ExecutorRunInfo(
                 adapter=run.adapter,
                 run_id=run.run_id,
                 issue_id=run.issue_id,
             ),
-            gates={gate.id: GateState() for gate in task.gates},
+            gates={gate_id: GateState() for gate_id in task.gates},
             ledger_head_hash=ledger_head_hash,
+            last_event_seq=None,
         )
 
-    def save(self, path: Path) -> None:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(
-            json.dumps(self.model_dump(mode="python"), indent=2) + "\n",
-            encoding="utf-8",
-        )
 
+TaskStatus = Status
+
+
+def load_status(paths: AgosPaths) -> Status | None:
+    """Read `status.json`, or return `None` when no status exists."""
+
+    if not paths.status_json.exists():
+        return None
+    return Status.model_validate_json(paths.status_json.read_text(encoding="utf-8"))
+
+
+def save_status(status: Status, paths: AgosPaths) -> None:
+    """Persist `status.json` under the current task directory."""
+
+    paths.status_json.parent.mkdir(parents=True, exist_ok=True)
+    paths.status_json.write_text(status.model_dump_json(indent=2), encoding="utf-8")
+
+
+def derive_status(
+    paths: AgosPaths,
+    task_id: str,
+    gates: list[str],
+    ledger: Ledger,
+    executor_run: ExecutorRun | None,
+    last_event_seq: int | None,
+    gate_states: dict[str, GateState] | None,
+) -> Status:
+    """Rebuild status from ledger state plus the current gate results."""
+
+    del paths
+
+    states = {gate_id: (gate_states or {}).get(gate_id, GateState()) for gate_id in gates}
+    run_info = None
+    if executor_run is not None:
+        run_info = ExecutorRunInfo(
+            adapter=executor_run.adapter,
+            run_id=executor_run.run_id,
+            issue_id=executor_run.issue_id,
+        )
+    return Status(
+        task_id=task_id,
+        phase="executing",
+        executor_run=run_info,
+        gates=states,
+        ledger_head_hash=ledger.head_hash(),
+        last_event_seq=last_event_seq,
+    )

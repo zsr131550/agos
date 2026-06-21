@@ -1,28 +1,21 @@
 """`agos start` command."""
 from __future__ import annotations
 
-from pathlib import Path
-
 import typer
-from ulid import ULID
 
 from agos.adapters.multica import MulticaAdapter
-from agos.core.config import AGOSConfig
+from agos.core.config import load_config, resolve_gates
+from agos.core.gate import gates_locked_payload
 from agos.core.ledger import append_task_record
-from agos.core.repo import config_path, current_task_dir, current_task_is_active, find_repo_root
-from agos.core.status import TaskStatus
-from agos.core.task import Task, TaskExecutorConfig
-
+from agos.core.repo import current_task_dir, current_task_is_active, find_repo_root, repo_paths
+from agos.core.status import TaskStatus, save_status
+from agos.core.task import ExecutorBinding, Task, new_task_id
 
 def _parse_gate_overrides(gate_values: list[str] | None) -> list[str]:
     overrides: list[str] = []
     for value in gate_values or []:
         overrides.extend(part.strip() for part in value.split(",") if part.strip())
     return overrides
-
-
-def _current_task_paths(task_dir: Path) -> tuple[Path, Path, Path]:
-    return task_dir / "task.yaml", task_dir / "ledger.jsonl", task_dir / "status.json"
 
 
 def start_command(
@@ -39,48 +32,50 @@ def start_command(
         typer.echo("Active task already exists in .agos/tasks/current", err=True)
         raise typer.Exit(code=1)
 
-    config = AGOSConfig.load(config_path(repo_root))
+    config = load_config(repo_root)
     workflow_name = workflow or config.default_workflow
     overrides = _parse_gate_overrides(gate)
     try:
-        resolved_gates = config.resolve_gates(workflow_name, overrides or None)
-    except ValueError as exc:
+        resolved_gates = resolve_gates(config, workflow_name, override=overrides or None)
+    except KeyError as exc:
         typer.echo(str(exc), err=True)
         raise typer.Exit(code=1) from exc
 
+    gate_ids = [gate_spec.id for gate_spec in resolved_gates]
     task = Task(
-        id=f"agos-{ULID()}",
+        id=f"agos-{new_task_id()}",
         title=title,
-        intent=intent,
+        intent=intent or "",
         workflow=workflow_name,
-        gates=resolved_gates,
-        executor=TaskExecutorConfig(
+        gates=gate_ids,
+        executor=ExecutorBinding(
             adapter=config.executor.name,
             agent=config.executor.agent,
         ),
     )
 
-    task_yaml_path, ledger_path, status_path = _current_task_paths(task_dir)
+    paths = repo_paths(repo_root)
     task_dir.mkdir(parents=True, exist_ok=True)
-    task.save(task_yaml_path)
+    task.save(paths.task_yaml)
 
     append_task_record(
-        ledger_path,
+        paths.ledger,
         "task_started",
         task_id=task.id,
         title=task.title,
         workflow=task.workflow,
     )
     append_task_record(
-        ledger_path,
+        paths.ledger,
         "gates_locked",
         task_id=task.id,
-        gates=[gate_config.model_dump(mode="python") for gate_config in task.gates],
+        gates=gates_locked_payload(resolved_gates),
     )
 
     if task.executor.adapter != "multica":
         typer.echo(f"Unsupported executor '{task.executor.adapter}'", err=True)
         raise typer.Exit(code=1)
+
     adapter = MulticaAdapter()
     try:
         run = adapter.start(task)
@@ -89,7 +84,7 @@ def start_command(
         raise typer.Exit(code=1) from exc
 
     final_record = append_task_record(
-        ledger_path,
+        paths.ledger,
         "executor_dispatched",
         task_id=task.id,
         adapter=run.adapter,
@@ -97,7 +92,6 @@ def start_command(
         issue_id=run.issue_id,
     )
     status = TaskStatus.for_started_task(task=task, run=run, ledger_head_hash=final_record["hash"])
-    status.save(status_path)
+    save_status(status, paths)
 
     typer.echo(run.issue_id or run.run_id)
-
