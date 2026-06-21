@@ -95,6 +95,8 @@ def _safe_component(name: str, label: str) -> str:
         raise ValueError(f"{label} must be a non-empty path component")
     if "/" in name or "\\" in name:
         raise ValueError(f"{label} must not contain path separators")
+    if any(char in name for char in '<>:"/\\|?*'):
+        raise ValueError(f"{label} must not contain reserved filename characters")
     if name == "." or ".." in name:
         raise ValueError(f"{label} must not contain special path components")
     if PurePosixPath(name).is_absolute() or PureWindowsPath(name).is_absolute():
