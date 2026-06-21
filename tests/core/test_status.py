@@ -1,0 +1,71 @@
+"""Tests for status.json (derived cache of the ledger)."""
+from __future__ import annotations
+
+from pathlib import Path
+
+from agos.core.ledger import Ledger
+from agos.core.repo import repo_paths
+from agos.core.status import GateState, Status, derive_status, load_status, save_status
+
+
+def test_save_and_load_status(tmp_repo: Path):
+    paths = repo_paths(tmp_repo)
+    status = Status(
+        task_id="T1",
+        phase="executing",
+        gates={"tests_pass": GateState()},
+        ledger_head_hash="abc",
+        last_event_seq=None,
+    )
+    save_status(status, paths)
+    loaded = load_status(paths)
+    assert loaded == status
+
+
+def test_load_status_none_when_absent(tmp_repo: Path):
+    paths = repo_paths(tmp_repo)
+    assert load_status(paths) is None
+
+
+def test_derive_status_uses_ledger_head(tmp_repo: Path):
+    paths = repo_paths(tmp_repo)
+    ledger = Ledger(paths.ledger)
+    ledger.append({"type": "task_started", "task_id": "T1"})
+    ledger.append({"type": "checkpoint"})
+    status = derive_status(
+        paths,
+        task_id="T1",
+        gates=["tests_pass"],
+        ledger=ledger,
+        executor_run=None,
+        last_event_seq=5,
+        gate_states=None,
+    )
+    assert status.task_id == "T1"
+    assert status.ledger_head_hash == ledger.head_hash()
+    assert status.last_event_seq == 5
+    assert status.phase == "executing"
+    assert set(status.gates) == {"tests_pass"}
+    assert status.gates["tests_pass"].state == "unknown"
+
+
+def test_derive_status_carries_gate_states(tmp_repo: Path):
+    paths = repo_paths(tmp_repo)
+    ledger = Ledger(paths.ledger)
+    ledger.append({"type": "task_started", "task_id": "T1"})
+    states = {
+        "tests_pass": GateState(
+            state="pass",
+            last_evaluated="2026-06-21T00:00:00Z",
+        )
+    }
+    status = derive_status(
+        paths,
+        task_id="T1",
+        gates=["tests_pass"],
+        ledger=ledger,
+        executor_run=None,
+        last_event_seq=None,
+        gate_states=states,
+    )
+    assert status.gates["tests_pass"].state == "pass"
