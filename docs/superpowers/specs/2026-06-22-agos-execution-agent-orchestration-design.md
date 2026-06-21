@@ -127,6 +127,8 @@ subtasks:
 Rules:
 
 - `task_id` must match the active AGOS task.
+- Plan files may be authored as YAML or JSON. AGOS persists the normalized plan
+  as JSON under the active task so later commands read one canonical shape.
 - `max_parallel` controls workspace setup and later worker dispatch.
 - `requires_candidate_review` defaults to true.
 - Every subtask must declare a non-empty `write_scope`.
@@ -332,10 +334,18 @@ agos execute-plan --plan execution-plan.json
 agos candidate list
 agos candidate submit <subtask-id> [--summary "..."]
 agos candidate test <candidate-id> [--gate tests_pass]
-agos candidate review <candidate-id>
+agos candidate review <candidate-id> [--packet-only]
+agos candidate review <candidate-id> --ingest findings.json --review-id review-...
 agos candidate decide <candidate-id> --decision accepted|rejected|superseded|needs-changes --reason "..."
 agos candidate apply <candidate-id>
 ```
+
+`agos candidate review <candidate-id> --packet-only` creates a Review packet and
+stores a started candidate review binding. `agos candidate review <candidate-id>
+--ingest ... --review-id ...` calls the generic Review ingest path, then updates
+that candidate binding to completed or failed. Plain `agos review --ingest`
+remains valid for task/global closeout review, but it must not satisfy
+`candidate apply` unless the execution layer records the candidate binding.
 
 `agos candidate test` runs the named task gate in a temporary verification
 workspace. If `--gate` is omitted, AGOS runs every gate in the active task.
@@ -427,14 +437,16 @@ Every event that changes execution state must include:
 5. The candidate patch applies cleanly to the current governed repo with
    `git apply --check`. V0.3 records the candidate `base_commit` for audit but
    does not perform three-way merge.
-6. The patch touches only files declared in the subtask `write_scope`.
-7. The candidate has a passed `patch_applies` dry run and a passed candidate
+6. The governed repo is not dirty in any file the candidate patch will touch.
+   The safest v0.3 policy is to reject a dirty governed repo entirely.
+7. The patch touches only files declared in the subtask `write_scope`.
+8. The candidate has a passed `patch_applies` dry run and a passed candidate
    test for every gate in the active task.
-8. If `requires_candidate_review` is true, the candidate has a completed Review
+9. If `requires_candidate_review` is true, the candidate has a completed Review
    packet/report bound to that candidate with no open blocking findings.
-9. The latest arbiter decision for the candidate is `accepted`.
-10. No other accepted/applied candidate conflicts with the same files unless
-    the arbiter decision explicitly includes conflict evidence.
+10. The latest arbiter decision for the candidate is `accepted`.
+11. No other accepted/applied candidate touches the same files. V0.3 does not
+    use conflict evidence to override this guard.
 
 After successful apply:
 
@@ -489,6 +501,14 @@ Before creating the Review packet, AGOS must verify:
 
 The Review packet input must include, directly or through stable refs:
 
+- Candidate identity: `task_id`, `subtask_id`, and `candidate_id`.
+- Patch identity: `patch_ref`, `patch_sha256`, and `base_commit`.
+- Scope identity: the normalized subtask `write_scope`.
+- Workspace identity: the candidate `workspace_ref`.
+- Verification identity: the passed `patch_applies` ref and the latest passed
+  candidate test ref for every active-task gate.
+- Ledger identity: the current task ledger head hash at packet creation time.
+
 V0.3 implements this by extending the v0.2 Review packet API with two optional
 generic fields:
 
@@ -521,6 +541,17 @@ review_refs:
     packet_ref: reviews/review-01/packet.json
     report_ref: reviews/review-01/findings.json
     raw_refs: []
+    patch_sha256: ...
+    base_commit: abc123
+    write_scope:
+      - src/agos/core/execution.py
+      - tests/core/test_execution.py
+    test_refs:
+      - gates/candidate-01-patch_applies-....log
+      - gates/candidate-01-tests_pass-....log
+    ledger_head_at_start: ...
+    ledger_head_at_completion: ...
+    open_blocking_count: 0
     state: completed
     created_at: "2026-06-22T00:00:00Z"
     completed_at: "2026-06-22T00:01:00Z"
@@ -538,6 +569,12 @@ failed
 and the candidate patch evidence ref. `candidate_review_completed` records
 `candidate_id`, `review_id`, `report_ref`, and `open_blocking_count`.
 
+The Review service remains generic and does not own this binding. The execution
+service owns the binding lifecycle: it creates the binding after
+`ReviewService.create_packet`, and it completes or fails the binding after
+`ReviewService.ingest_findings` returns. This is the only bridge required from
+execution to Review for v0.3.
+
 If review ingestion fails or produces malformed findings, AGOS must keep the
 raw evidence where available, mark that review binding as failed, and leave the
 candidate non-applyable.
@@ -550,8 +587,9 @@ candidate, ordered by ledger event order. It must reject when:
 - No completed candidate-bound review exists.
 - The selected `report_ref` is missing or does not match the bound `review_id`.
 - The selected report has any open blocking finding.
-- The candidate patch hash, write scope, or test refs changed after the selected
-  review was created.
+- The selected binding's `patch_sha256`, `base_commit`, normalized
+  `write_scope`, or `test_refs` do not match the current candidate/subtask/test
+  metadata.
 - The candidate lacks a passed `patch_applies` dry run.
 - Any active-task gate lacks a passed candidate test.
 
@@ -567,7 +605,10 @@ Responsibilities:
 - Create or validate an isolated git worktree for the subtask.
 - Record workspace metadata.
 - Allow an external human, fake worker, or local tool to edit that workspace.
-- Capture `git diff` from the workspace during `candidate submit`.
+- Capture a binary patch from the workspace during `candidate submit`, including
+  tracked changes and untracked files. The local git backend may use
+  intent-to-add or an equivalent mechanism so new files appear in the captured
+  patch. Empty patches are rejected.
 
 Test-only fake workers may be used to create deterministic changes in temp repos
 so the execution protocol can be tested end to end. Production AGOS should treat
@@ -586,8 +627,9 @@ Future worker backends can implement the same candidate patch contract:
 - Overlapping write scopes: reject unless dependencies fully serialize the
   overlapping subtasks.
 - Worktree creation failure: mark subtask `blocked` and record the error log.
-- Dirty governed repo at apply time: reject unless the dirty files are outside
-  the candidate patch scope and policy allows it.
+- Dirty governed repo at apply time: reject when dirty files overlap the
+  candidate patch scope. The default v0.3 implementation may reject any dirty
+  governed repo until a narrower dirty-file policy is implemented.
 - Patch hash mismatch: hard block test, review, decide, and apply.
 - Patch outside write scope: reject the candidate.
 - Candidate test failure: keep evidence and prevent `accepted` decision unless
@@ -606,6 +648,7 @@ Core tests:
   scopes.
 - Workspace binding rejects paths inside the governed working tree.
 - Candidate patch creation stores immutable patch bytes and SHA-256.
+- Candidate patch creation includes untracked files and rejects empty patches.
 - Candidate patch validation rejects hash mismatches.
 - Candidate patch validation rejects files outside `write_scope`.
 - Candidate test runs record one gate or `patch_applies` dry run per evidence
@@ -625,10 +668,14 @@ Service tests:
   `patch_applies` plus gate evidence.
 - `candidate review` creates a Review packet with `diff_kind="candidate_patch"`
   and records a candidate-bound review ref.
+- `candidate review --ingest` updates only the matching candidate review binding
+  and records `candidate_review_completed` with `open_blocking_count`.
 - `candidate apply` blocks without tests, review, accepted decision, or valid
   hash.
 - `candidate apply` ignores unrelated task/global reviews and uses only the
   latest completed candidate-bound review.
+- `candidate apply` rejects stale review bindings whose patch hash, base commit,
+  write scope, or test refs no longer match the candidate metadata.
 - `candidate apply` records `candidate_apply_blocked` evidence when
   `git apply --check` fails.
 - `candidate apply` applies a valid candidate and records `candidate_applied`.
@@ -653,6 +700,8 @@ Integration tests:
 - AGOS can submit a worktree diff as a hash-addressed candidate patch.
 - Candidate tests run outside the governed main working tree.
 - Candidate review reuses the v0.2 Review layer.
+- Candidate review completion is recorded by the execution layer after Review
+  ingest, without making Review import execution models.
 - Blocking candidate review findings prevent apply.
 - Candidate apply requires a valid patch hash, in-scope files, passed
   `patch_applies`, passed active-task gates, completed review, and accepted

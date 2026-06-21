@@ -10,7 +10,7 @@ v0.1 ships the local advisory gate + hash-chained ledger + evidence plumbing. Se
 pip install -e ".[dev]"
 ```
 
-## Commands (v0.1)
+## Commands (v0.3 execution)
 
 ```
 agos init [--executor multica] [--agent "Lambda"]
@@ -18,6 +18,14 @@ agos start --title "..." [--intent "..."] [--workflow feature] [--gate tests_pas
 agos checkpoint [--follow] [--once]
 agos review --packet-only
 agos review --ingest findings.json --review-id review-...
+agos execute-plan --plan execution-plan.yaml
+agos candidate list
+agos candidate submit <subtask-id> [--summary "..."]
+agos candidate test <candidate-id> [--gate tests_pass]
+agos candidate review <candidate-id> [--packet-only]
+agos candidate review <candidate-id> --ingest findings.json --review-id review-...
+agos candidate decide <candidate-id> --decision accepted|rejected|superseded|needs-changes --reason "..."
+agos candidate apply <candidate-id>
 agos resolve <finding-id> --status resolved --evidence <ref> --rationale "..."
 agos closeout
 agos ci --local --stage <pre-commit|pre-push>
@@ -34,6 +42,9 @@ init -> start -> checkpoint --once -> ci --local
 The v0.2 review loop adds evidence-backed review findings:
 `review --packet-only -> external or human review -> review --ingest -> resolve -> closeout`.
 Blocking findings prevent closeout until they are resolved with evidence or explicitly accepted by a human.
+
+The v0.3 execution loop adds isolated candidate worktrees and guarded apply:
+`execute-plan -> candidate submit -> candidate test -> candidate review -> candidate decide -> candidate apply`.
 
 - The agent runs in multica's isolated workspace (`~/multica_workspaces/<per-task>/`), not in your repo.
 - `agos checkpoint` streams the agent's reported activity into an evidence ledger and records a governed-repo anchor (HEAD + status) at capture time. It does not claim the agent edited your working tree.
