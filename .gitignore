@@ -5,10 +5,12 @@ __pycache__/
 build/
 dist/
 .pytest_cache/
-.basetemp/
+.basetemp*/
+.basetemp_cov/
 .coverage
 .coverage.*
 htmlcov/
 .venv/
 venv/
 .agos/
+dist_test/

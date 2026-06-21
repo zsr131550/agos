@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 import subprocess
 import time
 from collections.abc import Iterator
@@ -25,13 +26,19 @@ STATUS_MAP = {
 }
 
 
+def resolve_multica_bin(multica_bin: str = "multica") -> str:
+    """Resolve the configured Multica CLI command to an executable path when possible."""
+
+    return shutil.which(multica_bin) or shutil.which(f"{multica_bin}.exe") or multica_bin
+
+
 class MulticaAdapter(ExecutorAdapter):
     """Dispatch tasks and poll run state via the `multica` CLI."""
 
     name = "multica"
 
     def __init__(self, multica_bin: str = "multica") -> None:
-        self._multica_bin = multica_bin
+        self._multica_bin = resolve_multica_bin(multica_bin)
 
     def _run(self, args: list[str]) -> subprocess.CompletedProcess[str]:
         full_args = [self._multica_bin, *args]
@@ -62,6 +69,18 @@ class MulticaAdapter(ExecutorAdapter):
             return {}
         return json.loads(stdout)
 
+    @staticmethod
+    def _extract_runs(payload: dict | list) -> list[dict]:
+        if isinstance(payload, list):
+            return [item for item in payload if isinstance(item, dict)]
+        return payload.get("runs", [])
+
+    @staticmethod
+    def _extract_messages(payload: dict | list) -> list[dict]:
+        if isinstance(payload, list):
+            return [item for item in payload if isinstance(item, dict)]
+        return payload.get("messages", [])
+
     def start(self, task: Task) -> ExecutorRun:
         description_parts = [part for part in [task.intent.strip()] if part]
         if task.acceptance:
@@ -79,6 +98,7 @@ class MulticaAdapter(ExecutorAdapter):
                 description,
                 "--assignee",
                 task.executor.agent,
+                "--allow-duplicate",
             ]
         )
         if proc.returncode != 0:
@@ -97,7 +117,7 @@ class MulticaAdapter(ExecutorAdapter):
                 f"multica issue runs failed with exit {runs_proc.returncode}: {runs_proc.stderr.strip()}"
             )
         runs_payload = self._load_json(runs_proc.stdout)
-        runs = runs_payload.get("runs", [])
+        runs = self._extract_runs(runs_payload)
         if not runs or not runs[0].get("id"):
             raise RuntimeError("multica issue runs returned no task run id")
 
@@ -121,7 +141,7 @@ class MulticaAdapter(ExecutorAdapter):
             )
 
         payload = self._load_json(proc.stdout)
-        for message in payload.get("messages", []):
+        for message in self._extract_messages(payload):
             yield Event(
                 seq=message["seq"],
                 ts=message.get("ts", ""),
@@ -140,7 +160,7 @@ class MulticaAdapter(ExecutorAdapter):
             )
 
         payload = self._load_json(proc.stdout)
-        runs = payload.get("runs", [])
+        runs = self._extract_runs(payload)
         status = runs[0].get("status") if runs else None
         state = STATUS_MAP.get(status or "", "running")
         return RunStatus(state=state, detail=status)

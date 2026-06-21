@@ -7,6 +7,7 @@ from pathlib import Path
 
 import typer
 
+from agos.adapters.multica import resolve_multica_bin
 from agos.core.config import AGOSConfig
 from agos.core.ledger import append_repo_record
 from agos.core.repo import agos_dir, config_path, find_repo_root, repo_ledger_path
@@ -19,15 +20,17 @@ def validate_multica_environment(executor: str) -> list[str]:
         return [f"Unsupported executor '{executor}'"]
 
     warnings: list[str] = []
+    multica_bin = resolve_multica_bin()
     commands = [
-        ["multica", "daemon", "status"],
-        ["multica", "workspace", "list", "--output", "json"],
+        [multica_bin, "daemon", "status"],
+        [multica_bin, "workspace", "list", "--output", "json"],
     ]
     for command in commands:
         completed = subprocess.run(command, capture_output=True, text=True, check=False)
         if completed.returncode != 0:
+            display_command = "multica " + " ".join(command[1:3])
             detail = completed.stderr.strip() or completed.stdout.strip() or "command failed"
-            warnings.append(f"{' '.join(command[:3])} failed: {detail}")
+            warnings.append(f"{display_command} failed: {detail}")
     return warnings
 
 

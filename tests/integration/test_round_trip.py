@@ -14,7 +14,23 @@ from pathlib import Path
 
 import pytest
 
+from agos.adapters.multica import resolve_multica_bin
+
 pytestmark = pytest.mark.integration
+
+
+def _integration_agent() -> str:
+    return os.environ.get("AGOS_INTEGRATION_AGENT", "Lambda")
+
+
+def _integration_title(repo_root: Path) -> str:
+    return f"smoke-{repo_root.parent.name}"
+
+
+def _extract_messages(payload: dict | list) -> list[dict]:
+    if isinstance(payload, list):
+        return [item for item in payload if isinstance(item, dict)]
+    return payload.get("messages", [])
 
 
 def _run(*args: str, cwd: Path, check: bool = True) -> subprocess.CompletedProcess[str]:
@@ -29,12 +45,13 @@ def _run(*args: str, cwd: Path, check: bool = True) -> subprocess.CompletedProce
 
 
 def _multica_ready() -> bool:
-    if shutil.which("multica") is None:
+    multica_bin = resolve_multica_bin()
+    if shutil.which(multica_bin) is None and not Path(multica_bin).exists():
         return False
 
     for command in (
-        ["multica", "daemon", "status"],
-        ["multica", "workspace", "list", "--output", "json"],
+        [multica_bin, "daemon", "status"],
+        [multica_bin, "workspace", "list", "--output", "json"],
     ):
         completed = subprocess.run(
             command,
@@ -49,12 +66,13 @@ def _multica_ready() -> bool:
 
 
 def _wait_for_messages(run_id: str, *, cwd: Path, timeout_seconds: int = 60) -> list[dict]:
+    multica_bin = resolve_multica_bin()
     deadline = time.time() + timeout_seconds
     last_stdout = ""
     last_stderr = ""
     while time.time() < deadline:
         completed = _run(
-            "multica",
+            multica_bin,
             "issue",
             "run-messages",
             run_id,
@@ -67,7 +85,7 @@ def _wait_for_messages(run_id: str, *, cwd: Path, timeout_seconds: int = 60) -> 
         last_stderr = completed.stderr
         if completed.returncode == 0:
             payload = json.loads(completed.stdout or "{}")
-            messages = payload.get("messages", [])
+            messages = _extract_messages(payload)
             if messages:
                 return messages
         time.sleep(2)
@@ -87,8 +105,8 @@ def _skip_unless_opted_in():
 
 
 def test_round_trip(tmp_repo: Path):
-    _run("agos", "init", "--executor", "multica", "--agent", "Lambda", cwd=tmp_repo)
-    _run("agos", "start", "--title", "smoke", "--workflow", "docs_only", cwd=tmp_repo)
+    _run("agos", "init", "--executor", "multica", "--agent", _integration_agent(), cwd=tmp_repo)
+    _run("agos", "start", "--title", _integration_title(tmp_repo), "--workflow", "docs_only", cwd=tmp_repo)
 
     task_yaml = tmp_repo / ".agos" / "tasks" / "current" / "task.yaml"
     assert task_yaml.is_file()
