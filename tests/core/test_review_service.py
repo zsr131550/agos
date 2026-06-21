@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from agos.core.adapter import ExecutorRun
 from agos.core.ledger import Ledger
 from agos.core.repo import repo_paths
@@ -103,6 +105,59 @@ def test_ingest_findings_writes_report_and_ledger_events(tmp_repo):
     assert load_status(paths).ledger_head_hash == _ledger_records(paths)[-1]["hash"]
 
 
+def test_ingest_findings_rejects_missing_packet_review_id(tmp_repo):
+    paths = _active_task(tmp_repo)
+    service = ReviewService(paths)
+    finding = Finding(
+        id="finding-01",
+        review_id="missing-review",
+        source_agent="security_reviewer",
+        category="security",
+        severity="high",
+        blocking=True,
+        title="Risk",
+        body="Risk body.",
+    )
+
+    with pytest.raises(ValueError, match="review packet not found"):
+        service.ingest_findings("missing-review", [finding])
+
+    assert not (paths.reviews / "missing-review" / "findings.json").exists()
+    assert "review_completed" not in _ledger_types(paths)
+
+
+def test_ingest_findings_rejects_duplicate_finding_ids_across_reports(tmp_repo):
+    paths = _active_task(tmp_repo)
+    service = ReviewService(paths)
+    _packet_ref, first_packet = service.create_packet(diff_kind="governed_repo_diff")
+    original_finding = Finding(
+        id="finding-01",
+        review_id=first_packet.review_id,
+        source_agent="test_reviewer",
+        category="test",
+        severity="medium",
+        blocking=True,
+        title="Missing test",
+        body="A test is missing.",
+    )
+    service.ingest_findings(first_packet.review_id, [original_finding])
+    original_report = (paths.reviews / first_packet.review_id / "findings.json").read_text(
+        encoding="utf-8"
+    )
+    original_ledger_types = _ledger_types(paths)
+    _packet_ref, second_packet = service.create_packet(diff_kind="governed_repo_diff")
+    duplicate_finding = original_finding.model_copy(update={"review_id": second_packet.review_id})
+
+    with pytest.raises(ValueError, match="duplicate finding id"):
+        service.ingest_findings(second_packet.review_id, [duplicate_finding])
+
+    assert (paths.reviews / first_packet.review_id / "findings.json").read_text(
+        encoding="utf-8"
+    ) == original_report
+    assert not (paths.reviews / second_packet.review_id / "findings.json").exists()
+    assert _ledger_types(paths) == original_ledger_types + ["review_started"]
+
+
 def test_resolve_finding_updates_report_and_appends_event(tmp_repo):
     paths = _active_task(tmp_repo)
     service = ReviewService(paths)
@@ -138,3 +193,18 @@ def test_resolve_finding_updates_report_and_appends_event(tmp_repo):
     assert event["finding_id"] == "finding-01"
     assert event["evidence_refs"] == ["gates/tests_pass.log"]
     assert load_status(paths).ledger_head_hash == event["hash"]
+
+
+def test_resolve_finding_rejects_absent_finding_id(tmp_repo):
+    paths = _active_task(tmp_repo)
+    service = ReviewService(paths)
+
+    with pytest.raises(ValueError, match="finding not found: finding-404"):
+        service.resolve_finding(
+            "finding-404",
+            FindingResolution(
+                status="resolved",
+                evidence_refs=["gates/tests_pass.log"],
+                rationale="Regression test added and passing.",
+            ),
+        )

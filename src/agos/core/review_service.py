@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterable
+from pathlib import Path
 from typing import Any, cast
 
 from ulid import ULID
@@ -74,6 +75,10 @@ class ReviewService:
         status = _load_active_status(self.paths)
         task = load_task(self.paths.task_yaml)
         normalized = [finding.model_copy(update={"review_id": review_id}) for finding in findings]
+        packet_path = self._packet_path(review_id)
+        if not packet_path.is_file():
+            raise ValueError(f"review packet not found: {review_id}")
+        self._validate_unique_finding_ids(normalized)
         report = ReviewReport(
             review_id=review_id,
             task_id=task.id,
@@ -172,6 +177,22 @@ class ReviewService:
         appended = self.ledger.append(record)
         status.ledger_head_hash = appended["hash"]
         save_status(status, self.paths)
+
+    def _packet_path(self, review_id: str) -> Path:
+        return self.paths.reviews / review_id / "packet.json"
+
+    def _validate_unique_finding_ids(self, findings: list[Finding]) -> None:
+        incoming_ids = [finding.id for finding in findings]
+        if len(set(incoming_ids)) != len(incoming_ids):
+            raise ValueError("duplicate finding id in incoming findings")
+
+        existing_ids: set[str] = set()
+        for report in self.store.read_reports():
+            existing_ids.update(finding.id for finding in report.findings)
+
+        for finding_id in incoming_ids:
+            if finding_id in existing_ids:
+                raise ValueError(f"duplicate finding id: {finding_id}")
 
 
 def _load_active_status(paths: AgosPaths) -> TaskStatus:
