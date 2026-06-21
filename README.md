@@ -18,3 +18,17 @@ agos start --title "..." [--intent "..."] [--workflow feature] [--gate tests_pas
 agos checkpoint [--follow] [--once]
 agos ci --local --stage <pre-commit|pre-push>
 ```
+
+## The v0.1 loop
+
+```
+init -> start -> checkpoint --once -> ci --local
+```
+
+- The agent runs in multica's isolated workspace (`~/multica_workspaces/<per-task>/`), not in your repo.
+- `agos checkpoint` streams the agent's reported activity into an evidence ledger and records a governed-repo anchor (HEAD + status) at capture time. It does not claim the agent edited your working tree.
+- `agos ci --local` gates a human developer's commit/push only (advisory and bypassable with `--no-verify`). The agent's own commits never pass through these hooks. Agent output is gated server-side at the merge gate, which lands in v0.2.
+
+## Trust model (v0.1 limitation)
+
+The ledger hash chain is tamper-evident, not tamper-proof. It detects accidental edits and naive agents that edit a record without recomputing its hash. A determined agent that rewrites the whole ledger and recomputes every hash is not defended against in v0.1; a real out-of-band trust anchor lands in v0.2.
