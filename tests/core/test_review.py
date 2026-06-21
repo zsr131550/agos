@@ -27,11 +27,11 @@ def test_review_packet_round_trips_with_stable_defaults():
         gate_refs={"tests_pass": "gates/tests.log"},
     )
 
-    data = packet.model_dump()
+    reloaded = ReviewPacket.model_validate_json(packet.model_dump_json())
 
-    assert data["review_id"] == "review-01"
-    assert data["acceptance"] == ["5 failures lock account"]
-    assert data["gate_refs"] == {"tests_pass": "gates/tests.log"}
+    assert reloaded.review_id == "review-01"
+    assert reloaded.acceptance == ["5 failures lock account"]
+    assert reloaded.gate_refs == {"tests_pass": "gates/tests.log"}
 
 
 def test_finding_requires_human_approval_for_accepted_risk():
