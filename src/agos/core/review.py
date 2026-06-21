@@ -73,6 +73,8 @@ class ReviewPacket(BaseModel):
     task_title: str
     task_intent: str = ""
     acceptance: list[str] = Field(default_factory=list)
+    subject: dict[str, str] = Field(default_factory=dict)
+    context_refs: list[str] = Field(default_factory=list)
     diff_kind: ReviewDiffKind
     diff_evidence_ref: str | None = None
     ledger_head_hash: str

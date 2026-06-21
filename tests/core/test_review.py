@@ -31,6 +31,8 @@ def test_review_packet_round_trips_with_stable_defaults():
 
     assert reloaded.review_id == "review-01"
     assert reloaded.acceptance == ["5 failures lock account"]
+    assert reloaded.subject == {}
+    assert reloaded.context_refs == []
     assert reloaded.gate_refs == {"tests_pass": "gates/tests.log"}
 
 

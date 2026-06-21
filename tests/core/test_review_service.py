@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 import json
 
 import pytest
@@ -70,10 +71,36 @@ def test_create_packet_writes_packet_and_review_started(tmp_repo):
     assert packet_ref == f"reviews/{packet.review_id}/packet.json"
     assert packet.task_id == "agos-01"
     assert packet.task_title == "Review task"
+    assert packet.subject == {}
+    assert packet.context_refs == []
     assert packet.gate_refs == {"tests_pass": "gates/tests_pass-20260622.log"}
     assert packet.checkpoint_refs == ["messages/run-1.jsonl"]
     assert _ledger_types(paths)[-1] == "review_started"
     assert load_status(paths).ledger_head_hash == _ledger_records(paths)[-1]["hash"]
+
+
+def test_create_packet_round_trips_candidate_context(tmp_repo):
+    paths = _active_task(tmp_repo)
+    service = ReviewService(paths)
+    signature = inspect.signature(service.create_packet)
+    assert "subject" in signature.parameters
+    assert "context_refs" in signature.parameters
+
+    packet_ref, packet = service.create_packet(
+        diff_kind="candidate_patch",
+        diff_evidence_ref="patches/candidate.diff",
+        subject={"kind": "candidate", "id": "candidate-01"},
+        context_refs=["runs/candidate-01.json", "messages/candidate-01.jsonl"],
+    )
+
+    packet_json = json.loads((paths.current_task / packet_ref).read_text(encoding="utf-8"))
+    assert packet.subject == {"kind": "candidate", "id": "candidate-01"}
+    assert packet.context_refs == ["runs/candidate-01.json", "messages/candidate-01.jsonl"]
+    assert packet_json["subject"] == {"kind": "candidate", "id": "candidate-01"}
+    assert packet_json["context_refs"] == [
+        "runs/candidate-01.json",
+        "messages/candidate-01.jsonl",
+    ]
 
 
 def test_ingest_findings_writes_report_and_ledger_events(tmp_repo):

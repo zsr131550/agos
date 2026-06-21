@@ -41,6 +41,8 @@ class ReviewService:
         *,
         diff_kind: str,
         diff_evidence_ref: str | None = None,
+        subject: dict[str, str] | None = None,
+        context_refs: list[str] | None = None,
     ) -> tuple[str, ReviewPacket]:
         status = _load_active_status(self.paths)
         task = load_task(self.paths.task_yaml)
@@ -50,6 +52,8 @@ class ReviewService:
             task_title=task.title,
             task_intent=task.intent,
             acceptance=list(task.acceptance),
+            subject=dict(subject or {}),
+            context_refs=list(context_refs or []),
             diff_kind=cast(ReviewDiffKind, diff_kind),
             diff_evidence_ref=diff_evidence_ref,
             ledger_head_hash=status.ledger_head_hash,
