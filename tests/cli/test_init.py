@@ -134,3 +134,16 @@ def test_init_preserves_existing_hooks(monkeypatch, tmp_repo):
     managed_hook = pre_commit.read_text(encoding="utf-8")
     assert "agos ci --local --stage pre-commit" in managed_hook
     assert "pre-commit.agos.original" in managed_hook
+
+
+def test_init_installed_pre_push_hook_does_not_forward_git_positional_args(monkeypatch, tmp_repo):
+    monkeypatch.chdir(tmp_repo)
+    monkeypatch.setattr("agos.cli.cmd_init.validate_multica_environment", lambda _executor: [])
+    monkeypatch.setattr("agos.cli.cmd_init.discover_multica_agents", lambda: ["codex-gpt-5.4 xhigh"])
+
+    result = runner.invoke(app, ["init", "--agent", "codex-gpt-5.4 xhigh"])
+
+    assert result.exit_code == 0
+    pre_push = (tmp_repo / ".git" / "hooks" / "pre-push").read_text(encoding="utf-8")
+    assert 'agos ci --local --stage pre-push "$@"' not in pre_push
+    assert "agos ci --local --stage pre-push" in pre_push

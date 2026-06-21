@@ -3,7 +3,7 @@
 set -eu
 
 SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
-agos ci --local --stage __STAGE__ "$@"
+agos ci --local --stage __STAGE__
 
 LEGACY_HOOK="$SCRIPT_DIR/__LEGACY_HOOK__"
 if [ -x "$LEGACY_HOOK" ]; then
