@@ -38,6 +38,9 @@ def test_review_store_writes_packet_raw_findings_and_report(tmp_repo):
     assert store.write_raw_output("review-01", "security_reviewer", {"ok": True}) == (
         "reviews/review-01/raw/security_reviewer.json"
     )
+    raw_output_path = paths.reviews / "review-01" / "raw" / "security_reviewer.json"
+    assert raw_output_path.exists()
+    assert json.loads(raw_output_path.read_text(encoding="utf-8")) == {"ok": True}
     assert store.write_report(report) == "reviews/review-01/findings.json"
     assert store.write_markdown_report(report) == "reviews/review-01/report.md"
 
