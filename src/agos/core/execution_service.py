@@ -210,7 +210,22 @@ class ExecutionService:
         if binding.state != "started":
             raise ValueError(f"candidate review binding is not started: {review_id}")
 
-        report_ref, report = ReviewService(self.paths).ingest_findings(review_id, findings)
+        try:
+            report_ref, report = ReviewService(self.paths).ingest_findings(review_id, findings)
+        except Exception:
+            completion_status = _load_active_status(self.paths)
+            failed = binding.model_copy(
+                update={
+                    "state": "failed",
+                    "completed_at": utc_now_iso(),
+                    "ledger_head_at_completion": completion_status.ledger_head_hash,
+                }
+            )
+            bindings = list(candidate.review_refs)
+            bindings[binding_index] = failed
+            self.store.write_candidate(candidate.model_copy(update={"review_refs": bindings}))
+            raise
+
         completion_status = _load_active_status(self.paths)
         completed = binding.model_copy(
             update={
@@ -249,12 +264,8 @@ class ExecutionService:
         candidate = self._candidate_with_valid_patch(candidate_id)
         if decision == "accepted":
             self._assert_candidate_tests_passed(candidate, task)
-            review = self._latest_completed_review_binding(candidate)
-            if review is None:
-                raise ValueError("accepted candidates require a completed candidate-bound review")
-            self._assert_review_binding_current(candidate, review)
-            if review.open_blocking_count not in {0, None}:
-                raise ValueError("candidate review has open blocking findings")
+            review, report = self._latest_completed_review_and_report(candidate)
+            self._assert_review_binding_current(candidate, review, report)
             evidence_refs = [
                 candidate.patch_ref,
                 *candidate.test_refs,
@@ -303,10 +314,8 @@ class ExecutionService:
         patch_bytes = self._patch_bytes(candidate)
         self.workspace_manager.validate_patch_scope(patch_bytes, subtask.write_scope)
         self._assert_candidate_tests_passed(candidate, task)
-        review = self._latest_completed_review_binding(candidate)
-        if review is None:
-            raise ValueError("candidate apply requires a completed candidate-bound review")
-        self._assert_review_binding_current(candidate, review)
+        review, report = self._latest_completed_review_and_report(candidate)
+        self._assert_review_binding_current(candidate, review, report)
         self._assert_latest_decision_accepted(candidate)
         self._assert_no_accepted_overlap(candidate)
         self._assert_no_dirty_overlap(candidate_patch_paths(patch_bytes))
@@ -492,14 +501,32 @@ class ExecutionService:
         completed = [binding for binding in candidate.review_refs if binding.state == "completed"]
         return completed[-1] if completed else None
 
+    def _latest_completed_review_and_report(
+        self,
+        candidate: CandidatePatch,
+    ) -> tuple[ReviewBinding, ReviewReport]:
+        binding = self._latest_completed_review_binding(candidate)
+        if binding is None:
+            raise ValueError("candidate requires a completed candidate-bound review")
+        if binding.report_ref is None:
+            raise ValueError("completed candidate-bound review is missing report_ref")
+        try:
+            report = ReviewService(self.paths).store.read_report(binding.review_id)
+        except FileNotFoundError as exc:
+            raise ValueError(f"candidate-bound review report not found: {binding.review_id}") from exc
+        return binding, report
+
     def _assert_review_binding_current(
         self,
         candidate: CandidatePatch,
         binding: ReviewBinding,
+        report: ReviewReport,
     ) -> None:
         subtask = self.store.read_subtask(candidate.subtask_id)
         if binding.report_ref is None:
             raise ValueError("completed candidate-bound review is missing report_ref")
+        if report.review_id != binding.review_id:
+            raise ValueError("selected candidate-bound review report does not match review_id")
         if binding.patch_sha256 != candidate.patch_sha256:
             raise ValueError("candidate-bound review patch hash is stale")
         if binding.base_commit != candidate.base_commit:
@@ -508,7 +535,10 @@ class ExecutionService:
             raise ValueError("candidate-bound review write_scope is stale")
         if binding.test_refs != candidate.test_refs:
             raise ValueError("candidate-bound review test_refs are stale")
-        if binding.open_blocking_count not in {0, None}:
+        open_blocking_count = len(report.open_blocking_findings())
+        if binding.open_blocking_count is not None and binding.open_blocking_count != open_blocking_count:
+            raise ValueError("candidate-bound review open blocking count is stale")
+        if open_blocking_count:
             raise ValueError("candidate-bound review has open blocking findings")
 
     def _assert_latest_decision_accepted(self, candidate: CandidatePatch) -> None:

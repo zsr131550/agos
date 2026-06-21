@@ -14,6 +14,7 @@ from agos.core.execution_service import ExecutionService
 from agos.core.execution_store import ExecutionStore
 from agos.core.ledger import Ledger
 from agos.core.repo import repo_paths
+from agos.core.review import Finding, FindingResolution
 from agos.core.review_service import ReviewService
 from agos.core.status import TaskStatus, save_status
 from agos.core.task import ExecutorBinding, Task, save_task
@@ -217,6 +218,46 @@ def test_task_level_review_does_not_satisfy_candidate_review_guard(tmp_repo):
             candidate_id,
             decision="accepted",
             reason="Global review should not count.",
+        )
+
+
+def test_failed_candidate_review_ingest_marks_binding_failed(tmp_repo):
+    _paths, service, candidate_id = _ready_candidate(tmp_repo)
+    _packet_ref, packet = service.review_candidate(candidate_id)
+    closed_finding = Finding(
+        id="finding-01",
+        review_id=packet.review_id,
+        source_agent="test_reviewer",
+        category="test",
+        severity="medium",
+        blocking=True,
+        title="Closed finding",
+        body="This should not be accepted during ingest.",
+        status="false_positive",
+        resolution=FindingResolution(
+            status="false_positive",
+            rationale="Reviewer closed it before ingest.",
+        ),
+    )
+
+    with pytest.raises(ValueError, match="ingested findings must be open"):
+        service.ingest_candidate_review(candidate_id, packet.review_id, findings=[closed_finding])
+
+    candidate = ExecutionStore(service.paths).read_candidate(candidate_id)
+    assert candidate.review_refs[-1].state == "failed"
+
+
+def test_accepted_decision_rejects_missing_candidate_review_report(tmp_repo):
+    paths, service, candidate_id = _ready_candidate(tmp_repo)
+    _packet_ref, packet = service.review_candidate(candidate_id)
+    service.ingest_candidate_review(candidate_id, packet.review_id, findings=[])
+    (paths.reviews / packet.review_id / "findings.json").unlink()
+
+    with pytest.raises(ValueError, match="candidate-bound review report not found"):
+        service.decide_candidate(
+            candidate_id,
+            decision="accepted",
+            reason="Missing report should not count.",
         )
 
 
