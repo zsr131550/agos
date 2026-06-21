@@ -96,8 +96,9 @@ connected.
 ```
 
 The execution core depends on existing task, status, ledger, repo, gates, and
-Review services. The Review layer does not depend on execution internals except
-for receiving candidate patch refs as review packet input.
+Review services. The Review layer remains generic: candidate reviews pass patch
+evidence plus optional subject/context refs, but Review does not import
+execution models or mutate execution state.
 
 ## Core Models
 
@@ -376,7 +377,7 @@ Every event that changes execution state must include:
 6. The patch touches only files declared in the subtask `write_scope`.
 7. At least one required candidate test has passed.
 8. If `requires_candidate_review` is true, the candidate has a completed Review
-   packet/report with no open blocking findings.
+   packet/report bound to that candidate with no open blocking findings.
 9. The latest arbiter decision for the candidate is `accepted`.
 10. No other accepted/applied candidate conflicts with the same files unless
     the arbiter decision explicitly includes conflict evidence.
@@ -400,11 +401,95 @@ ReviewService.create_packet(
 ```
 
 The candidate metadata stores the resulting review refs. A candidate is
-review-ready only when the review report exists. A candidate is apply-ready only
-when no blocking finding in that candidate review remains open.
+review-ready only when its candidate-bound review report exists. A candidate is
+apply-ready only when no blocking finding in that candidate review remains open.
 
 The Review layer remains read-only. It never mutates workspaces, patches, or the
 governed repo.
+
+### Candidate Review Contract
+
+Candidate review must be an explicit binding between one candidate and one
+Review report. A global task review or a review for another candidate cannot
+satisfy `candidate apply`.
+
+#### Review Input
+
+Before creating the Review packet, AGOS must verify:
+
+- The candidate patch file exists and matches `patch_sha256`.
+- The candidate patch touches only files in the subtask `write_scope`.
+- The candidate has at least one completed candidate test when the execution
+  plan requires tests before review.
+
+The Review packet input must include, directly or through stable refs:
+
+```yaml
+subject:
+  type: candidate
+  candidate_id: candidate-01
+  subtask_id: subtask-core-models
+  task_id: agos-...
+diff_kind: candidate_patch
+diff_evidence_ref: evidence/candidate_patches/candidate-01.patch
+context_refs:
+  - execution/candidates/candidate-01.json
+  - execution/subtasks/subtask-core-models.json
+  - execution/workspaces/subtask-core-models.json
+  - execution/tests/candidate-test-01.json
+```
+
+The packet or referenced candidate metadata must expose the candidate
+`base_commit`, `patch_sha256`, `write_scope`, and `test_refs`. This keeps
+reviewers and the apply guard looking at the same facts. If the v0.2 Review
+packet model is extended for v0.3, these should be added as optional generic
+fields such as `subject` and `context_refs`, so governed-repo reviews remain
+backward compatible.
+
+#### Review Output Binding
+
+The candidate metadata must store review bindings in a machine-readable shape:
+
+```yaml
+review_refs:
+  - review_id: review-01
+    packet_ref: reviews/review-01/packet.json
+    report_ref: reviews/review-01/findings.json
+    raw_refs: []
+    state: completed
+    created_at: "2026-06-22T00:00:00Z"
+    completed_at: "2026-06-22T00:01:00Z"
+```
+
+Binding states are:
+
+```text
+started
+completed
+failed
+```
+
+`candidate_review_started` records `candidate_id`, `review_id`, `packet_ref`,
+and the candidate patch evidence ref. `candidate_review_completed` records
+`candidate_id`, `review_id`, `report_ref`, and `open_blocking_count`.
+
+If review ingestion fails or produces malformed findings, AGOS must keep the
+raw evidence where available, mark that review binding as failed, and leave the
+candidate non-applyable.
+
+#### Apply-Time Review Selection
+
+`candidate apply` must evaluate the latest completed review binding for the
+candidate, ordered by ledger event order. It must reject when:
+
+- No completed candidate-bound review exists.
+- The selected `report_ref` is missing or does not match the bound `review_id`.
+- The selected report has any open blocking finding.
+- The candidate patch hash, write scope, or test refs changed after the selected
+  review was created.
+
+Task-level reviews still participate in normal closeout, but they do not replace
+candidate-bound review for `candidate apply`.
 
 ## Worker Backend
 
@@ -465,9 +550,12 @@ Service tests:
 - `candidate submit` captures a worktree diff as patch evidence.
 - `candidate test` uses a temporary verification workspace and records gate
   evidence.
-- `candidate review` creates a Review packet with `diff_kind="candidate_patch"`.
+- `candidate review` creates a Review packet with `diff_kind="candidate_patch"`
+  and records a candidate-bound review ref.
 - `candidate apply` blocks without tests, review, accepted decision, or valid
   hash.
+- `candidate apply` ignores unrelated task/global reviews and uses only the
+  latest completed candidate-bound review.
 - `candidate apply` applies a valid candidate and records `candidate_applied`.
 
 CLI tests:
