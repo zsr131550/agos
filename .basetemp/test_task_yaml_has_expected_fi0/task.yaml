@@ -1,0 +1,13 @@
+id: 01KVN522E90MN5E4BD1AVT2J0V
+title: Add login rate limiting
+intent: Brute-force protection on /login
+acceptance:
+- 5 failed attempts -> 15min lockout
+- tests cover lockout + unlock
+workflow: feature
+gates:
+- tests_pass
+- no_secrets_in_diff
+executor:
+  adapter: multica
+  agent: Lambda
