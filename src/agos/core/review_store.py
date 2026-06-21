@@ -5,7 +5,7 @@ import json
 from pathlib import Path, PurePosixPath, PureWindowsPath
 
 from agos.core.repo import AgosPaths
-from agos.core.review import ReviewPacket, ReviewReport
+from agos.core.review import CloseoutProof, ReviewPacket, ReviewReport
 
 
 class ReviewStore:
@@ -37,6 +37,14 @@ class ReviewStore:
         path.write_text(self._render_markdown_report(report), encoding="utf-8")
         return ref
 
+    def write_proof(self, proof: CloseoutProof) -> tuple[str, str]:
+        json_ref = "proof.json"
+        md_ref = "proof.md"
+        self._write_model(self.paths.proof_json, proof)
+        self.paths.proof_md.parent.mkdir(parents=True, exist_ok=True)
+        self.paths.proof_md.write_text(self._render_proof_markdown(proof), encoding="utf-8")
+        return json_ref, md_ref
+
     def read_report(self, review_id: str) -> ReviewReport:
         path = self.paths.reviews / _safe_component(review_id, "review_id") / "findings.json"
         return ReviewReport.model_validate_json(path.read_text(encoding="utf-8"))
@@ -50,7 +58,7 @@ class ReviewStore:
             if review_dir.is_dir() and (review_dir / "findings.json").is_file()
         ]
 
-    def _write_model(self, path: Path, model: ReviewPacket | ReviewReport) -> None:
+    def _write_model(self, path: Path, model: ReviewPacket | ReviewReport | CloseoutProof) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(model.model_dump_json(indent=2) + "\n", encoding="utf-8")
 
@@ -87,6 +95,19 @@ class ReviewStore:
                     "",
                 ]
             )
+        return "\n".join(lines)
+
+    def _render_proof_markdown(self, proof: CloseoutProof) -> str:
+        lines = [
+            f"# Closeout Proof {proof.task_id}",
+            "",
+            f"- Task ID: {proof.task_id}",
+            f"- Ledger head: {proof.ledger_head_hash}",
+            f"- Review refs count: {len(proof.review_refs)}",
+            f"- Finding count: {proof.finding_count}",
+            f"- Open blocking findings count: {proof.blocking_open_count}",
+            "",
+        ]
         return "\n".join(lines)
 
 

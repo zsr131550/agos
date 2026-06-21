@@ -10,6 +10,7 @@ from ulid import ULID
 from agos.core.ledger import Ledger
 from agos.core.repo import AgosPaths
 from agos.core.review import (
+    CloseoutProof,
     Finding,
     FindingResolution,
     ReviewDiffKind,
@@ -146,6 +147,46 @@ class ReviewService:
                 )
                 return updated
         raise ValueError(f"finding not found: {finding_id}")
+
+    def closeout(self) -> CloseoutProof:
+        status = _load_active_status(self.paths)
+        task = load_task(self.paths.task_yaml)
+        reports = self.store.read_reports()
+        findings = [finding for report in reports for finding in report.findings]
+        open_blocking = [
+            finding for finding in findings if finding.blocking and finding.status == "open"
+        ]
+        if open_blocking:
+            ids = ", ".join(finding.id for finding in open_blocking)
+            raise ValueError(f"open blocking findings: {ids}")
+
+        proof = CloseoutProof(
+            task_id=task.id,
+            ledger_head_hash=status.ledger_head_hash,
+            review_refs=[
+                f"reviews/{report.review_id}/findings.json"
+                for report in reports
+            ],
+            gate_refs={},
+            finding_count=len(findings),
+            blocking_open_count=0,
+        )
+        proof_json_ref, proof_md_ref = self.store.write_proof(proof)
+        appended = self.ledger.append(
+            {
+                "type": "closeout_completed",
+                "task_id": task.id,
+                "proof_refs": {
+                    "json": proof_json_ref,
+                    "md": proof_md_ref,
+                },
+                "finding_count": len(findings),
+            }
+        )
+        status.phase = "done"
+        status.ledger_head_hash = appended["hash"]
+        save_status(status, self.paths)
+        return proof
 
     def open_blocking_findings(self) -> list[Finding]:
         findings: list[Finding] = []
