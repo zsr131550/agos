@@ -130,9 +130,10 @@ Rules:
 - `max_parallel` controls workspace setup and later worker dispatch.
 - `requires_candidate_review` defaults to true.
 - Every subtask must declare a non-empty `write_scope`.
-- Overlapping write scopes are allowed only when subtasks are serialized by
-  dependencies or when the plan explicitly marks them as requiring arbiter
-  merge review.
+- V0.3 rejects overlapping write scopes unless the dependency graph fully
+  serializes each overlapping pair. For two subtasks with overlapping
+  `write_scope`, one subtask must transitively depend on the other.
+- Explicit arbiter merge-review overrides are deferred until a later version.
 
 ### ExecutionSubtask
 
@@ -237,18 +238,39 @@ Candidate tests run outside the governed main tree:
 ```yaml
 id: candidate-test-01
 candidate_id: candidate-01
+gate_id: tests_pass
+stage: candidate
 command: python -m pytest tests/core/test_execution.py -q
 state: passed
 evidence_ref: gates/candidate-01-tests_pass-....log
+workspace_ref: execution/workspaces/subtask-core-models.json
 started_at: "2026-06-22T00:00:00Z"
 completed_at: "2026-06-22T00:01:00Z"
 ```
 
+States:
+
+```text
+running
+passed
+failed
+```
+
 Rules:
 
-- Gate commands should reuse the existing AGOS gate command runner.
+- `--gate` must name a gate in the active task's locked gate set. If omitted,
+  AGOS runs every gate in that locked set.
+- Gate commands should reuse the existing AGOS gate command runner with
+  `GateContext.stage="candidate"`, `GateContext.repo_root` set to the temporary
+  verification workspace, `GateContext.diff` set to the candidate patch text,
+  and `GateContext.evidence_dir` set to the active task evidence directory.
 - Tests apply the candidate to a temporary verification workspace, not directly
   to the governed main tree.
+- Each candidate test run is tied to exactly one `gate_id` or the synthetic
+  `patch_applies` check.
+- The patch-apply dry run must succeed before any gate result can make the
+  candidate applyable.
+- Candidate test evidence refs are relative to `.agos/tasks/current/evidence/`.
 - A failing test keeps the candidate test evidence but prevents acceptance
   unless a human arbiter explicitly rejects or supersedes it.
 
@@ -261,10 +283,12 @@ id: decision-01
 candidate_id: candidate-01
 decision: accepted
 reason: Tests pass, no open blocking candidate review findings, patch is in scope.
+apply_strategy: direct_patch
 evidence_refs:
   - evidence/candidate_patches/candidate-01.patch
   - reviews/review-.../findings.json
   - gates/candidate-01-tests_pass-....log
+conflict_evidence_refs: []
 decided_by: local_user
 created_at: "2026-06-22T00:02:00Z"
 ```
@@ -277,6 +301,27 @@ rejected
 superseded
 needs_changes
 ```
+
+Apply strategy values:
+
+```text
+direct_patch
+```
+
+V0.3 supports only `direct_patch`: AGOS verifies the patch with `git apply
+--check` in the governed repo before applying it. Three-way merge and manual
+merge strategies are out of scope for v0.3 and should be added only when a
+dedicated merge evidence model exists.
+
+Rules:
+
+- `accepted` decisions require non-empty `reason` and `evidence_refs`.
+- `accepted` decisions must include the candidate patch ref, latest passed
+  required candidate test refs, and latest completed candidate-bound review ref
+  in `evidence_refs`.
+- `accepted` decisions must use `apply_strategy: direct_patch`.
+- `conflict_evidence_refs` is empty for accepted v0.3 decisions. Conflict
+  evidence belongs to a blocked apply attempt, not to an accepted decision.
 
 ## CLI Surface
 
@@ -291,6 +336,12 @@ agos candidate review <candidate-id>
 agos candidate decide <candidate-id> --decision accepted|rejected|superseded|needs-changes --reason "..."
 agos candidate apply <candidate-id>
 ```
+
+`agos candidate test` runs the named task gate in a temporary verification
+workspace. If `--gate` is omitted, AGOS runs every gate in the active task.
+Every candidate test command also records a synthetic `patch_applies` dry-run
+result so the candidate can prove it still applies cleanly outside the governed
+tree.
 
 Optional debug commands can be added after the loop is stable:
 
@@ -353,6 +404,7 @@ candidate_review_started
 candidate_review_completed
 candidate_decision_recorded
 candidate_applied
+candidate_apply_blocked
 candidate_rejected
 candidate_superseded
 ```
@@ -372,10 +424,12 @@ Every event that changes execution state must include:
 2. The candidate exists and is not already applied.
 3. The candidate patch file exists.
 4. The patch SHA-256 matches `patch_sha256`.
-5. The candidate base commit is compatible with the current governed repo head,
-   or the patch applies cleanly with a recorded three-way strategy.
+5. The candidate patch applies cleanly to the current governed repo with
+   `git apply --check`. V0.3 records the candidate `base_commit` for audit but
+   does not perform three-way merge.
 6. The patch touches only files declared in the subtask `write_scope`.
-7. At least one required candidate test has passed.
+7. The candidate has a passed `patch_applies` dry run and a passed candidate
+   test for every gate in the active task.
 8. If `requires_candidate_review` is true, the candidate has a completed Review
    packet/report bound to that candidate with no open blocking findings.
 9. The latest arbiter decision for the candidate is `accepted`.
@@ -396,7 +450,19 @@ Candidate review reuses the existing Review layer:
 ```text
 ReviewService.create_packet(
   diff_kind="candidate_patch",
-  diff_evidence_ref="evidence/candidate_patches/candidate-01.patch"
+  diff_evidence_ref="evidence/candidate_patches/candidate-01.patch",
+  subject={
+    "type": "candidate",
+    "candidate_id": "candidate-01",
+    "subtask_id": "subtask-core-models",
+    "task_id": "agos-...",
+  },
+  context_refs=[
+    "execution/candidates/candidate-01.json",
+    "execution/subtasks/subtask-core-models.json",
+    "execution/workspaces/subtask-core-models.json",
+    "execution/tests/candidate-test-01.json",
+  ],
 )
 ```
 
@@ -419,32 +485,31 @@ Before creating the Review packet, AGOS must verify:
 
 - The candidate patch file exists and matches `patch_sha256`.
 - The candidate patch touches only files in the subtask `write_scope`.
-- The candidate has at least one completed candidate test when the execution
-  plan requires tests before review.
+- The candidate has passed `patch_applies` and every active-task gate.
 
 The Review packet input must include, directly or through stable refs:
 
-```yaml
-subject:
-  type: candidate
-  candidate_id: candidate-01
-  subtask_id: subtask-core-models
-  task_id: agos-...
-diff_kind: candidate_patch
-diff_evidence_ref: evidence/candidate_patches/candidate-01.patch
-context_refs:
-  - execution/candidates/candidate-01.json
-  - execution/subtasks/subtask-core-models.json
-  - execution/workspaces/subtask-core-models.json
-  - execution/tests/candidate-test-01.json
+V0.3 implements this by extending the v0.2 Review packet API with two optional
+generic fields:
+
+```python
+ReviewService.create_packet(
+    *,
+    diff_kind: str,
+    diff_evidence_ref: str | None = None,
+    subject: dict[str, str] | None = None,
+    context_refs: list[str] | None = None,
+) -> tuple[str, ReviewPacket]
 ```
+
+`ReviewPacket.subject` defaults to `{}` and `ReviewPacket.context_refs` defaults
+to `[]`, preserving governed-repo review compatibility.
 
 The packet or referenced candidate metadata must expose the candidate
 `base_commit`, `patch_sha256`, `write_scope`, and `test_refs`. This keeps
-reviewers and the apply guard looking at the same facts. If the v0.2 Review
-packet model is extended for v0.3, these should be added as optional generic
-fields such as `subject` and `context_refs`, so governed-repo reviews remain
-backward compatible.
+reviewers and the apply guard looking at the same facts. Review must treat
+`subject` and `context_refs` as opaque data; it must not import execution models
+or mutate execution state.
 
 #### Review Output Binding
 
@@ -487,6 +552,8 @@ candidate, ordered by ledger event order. It must reject when:
 - The selected report has any open blocking finding.
 - The candidate patch hash, write scope, or test refs changed after the selected
   review was created.
+- The candidate lacks a passed `patch_applies` dry run.
+- Any active-task gate lacks a passed candidate test.
 
 Task-level reviews still participate in normal closeout, but they do not replace
 candidate-bound review for `candidate apply`.
@@ -516,8 +583,8 @@ Future worker backends can implement the same candidate patch contract:
 ## Error Handling
 
 - Invalid plan: reject before creating workspaces.
-- Overlapping write scopes: reject unless dependencies serialize the subtasks or
-  explicit arbiter merge review is enabled.
+- Overlapping write scopes: reject unless dependencies fully serialize the
+  overlapping subtasks.
 - Worktree creation failure: mark subtask `blocked` and record the error log.
 - Dirty governed repo at apply time: reject unless the dirty files are outside
   the candidate patch scope and policy allows it.
@@ -526,7 +593,8 @@ Future worker backends can implement the same candidate patch contract:
 - Candidate test failure: keep evidence and prevent `accepted` decision unless
   the user records a rejection, superseded candidate, or needs-changes decision.
 - Review with open blocking findings: prevent apply.
-- Patch conflict: reject apply and record conflict evidence.
+- Patch conflict: reject apply, write conflict/apply-check evidence, append
+  `candidate_apply_blocked`, and leave the candidate state unchanged.
 - Ledger mismatch: hard block execution commands until the existing ledger
   repair or reset process is used.
 
@@ -540,22 +608,29 @@ Core tests:
 - Candidate patch creation stores immutable patch bytes and SHA-256.
 - Candidate patch validation rejects hash mismatches.
 - Candidate patch validation rejects files outside `write_scope`.
+- Candidate test runs record one gate or `patch_applies` dry run per evidence
+  file.
+- Candidate apply requires passed `patch_applies` plus passed tests for every
+  active-task gate.
 - Candidate state transitions reject invalid jumps such as `proposed -> applied`.
 - Arbiter decisions require non-empty reasons and evidence refs for accepted
   candidates.
+- Arbiter decisions reject non-v0.3 apply strategies such as three-way merge.
 
 Service tests:
 
 - `execute-plan` writes plan, subtask, workspace metadata, and ledger events.
 - `candidate submit` captures a worktree diff as patch evidence.
-- `candidate test` uses a temporary verification workspace and records gate
-  evidence.
+- `candidate test` uses a temporary verification workspace and records
+  `patch_applies` plus gate evidence.
 - `candidate review` creates a Review packet with `diff_kind="candidate_patch"`
   and records a candidate-bound review ref.
 - `candidate apply` blocks without tests, review, accepted decision, or valid
   hash.
 - `candidate apply` ignores unrelated task/global reviews and uses only the
   latest completed candidate-bound review.
+- `candidate apply` records `candidate_apply_blocked` evidence when
+  `git apply --check` fails.
 - `candidate apply` applies a valid candidate and records `candidate_applied`.
 
 CLI tests:
@@ -579,8 +654,9 @@ Integration tests:
 - Candidate tests run outside the governed main working tree.
 - Candidate review reuses the v0.2 Review layer.
 - Blocking candidate review findings prevent apply.
-- Candidate apply requires a valid patch hash, in-scope files, passing tests,
-  completed review, and accepted arbiter decision.
+- Candidate apply requires a valid patch hash, in-scope files, passed
+  `patch_applies`, passed active-task gates, completed review, and accepted
+  arbiter decision.
 - All execution state changes are persisted and ledgered.
 - The implementation can be tested end to end with a fake/local worker backend.
 
