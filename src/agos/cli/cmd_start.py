@@ -1,6 +1,8 @@
 """`agos start` command."""
 from __future__ import annotations
 
+import shutil
+
 import typer
 
 from agos.adapters.multica import MulticaAdapter
@@ -84,6 +86,8 @@ def start_command(
     try:
         run = adapter.start(task)
     except RuntimeError as exc:
+        shutil.rmtree(task_dir, ignore_errors=True)
+        task_dir.mkdir(parents=True, exist_ok=True)
         typer.echo(str(exc), err=True)
         raise typer.Exit(code=1) from exc
 

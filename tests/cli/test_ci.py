@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 from types import SimpleNamespace
 
 import yaml
@@ -231,3 +232,21 @@ def test_ci_pre_push_without_origin_uses_head_diff(monkeypatch, tmp_repo):
 
     assert diff == ""
     assert calls == [["git", "diff", "HEAD"]]
+
+
+def test_ci_pre_push_with_upstream_uses_upstream_diff(tmp_path, tmp_repo):
+    import agos.cli.cmd_ci as cmd_ci
+
+    origin = tmp_path / "origin.git"
+    subprocess.run(["git", "init", "-q", "--bare", str(origin)], check=True)
+    subprocess.run(["git", "remote", "add", "origin", str(origin)], cwd=tmp_repo, check=True)
+    subprocess.run(["git", "push", "-q", "-u", "origin", "main"], cwd=tmp_repo, check=True)
+
+    (tmp_repo / "feature.txt").write_text("ready\n", encoding="utf-8")
+    subprocess.run(["git", "add", "feature.txt"], cwd=tmp_repo, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "feature"], cwd=tmp_repo, check=True)
+
+    diff = cmd_ci._git_diff_for_stage(tmp_repo, "pre-push")
+
+    assert "feature.txt" in diff
+    assert "+ready" in diff

@@ -91,6 +91,23 @@ def test_start_aborts_if_task_already_active(monkeypatch, tmp_repo):
     assert "Active task already exists" in result.stderr
 
 
+def test_start_cleans_up_current_task_when_dispatch_fails(monkeypatch, tmp_repo):
+    _write_config(tmp_repo)
+    current_dir = tmp_repo / ".agos" / "tasks" / "current"
+    monkeypatch.chdir(tmp_repo)
+
+    def fail_start(_self, _task):
+        raise RuntimeError("multica unavailable")
+
+    monkeypatch.setattr("agos.cli.cmd_start.MulticaAdapter.start", fail_start)
+
+    result = runner.invoke(app, ["start", "--title", "Dispatch fails"])
+
+    assert result.exit_code == 1
+    assert "multica unavailable" in result.stderr
+    assert not current_dir.exists() or not any(current_dir.iterdir())
+
+
 def test_start_uses_gate_override_when_provided(monkeypatch, tmp_repo):
     _write_config(tmp_repo)
     monkeypatch.chdir(tmp_repo)

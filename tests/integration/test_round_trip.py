@@ -9,6 +9,7 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 import time
 from pathlib import Path
 
@@ -17,6 +18,10 @@ import pytest
 from agos.adapters.multica import resolve_multica_bin
 
 pytestmark = pytest.mark.integration
+
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+SRC_ROOT = PROJECT_ROOT / "src"
+AGOS_CLI = (sys.executable, "-m", "agos.cli.main")
 
 
 def _integration_agent() -> str:
@@ -37,6 +42,9 @@ def _extract_messages(payload: dict | list) -> list[dict]:
 
 
 def _run(*args: str, cwd: Path, check: bool = True) -> subprocess.CompletedProcess[str]:
+    pythonpath = str(SRC_ROOT)
+    if os.environ.get("PYTHONPATH"):
+        pythonpath = pythonpath + os.pathsep + os.environ["PYTHONPATH"]
     return subprocess.run(
         list(args),
         cwd=cwd,
@@ -44,6 +52,7 @@ def _run(*args: str, cwd: Path, check: bool = True) -> subprocess.CompletedProce
         capture_output=True,
         text=True,
         encoding="utf-8",
+        env={**os.environ, "PYTHONPATH": pythonpath},
     )
 
 
@@ -114,8 +123,8 @@ def _skip_unless_opted_in():
 
 
 def test_round_trip(tmp_repo: Path):
-    _run("agos", "init", "--executor", "multica", "--agent", _integration_agent(), cwd=tmp_repo)
-    _run("agos", "start", "--title", _integration_title(tmp_repo), "--workflow", "docs_only", cwd=tmp_repo)
+    _run(*AGOS_CLI, "init", "--executor", "multica", "--agent", _integration_agent(), cwd=tmp_repo)
+    _run(*AGOS_CLI, "start", "--title", _integration_title(tmp_repo), "--workflow", "docs_only", cwd=tmp_repo)
 
     task_yaml = tmp_repo / ".agos" / "tasks" / "current" / "task.yaml"
     assert task_yaml.is_file()
@@ -125,8 +134,8 @@ def test_round_trip(tmp_repo: Path):
     run_id = status["executor_run"]["run_id"]
     _wait_for_messages(run_id, cwd=tmp_repo)
 
-    _run("agos", "checkpoint", "--once", cwd=tmp_repo)
-    ci = _run("agos", "ci", "--local", "--stage", "pre-commit", cwd=tmp_repo)
+    _run(*AGOS_CLI, "checkpoint", "--once", cwd=tmp_repo)
+    ci = _run(*AGOS_CLI, "ci", "--local", "--stage", "pre-commit", cwd=tmp_repo)
     assert ci.returncode == 0
 
     ledger_path = tmp_repo / ".agos" / "tasks" / "current" / "ledger.jsonl"

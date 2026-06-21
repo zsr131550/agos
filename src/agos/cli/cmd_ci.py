@@ -29,14 +29,14 @@ def _git_diff_for_stage(repo_root, stage: str) -> str:
     if stage == "pre-commit":
         command = ["git", "diff", "--cached"]
     elif stage == "pre-push":
-        has_origin = subprocess.run(
-            ["git", "rev-parse", "--verify", "origin"],
+        has_upstream = subprocess.run(
+            ["git", "rev-parse", "--verify", "--quiet", "@{u}"],
             cwd=repo_root,
             capture_output=True,
             text=True,
             check=False,
         )
-        command = ["git", "diff", "origin..HEAD"] if has_origin.returncode == 0 else ["git", "diff", "HEAD"]
+        command = ["git", "diff", "@{u}..HEAD"] if has_upstream.returncode == 0 else ["git", "diff", "HEAD"]
     else:
         raise ValueError(f"unsupported stage: {stage}")
 
