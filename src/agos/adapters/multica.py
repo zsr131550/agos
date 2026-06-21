@@ -150,8 +150,8 @@ class MulticaAdapter(ExecutorAdapter):
                 raw=message,
             )
 
-    def status(self, run_id: str) -> RunStatus:
-        proc = self._run(["issue", "runs", run_id])
+    def status(self, run_id: str, issue_id: str | None = None) -> RunStatus:
+        proc = self._run(["issue", "runs", issue_id or run_id])
         if proc.returncode == EXIT_NOT_FOUND:
             return RunStatus(state="failed", detail="not found")
         if proc.returncode != 0:

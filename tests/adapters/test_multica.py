@@ -95,7 +95,7 @@ def test_status_maps_done_to_completed(tmp_path: Path, monkeypatch):
     from agos.adapters.multica import MulticaAdapter
 
     stub = make_stub(tmp_path, monkeypatch)
-    status = MulticaAdapter(multica_bin=stub).status("MUL-1")
+    status = MulticaAdapter(multica_bin=stub).status("fake-task-uuid", issue_id="MUL-1")
 
     assert status.state == "completed"
 
@@ -116,9 +116,33 @@ def test_not_found_exit_code_maps_to_failed(tmp_path: Path, monkeypatch):
 
     monkeypatch.setattr(multica_module.subprocess, "run", fake_run)
 
-    status = MulticaAdapter(multica_bin=stub).status("MUL-1")
+    status = MulticaAdapter(multica_bin=stub).status("fake-task-uuid", issue_id="MUL-1")
 
     assert status.state == "failed"
+
+
+def test_status_prefers_issue_id_when_available(monkeypatch):
+    from agos.adapters.multica import MulticaAdapter
+    import agos.adapters.multica as multica_module
+
+    calls: list[list[str]] = []
+
+    class FakeProc:
+        def __init__(self, *, returncode: int, stdout: str = "", stderr: str = ""):
+            self.returncode = returncode
+            self.stdout = stdout
+            self.stderr = stderr
+
+    def fake_run(args, **kwargs):
+        calls.append(args)
+        return FakeProc(returncode=0, stdout='{"runs":[{"id":"fake-task-uuid","status":"done"}]}')
+
+    monkeypatch.setattr(multica_module.subprocess, "run", fake_run)
+
+    status = MulticaAdapter(multica_bin="multica").status("fake-task-uuid", issue_id="MUL-1")
+
+    assert status.state == "completed"
+    assert calls[0][1:4] == ["issue", "runs", "MUL-1"]
 
 
 def test_default_binary_is_resolved_before_subprocess(monkeypatch):

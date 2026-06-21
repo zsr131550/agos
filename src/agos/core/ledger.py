@@ -47,6 +47,43 @@ class Ledger:
     def __init__(self, path: Path) -> None:
         self.path = path
 
+    def _last_record(self) -> dict | None:
+        if not self.path.exists():
+            return None
+
+        with self.path.open("rb") as handle:
+            handle.seek(0, 2)
+            end = handle.tell()
+            if end == 0:
+                return None
+
+            position = end - 1
+            while position >= 0:
+                handle.seek(position)
+                byte = handle.read(1)
+                if byte not in {b"\n", b"\r"}:
+                    break
+                position -= 1
+
+            if position < 0:
+                return None
+
+            while position >= 0:
+                handle.seek(position)
+                byte = handle.read(1)
+                if byte == b"\n":
+                    position += 1
+                    break
+                position -= 1
+            else:
+                position = 0
+
+            handle.seek(position)
+            line = handle.read(end - position).decode("utf-8").strip()
+            if not line:
+                return None
+            return json.loads(line)
+
     def _records(self) -> list[dict]:
         if not self.path.exists():
             return []
@@ -64,21 +101,22 @@ class Ledger:
     def head_hash(self) -> str:
         """Return the last record hash, or an empty string when empty."""
 
-        records = self._records()
-        return records[-1]["hash"] if records else ""
+        record = self._last_record()
+        return record["hash"] if record else ""
 
     def next_seq(self) -> int:
         """Return the next 1-based sequence number."""
 
-        records = self._records()
-        return records[-1]["seq"] + 1 if records else 1
+        record = self._last_record()
+        return record["seq"] + 1 if record else 1
 
     def append(self, record: dict) -> dict:
         """Append a record with assigned `seq`, `prev_hash`, and `hash`."""
 
-        prev_hash = self.head_hash()
+        tail = self._last_record()
+        prev_hash = tail["hash"] if tail else ""
         full = dict(record)
-        full.setdefault("seq", self.next_seq())
+        full.setdefault("seq", tail["seq"] + 1 if tail else 1)
         full.setdefault("ts", utc_now())
         full["prev_hash"] = prev_hash
         body = {key: value for key, value in full.items() if key != "hash"}

@@ -15,6 +15,9 @@ def write_config(repo: Path, yaml_text: str) -> None:
 
 
 SAMPLE = """
+executor:
+  name: multica
+  agent: Example Agent
 workflows:
   feature:
     gates:
@@ -88,7 +91,7 @@ def test_gate_spec_command_xor_type():
 
 
 def test_default_config_has_feature_workflow():
-    cfg = default_config()
+    cfg = default_config(agent="Lambda")
     assert "feature" in cfg.workflows
     ids = {g.id for g in cfg.workflows["feature"].gates}
     assert {"tests_pass", "no_secrets_in_diff"} <= ids

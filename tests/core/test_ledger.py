@@ -116,3 +116,22 @@ def test_read_all_returns_in_order(tmp_path: Path):
 def test_head_hash_empty_is_empty_string(tmp_path: Path):
     assert Ledger(tmp_path / "ledger.jsonl").head_hash() == ""
     assert Ledger(tmp_path / "ledger.jsonl").next_seq() == 1
+
+
+def test_append_reads_existing_tail_once(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    led = Ledger(tmp_path / "ledger.jsonl")
+    led.append({"type": "task_started"})
+
+    calls = 0
+    original = led._records
+
+    def counted_records():
+        nonlocal calls
+        calls += 1
+        return original()
+
+    monkeypatch.setattr(led, "_records", counted_records)
+
+    led.append({"type": "checkpoint"})
+
+    assert calls <= 1

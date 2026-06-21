@@ -36,8 +36,8 @@ class FakeAdapter:
             if since is None or event.seq > since:
                 yield event
 
-    def status(self, run_id: str) -> RunStatus:
-        del run_id
+    def status(self, run_id: str, issue_id: str | None = None) -> RunStatus:
+        del run_id, issue_id
         return RunStatus(state="completed")
 
 

@@ -20,7 +20,10 @@ pytestmark = pytest.mark.integration
 
 
 def _integration_agent() -> str:
-    return os.environ.get("AGOS_INTEGRATION_AGENT", "Lambda")
+    agent = os.environ.get("AGOS_INTEGRATION_AGENT", "").strip()
+    if not agent:
+        pytest.skip("set AGOS_INTEGRATION_AGENT to run the real Multica smoke test")
+    return agent
 
 
 def _integration_title(repo_root: Path) -> str:
@@ -49,19 +52,25 @@ def _multica_ready() -> bool:
     if shutil.which(multica_bin) is None and not Path(multica_bin).exists():
         return False
 
-    for command in (
+    daemon_status = subprocess.run(
         [multica_bin, "daemon", "status"],
+        check=False,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+    )
+    if daemon_status.returncode != 0 or "running" not in daemon_status.stdout.lower():
+        return False
+
+    workspace_status = subprocess.run(
         [multica_bin, "workspace", "list", "--output", "json"],
-    ):
-        completed = subprocess.run(
-            command,
-            check=False,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-        )
-        if completed.returncode != 0:
-            return False
+        check=False,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+    )
+    if workspace_status.returncode != 0:
+        return False
     return True
 
 

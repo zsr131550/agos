@@ -11,6 +11,7 @@ runner = CliRunner()
 def test_init_creates_layout_config_and_hooks(monkeypatch, tmp_repo):
     monkeypatch.chdir(tmp_repo)
     monkeypatch.setattr("agos.cli.cmd_init.validate_multica_environment", lambda _executor: [])
+    monkeypatch.setattr("agos.cli.cmd_init.discover_multica_agents", lambda: ["Lambda"])
 
     result = runner.invoke(app, ["init", "--executor", "multica", "--agent", "Lambda"])
 
@@ -26,14 +27,88 @@ def test_init_creates_layout_config_and_hooks(monkeypatch, tmp_repo):
     assert config["default_workflow"] == "feature"
 
 
-def test_init_does_not_hardfail_when_daemon_down(monkeypatch, tmp_repo):
+def test_init_lists_discovered_agents_and_requires_explicit_choice(monkeypatch, tmp_repo):
     monkeypatch.chdir(tmp_repo)
+    monkeypatch.setattr(
+        "agos.cli.cmd_init.discover_multica_agents",
+        lambda: ["codex-gpt-5.4 xhigh", "glm-5.2"],
+    )
+
+    result = runner.invoke(app, ["init"])
+
+    assert result.exit_code == 1
+    assert "No default agent configured and --agent was not provided." in result.stderr
+    assert "Available Multica agents:" in result.stderr
+    assert "- codex-gpt-5.4 xhigh" in result.stderr
+    assert "- glm-5.2" in result.stderr
+    assert 'agos init --agent "codex-gpt-5.4 xhigh"' in result.stderr
+    assert not (tmp_repo / ".agos" / "agos.yaml").exists()
+
+
+def test_init_fails_when_agent_discovery_returns_no_candidates(monkeypatch, tmp_repo):
+    monkeypatch.chdir(tmp_repo)
+    monkeypatch.setattr("agos.cli.cmd_init.discover_multica_agents", lambda: [])
+
+    result = runner.invoke(app, ["init"])
+
+    assert result.exit_code == 1
+    assert "No available Multica agents were found in the current workspace." in result.stderr
+    assert not (tmp_repo / ".agos" / "agos.yaml").exists()
+
+
+def test_init_fails_when_agent_discovery_errors(monkeypatch, tmp_repo):
+    monkeypatch.chdir(tmp_repo)
+
+    def _fail():
+        raise RuntimeError("multica agent list failed: daemon unavailable")
+
+    monkeypatch.setattr("agos.cli.cmd_init.discover_multica_agents", _fail)
+
+    result = runner.invoke(app, ["init"])
+
+    assert result.exit_code == 1
+    assert "Could not discover Multica agents for the current workspace:" in result.stderr
+    assert "multica agent list failed: daemon unavailable" in result.stderr
+    assert not (tmp_repo / ".agos" / "agos.yaml").exists()
+
+
+def test_init_explicit_agent_survives_discovery_failure(monkeypatch, tmp_repo):
+    monkeypatch.chdir(tmp_repo)
+    monkeypatch.setattr("agos.cli.cmd_init.validate_multica_environment", lambda _executor: [])
+
+    def _fail():
+        raise RuntimeError("multica agent list failed: daemon unavailable")
+
+    monkeypatch.setattr("agos.cli.cmd_init.discover_multica_agents", _fail)
+
+    result = runner.invoke(app, ["init", "--agent", "codex-gpt-5.4 xhigh"])
+
+    assert result.exit_code == 0
+    config = yaml.safe_load((tmp_repo / ".agos" / "agos.yaml").read_text(encoding="utf-8"))
+    assert config["executor"]["agent"] == "codex-gpt-5.4 xhigh"
+
+
+def test_init_explicit_agent_fails_when_not_in_discovered_candidates(monkeypatch, tmp_repo):
+    monkeypatch.chdir(tmp_repo)
+    monkeypatch.setattr("agos.cli.cmd_init.discover_multica_agents", lambda: ["glm-5.2"])
+
+    result = runner.invoke(app, ["init", "--agent", "codex-gpt-5.4 xhigh"])
+
+    assert result.exit_code == 1
+    assert 'Configured agent "codex-gpt-5.4 xhigh" was not found in the current workspace.' in result.stderr
+    assert "- glm-5.2" in result.stderr
+    assert not (tmp_repo / ".agos" / "agos.yaml").exists()
+
+
+def test_init_warns_but_keeps_explicit_agent_when_environment_check_fails(monkeypatch, tmp_repo):
+    monkeypatch.chdir(tmp_repo)
+    monkeypatch.setattr("agos.cli.cmd_init.discover_multica_agents", lambda: ["codex-gpt-5.4 xhigh"])
     monkeypatch.setattr(
         "agos.cli.cmd_init.validate_multica_environment",
         lambda _executor: ["multica daemon status failed"],
     )
 
-    result = runner.invoke(app, ["init"])
+    result = runner.invoke(app, ["init", "--agent", "codex-gpt-5.4 xhigh"])
 
     assert result.exit_code == 0
     assert "Warning: multica daemon status failed" in result.stderr
@@ -48,8 +123,9 @@ def test_init_preserves_existing_hooks(monkeypatch, tmp_repo):
 
     monkeypatch.chdir(tmp_repo)
     monkeypatch.setattr("agos.cli.cmd_init.validate_multica_environment", lambda _executor: [])
+    monkeypatch.setattr("agos.cli.cmd_init.discover_multica_agents", lambda: ["codex-gpt-5.4 xhigh"])
 
-    result = runner.invoke(app, ["init"])
+    result = runner.invoke(app, ["init", "--agent", "codex-gpt-5.4 xhigh"])
 
     assert result.exit_code == 0
     backup = hooks_dir / "pre-commit.agos.original"

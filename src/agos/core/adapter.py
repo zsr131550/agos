@@ -50,4 +50,8 @@ class ExecutorAdapter(Protocol):
         since: int | None = None,
     ) -> Iterator[Event]: ...
 
-    def status(self, run_id: str) -> RunStatus: ...
+    def status(
+        self,
+        run_id: str,
+        issue_id: str | None = None,
+    ) -> RunStatus: ...

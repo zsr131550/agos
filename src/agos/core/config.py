@@ -34,7 +34,7 @@ class ExecutorConfig(BaseModel):
     """Default executor binding written by `agos init`."""
 
     name: str = "multica"
-    agent: str = "Lambda"
+    agent: str
 
 
 class AGOSConfig(BaseModel):
@@ -49,7 +49,7 @@ class AGOSConfig(BaseModel):
         cls,
         *,
         executor: str = "multica",
-        agent: str = "Lambda",
+        agent: str,
     ) -> "AGOSConfig":
         return default_config(executor=executor, agent=agent)
 
@@ -76,7 +76,7 @@ class AGOSConfig(BaseModel):
 def default_config(
     *,
     executor: str = "multica",
-    agent: str = "Lambda",
+    agent: str,
 ) -> AGOSConfig:
     """The config `agos init` writes."""
 

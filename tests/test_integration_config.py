@@ -2,17 +2,23 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import subprocess
+
 from tests.integration.test_round_trip import (
     _extract_messages,
     _integration_agent,
+    _multica_ready,
     _integration_title,
 )
 
 
-def test_integration_agent_defaults_to_lambda(monkeypatch):
+def test_integration_agent_skips_when_env_missing(monkeypatch):
+    import pytest
+
     monkeypatch.delenv("AGOS_INTEGRATION_AGENT", raising=False)
 
-    assert _integration_agent() == "Lambda"
+    with pytest.raises(pytest.skip.Exception):
+        _integration_agent()
 
 
 def test_integration_agent_uses_env_override(monkeypatch):
@@ -32,3 +38,26 @@ def test_extract_messages_accepts_list_payload():
     payload = [{"seq": 1, "kind": "text", "content": "hi"}]
 
     assert _extract_messages(payload) == payload
+
+
+def test_multica_ready_rejects_stopped_daemon(monkeypatch):
+    class FakeProc:
+        def __init__(self, stdout: str, returncode: int = 0):
+            self.stdout = stdout
+            self.stderr = ""
+            self.returncode = returncode
+
+    outputs = iter(
+        [
+            FakeProc("Daemon: stopped\n"),
+            FakeProc("[]\n"),
+        ]
+    )
+
+    monkeypatch.setattr("tests.integration.test_round_trip.shutil.which", lambda _name: r"C:\tools\multica.cmd")
+    monkeypatch.setattr(
+        "tests.integration.test_round_trip.subprocess.run",
+        lambda *args, **kwargs: next(outputs),
+    )
+
+    assert _multica_ready() is False

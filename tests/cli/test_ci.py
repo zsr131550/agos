@@ -22,7 +22,7 @@ def _write_active_task(tmp_repo, config_data: dict | None = None):
     paths = repo_paths(tmp_repo)
     paths.agos_dir.mkdir(parents=True, exist_ok=True)
 
-    config_data = config_data or default_config().model_dump(mode="python")
+    config_data = config_data or default_config(agent="Lambda").model_dump(mode="python")
     paths.agos_yaml.write_text(
         yaml.safe_dump(config_data, sort_keys=False),
         encoding="utf-8",

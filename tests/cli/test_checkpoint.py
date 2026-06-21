@@ -7,7 +7,7 @@ import yaml
 from typer.testing import CliRunner
 
 from agos.cli.main import app
-from agos.core.adapter import Event, ExecutorRun
+from agos.core.adapter import Event, ExecutorRun, RunStatus
 from agos.core.config import default_config, resolve_gates
 from agos.core.gate import gates_locked_payload
 from agos.core.ledger import append_task_record
@@ -21,7 +21,7 @@ runner = CliRunner()
 def _write_active_task(tmp_repo, *, run_id: str = "run-123", last_event_seq: int | None = None):
     paths = repo_paths(tmp_repo)
     paths.agos_dir.mkdir(parents=True, exist_ok=True)
-    config = default_config()
+    config = default_config(agent="Lambda")
     paths.agos_yaml.write_text(
         yaml.safe_dump(config.model_dump(mode="python"), sort_keys=False),
         encoding="utf-8",
@@ -192,3 +192,31 @@ def test_checkpoint_follow_stops_after_run_complete(monkeypatch, tmp_repo):
     message_path = paths.evidence / "messages" / "run-123.jsonl"
     lines = [json.loads(line) for line in message_path.read_text(encoding="utf-8").splitlines()]
     assert [line["kind"] for line in lines] == ["text", "run_complete"]
+
+
+def test_checkpoint_once_marks_completed_when_run_finished_without_new_events(monkeypatch, tmp_repo):
+    paths, _task = _write_active_task(tmp_repo)
+
+    class FakeAdapter:
+        def stream_events(self, run_id: str, since: int | None = None):
+            del run_id, since
+            return iter([])
+
+        def status(self, run_id: str, issue_id: str | None = None):
+            assert run_id == "run-123"
+            assert issue_id == "AGO-99"
+            return RunStatus(state="completed", detail="done")
+
+    status = load_status(paths)
+    assert status is not None
+
+    from agos.cli import cmd_checkpoint
+
+    completed, last_seq = cmd_checkpoint._checkpoint_once(
+        adapter=FakeAdapter(),
+        status=status,
+        paths=paths,
+    )
+
+    assert completed is True
+    assert last_seq is None

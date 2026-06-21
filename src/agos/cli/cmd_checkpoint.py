@@ -27,7 +27,8 @@ def _checkpoint_once(*, adapter: MulticaAdapter, status: TaskStatus, paths) -> t
     store = EvidenceStore(paths.evidence)
     events = list(adapter.stream_events(run_info.run_id, since=status.last_event_seq))
     if not events:
-        return False, status.last_event_seq
+        run_status = adapter.status(run_info.run_id, issue_id=run_info.issue_id)
+        return run_status.state == "completed", status.last_event_seq
 
     for event in events:
         store.append_message(run_info.run_id, event.raw or {

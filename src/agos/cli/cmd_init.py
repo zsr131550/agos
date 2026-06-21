@@ -1,6 +1,7 @@
 """`agos init` command."""
 from __future__ import annotations
 
+import json
 import subprocess
 from importlib import resources
 from pathlib import Path
@@ -11,6 +12,92 @@ from agos.adapters.multica import resolve_multica_bin
 from agos.core.config import AGOSConfig
 from agos.core.ledger import append_repo_record
 from agos.core.repo import agos_dir, config_path, find_repo_root, repo_ledger_path
+
+
+class InitAgentResolutionError(Exception):
+    """Raised when `agos init` cannot resolve a valid agent choice."""
+
+
+def discover_multica_agents() -> list[str]:
+    """Return visible Multica agent names for the current workspace."""
+
+    multica_bin = resolve_multica_bin()
+    try:
+        completed = subprocess.run(
+            [multica_bin, "agent", "list", "--output", "json"],
+            capture_output=True,
+            text=True,
+            check=False,
+            encoding="utf-8",
+        )
+    except OSError as exc:
+        raise RuntimeError(f"multica agent list failed: {exc}") from exc
+
+    if completed.returncode != 0:
+        detail = completed.stderr.strip() or completed.stdout.strip() or "command failed"
+        raise RuntimeError(f"multica agent list failed: {detail}")
+
+    try:
+        payload = json.loads(completed.stdout or "[]")
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"multica agent list returned invalid JSON: {exc.msg}") from exc
+
+    if not isinstance(payload, list):
+        raise RuntimeError("multica agent list returned an unexpected payload")
+
+    return [
+        item["name"]
+        for item in payload
+        if isinstance(item, dict) and isinstance(item.get("name"), str) and item["name"].strip()
+    ]
+
+
+def _render_agent_candidates(candidates: list[str]) -> str:
+    return "\n".join(f"- {candidate}" for candidate in candidates)
+
+
+def resolve_init_agent(agent: str | None) -> str:
+    """Resolve the agent to write into AGOS config for `init`."""
+
+    if agent is not None:
+        try:
+            candidates = discover_multica_agents()
+        except RuntimeError:
+            return agent
+        if agent in candidates:
+            return agent
+        candidate_lines = _render_agent_candidates(candidates) if candidates else "- <none>"
+        raise InitAgentResolutionError(
+            f'Configured agent "{agent}" was not found in the current workspace.\n\n'
+            f"Available Multica agents:\n{candidate_lines}"
+        )
+
+    try:
+        candidates = discover_multica_agents()
+    except RuntimeError as exc:
+        raise InitAgentResolutionError(
+            "No default agent configured and --agent was not provided.\n\n"
+            "Could not discover Multica agents for the current workspace:\n"
+            f"  {exc}\n\n"
+            "Re-run with:\n"
+            '  agos init --agent "<agent-name>"'
+        ) from exc
+
+    if not candidates:
+        raise InitAgentResolutionError(
+            "No default agent configured and --agent was not provided.\n\n"
+            "No available Multica agents were found in the current workspace.\n"
+            "Create or enable an agent in Multica, then re-run:\n"
+            '  agos init --agent "<agent-name>"'
+        )
+
+    raise InitAgentResolutionError(
+        "No default agent configured and --agent was not provided.\n\n"
+        "Available Multica agents:\n"
+        f"{_render_agent_candidates(candidates)}\n\n"
+        "Re-run with:\n"
+        f'  agos init --agent "{candidates[0]}"'
+    )
 
 
 def validate_multica_environment(executor: str) -> list[str]:
@@ -56,12 +143,18 @@ def _install_hook(git_hooks_dir: Path, *, stage: str) -> None:
 
 def init_command(
     executor: str = typer.Option("multica", "--executor", help="Executor adapter to configure."),
-    agent: str = typer.Option("Lambda", "--agent", help="Default Multica agent name."),
+    agent: str | None = typer.Option(None, "--agent", help="Default Multica agent name."),
 ) -> None:
     """Create `.agos/`, write config, and install git hooks."""
 
     if executor != "multica":
         raise typer.BadParameter("Only the 'multica' executor is supported in v0.1.")
+
+    try:
+        resolved_agent = resolve_init_agent(agent)
+    except InitAgentResolutionError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(code=1) from exc
 
     repo_root = find_repo_root()
     agos_root = agos_dir(repo_root)
@@ -69,7 +162,7 @@ def init_command(
     (agos_root / "tasks" / "current").mkdir(parents=True, exist_ok=True)
     (agos_root / "hooks").mkdir(parents=True, exist_ok=True)
 
-    config = AGOSConfig.default(executor=executor, agent=agent)
+    config = AGOSConfig.default(executor=executor, agent=resolved_agent)
     config.save(config_path(repo_root))
 
     git_hooks_dir = repo_root / ".git" / "hooks"
@@ -81,7 +174,7 @@ def init_command(
         repo_ledger_path(repo_root),
         "repo_initialized",
         executor=executor,
-        agent=agent,
+        agent=resolved_agent,
         hooks=["pre-commit", "pre-push"],
     )
 
