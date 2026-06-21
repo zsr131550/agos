@@ -44,6 +44,67 @@ def test_resolve_finding_updates_status_and_prints_result(monkeypatch, tmp_repo)
     assert "finding-01 resolved" in result.stdout
 
 
+def test_resolve_rejects_underscore_status_alias(monkeypatch, tmp_repo):
+    _create_blocking_finding(monkeypatch, tmp_repo)
+
+    result = runner.invoke(
+        app,
+        [
+            "resolve",
+            "finding-01",
+            "--status",
+            "accepted_risk",
+            "--rationale",
+            "Risk accepted.",
+            "--approved-by",
+            "review-board",
+        ],
+    )
+
+    assert result.exit_code != 0
+    assert "invalid status: accepted_risk" in result.stderr
+
+
+def test_resolve_accepted_risk_requires_approved_by(monkeypatch, tmp_repo):
+    _create_blocking_finding(monkeypatch, tmp_repo)
+
+    result = runner.invoke(
+        app,
+        [
+            "resolve",
+            "finding-01",
+            "--status",
+            "accepted-risk",
+            "--rationale",
+            "Risk accepted.",
+        ],
+    )
+
+    assert result.exit_code == 1
+    assert "approved" in result.stderr
+
+
+def test_resolve_accepted_risk_with_approved_by_succeeds(monkeypatch, tmp_repo):
+    _create_blocking_finding(monkeypatch, tmp_repo)
+
+    result = runner.invoke(
+        app,
+        [
+            "resolve",
+            "finding-01",
+            "--status",
+            "accepted-risk",
+            "--rationale",
+            "Risk accepted.",
+            "--approved-by",
+            "review-board",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert "finding-01 accepted_risk" in result.stdout
+
+
 def _create_blocking_finding(monkeypatch, tmp_repo) -> None:
     _active_task(tmp_repo)
     monkeypatch.chdir(tmp_repo)

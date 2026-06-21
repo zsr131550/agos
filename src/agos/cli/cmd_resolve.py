@@ -8,6 +8,14 @@ from agos.core.review import FindingResolution
 from agos.core.review_service import ReviewService
 
 
+_STATUS_VALUES = {
+    "resolved": "resolved",
+    "accepted-risk": "accepted_risk",
+    "false-positive": "false_positive",
+    "superseded": "superseded",
+}
+
+
 def resolve_command(
     finding_id: str,
     status: str = typer.Option(
@@ -32,9 +40,13 @@ def resolve_command(
     ),
 ) -> None:
     try:
+        model_status = _STATUS_VALUES.get(status)
+        if model_status is None:
+            raise ValueError(f"invalid status: {status}")
+
         repo_root = find_initialized_repo_root()
         resolution = FindingResolution(
-            status=status.replace("-", "_"),
+            status=model_status,
             evidence_refs=evidence or [],
             rationale=rationale,
             approved_by=approved_by,
