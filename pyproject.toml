@@ -26,6 +26,9 @@ agos = "agos.cli.main:app"
 [tool.setuptools.packages.find]
 where = ["src"]
 
+[tool.setuptools.package-data]
+"agos.hooks.templates" = ["*.sh"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-ra"

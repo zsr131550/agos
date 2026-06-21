@@ -1,1 +1,1 @@
-"""AGOS core primitives."""
+"""Core AGOS models and helpers."""
