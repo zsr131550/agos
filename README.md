@@ -17,6 +17,8 @@ agos init [--executor multica] [--agent "Lambda"]
 agos start --title "..." [--intent "..."] [--workflow feature] [--gate tests_pass,...]
 agos checkpoint [--follow] [--once]
 agos ci --local --stage <pre-commit|pre-push>
+agos task status
+agos task clear --force
 ```
 
 ## The v0.1 loop
@@ -28,6 +30,8 @@ init -> start -> checkpoint --once -> ci --local
 - The agent runs in multica's isolated workspace (`~/multica_workspaces/<per-task>/`), not in your repo.
 - `agos checkpoint` streams the agent's reported activity into an evidence ledger and records a governed-repo anchor (HEAD + status) at capture time. It does not claim the agent edited your working tree.
 - `agos ci --local` gates a human developer's commit/push only (advisory and bypassable with `--no-verify`). The agent's own commits never pass through these hooks. Agent output is gated server-side at the merge gate, which lands in v0.2.
+- Gate commands may use shell-style `command: "pytest -q"` for compatibility or structured `argv: ["pytest", "-q"]` for cross-platform execution without a shell. New configs prefer `argv`.
+- `agos task status` prints the active task cache, and `agos task clear --force` clears a stale `.agos/tasks/current` directory after manual review.
 
 ## Trust model (v0.1 limitation)
 

@@ -7,11 +7,20 @@ import typer
 
 from agos.adapters.multica import MulticaAdapter
 from agos.core.config import load_config, resolve_gates
+from agos.core.evidence import EvidenceStore
 from agos.core.gate import gates_locked_payload
-from agos.core.ledger import append_task_record
-from agos.core.repo import current_task_dir, current_task_is_active, find_initialized_repo_root, repo_paths
+from agos.core.ledger import Ledger
+from agos.core.repo import (
+    current_task_dir,
+    current_task_is_active,
+    find_initialized_repo_root,
+    repo_paths,
+    staging_task_dir,
+    task_paths,
+)
 from agos.core.status import TaskStatus, save_status
 from agos.core.task import ExecutorBinding, Task, new_task_id
+
 
 def _parse_gate_overrides(gate_values: list[str] | None) -> list[str]:
     overrides: list[str] = []
@@ -33,8 +42,8 @@ def start_command(
     except FileNotFoundError as exc:
         typer.echo(str(exc), err=True)
         raise typer.Exit(code=1) from exc
-    task_dir = current_task_dir(repo_root)
-    if current_task_is_active(task_dir):
+    current_dir = current_task_dir(repo_root)
+    if current_task_is_active(current_dir):
         typer.echo("Active task already exists in .agos/tasks/current", err=True)
         raise typer.Exit(code=1)
 
@@ -60,46 +69,69 @@ def start_command(
         ),
     )
 
-    paths = repo_paths(repo_root)
-    task_dir.mkdir(parents=True, exist_ok=True)
-    task.save(paths.task_yaml)
-
-    append_task_record(
-        paths.ledger,
-        "task_started",
-        task_id=task.id,
-        title=task.title,
-        workflow=task.workflow,
-    )
-    append_task_record(
-        paths.ledger,
-        "gates_locked",
-        task_id=task.id,
-        gates=gates_locked_payload(resolved_gates),
-    )
-
     if task.executor.adapter != "multica":
         typer.echo(f"Unsupported executor '{task.executor.adapter}'", err=True)
         raise typer.Exit(code=1)
+
+    published_paths = repo_paths(repo_root)
+    staging_dir = staging_task_dir(repo_root, task.id)
+    shutil.rmtree(staging_dir, ignore_errors=True)
+    staging_paths = task_paths(repo_root, staging_dir)
+    staging_dir.mkdir(parents=True, exist_ok=True)
+    task.save(staging_paths.task_yaml)
+
+    ledger = Ledger(staging_paths.ledger)
+    ledger.append(
+        {
+            "type": "task_started",
+            "task_id": task.id,
+            "title": task.title,
+            "workflow": task.workflow,
+        }
+    )
+    ledger.append(
+        {
+            "type": "gates_locked",
+            "task_id": task.id,
+            "gates": gates_locked_payload(resolved_gates),
+        }
+    )
 
     adapter = MulticaAdapter()
     try:
         run = adapter.start(task)
     except RuntimeError as exc:
-        shutil.rmtree(task_dir, ignore_errors=True)
-        task_dir.mkdir(parents=True, exist_ok=True)
+        shutil.rmtree(staging_dir, ignore_errors=True)
         typer.echo(str(exc), err=True)
         raise typer.Exit(code=1) from exc
 
-    final_record = append_task_record(
-        paths.ledger,
-        "executor_dispatched",
-        task_id=task.id,
-        adapter=run.adapter,
-        run_id=run.run_id,
-        issue_id=run.issue_id,
-    )
-    status = TaskStatus.for_started_task(task=task, run=run, ledger_head_hash=final_record["hash"])
-    save_status(status, paths)
+    try:
+        EvidenceStore(staging_paths.evidence).write_run(
+            run.run_id,
+            {
+                "task_id": task.id,
+                "adapter": run.adapter,
+                "run_id": run.run_id,
+                "issue_id": run.issue_id,
+            },
+        )
+        final_record = ledger.append(
+            {
+                "type": "executor_dispatched",
+                "task_id": task.id,
+                "adapter": run.adapter,
+                "run_id": run.run_id,
+                "issue_id": run.issue_id,
+            }
+        )
+        status = TaskStatus.for_started_task(task=task, run=run, ledger_head_hash=final_record["hash"])
+        save_status(status, staging_paths)
+
+        shutil.rmtree(published_paths.current_task, ignore_errors=True)
+        published_paths.current_task.parent.mkdir(parents=True, exist_ok=True)
+        staging_dir.rename(published_paths.current_task)
+    except Exception:
+        shutil.rmtree(staging_dir, ignore_errors=True)
+        raise
 
     typer.echo(run.issue_id or run.run_id)

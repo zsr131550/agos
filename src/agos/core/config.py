@@ -8,18 +8,20 @@ from pydantic import BaseModel, Field, model_validator
 
 
 class GateSpec(BaseModel):
-    """A gate declaration in agos.yaml. Exactly one of command/type."""
+    """A gate declaration in agos.yaml. Exactly one of command/argv/type."""
 
     id: str
     stage: list[str]
     command: str | None = None
+    argv: list[str] | None = None
     type: str | None = None
 
     @model_validator(mode="after")
     def _exactly_one(self) -> "GateSpec":
-        if (self.command is None) == (self.type is None):
+        choices = [self.command is not None, self.argv is not None, self.type is not None]
+        if sum(choices) != 1:
             raise ValueError(
-                f"gate {self.id!r} must have exactly one of 'command' or 'type'"
+                f"gate {self.id!r} must have exactly one of 'command', 'argv', or 'type'"
             )
         return self
 
@@ -90,7 +92,7 @@ def default_config(
                         {
                             "id": "tests_pass",
                             "stage": ["pre-commit", "pre-push"],
-                            "command": "pytest -q",
+                            "argv": ["pytest", "-q"],
                         },
                         {
                             "id": "no_secrets_in_diff",

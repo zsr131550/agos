@@ -9,6 +9,7 @@ from pathlib import Path
 import typer
 
 from agos.adapters.multica import resolve_multica_bin
+from agos.core.command import run_command
 from agos.core.config import AGOSConfig
 from agos.core.ledger import append_repo_record
 from agos.core.repo import agos_dir, config_path, find_repo_root, repo_ledger_path
@@ -23,14 +24,14 @@ def discover_multica_agents() -> list[str]:
 
     multica_bin = resolve_multica_bin()
     try:
-        completed = subprocess.run(
+        completed = run_command(
             [multica_bin, "agent", "list", "--output", "json"],
             capture_output=True,
             text=True,
             check=False,
             encoding="utf-8",
         )
-    except OSError as exc:
+    except (OSError, subprocess.TimeoutExpired) as exc:
         raise RuntimeError(f"multica agent list failed: {exc}") from exc
 
     if completed.returncode != 0:
@@ -113,7 +114,10 @@ def validate_multica_environment(executor: str) -> list[str]:
         [multica_bin, "workspace", "list", "--output", "json"],
     ]
     for command in commands:
-        completed = subprocess.run(command, capture_output=True, text=True, check=False)
+        try:
+            completed = run_command(command, capture_output=True, text=True, check=False)
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            completed = subprocess.CompletedProcess(command, 1, stdout="", stderr=str(exc))
         if completed.returncode != 0:
             display_command = "multica " + " ".join(command[1:3])
             detail = completed.stderr.strip() or completed.stdout.strip() or "command failed"

@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal, Protocol, runtime_checkable
 
+from agos.core.command import run_command
 from agos.core.config import GateSpec
 
 
@@ -61,17 +62,29 @@ class CommandGate:
         log_dir = ctx.evidence_dir / "gates"
         log_dir.mkdir(parents=True, exist_ok=True)
         log_path = log_dir / f"{self.id}-{_fsafe_ts()}.log"
+        command_text = self.spec.command or ""
+        argv = self.spec.argv
         try:
-            proc = subprocess.run(
-                self.spec.command,
-                shell=True,
+            proc = run_command(
+                argv if argv is not None else command_text,
+                shell=argv is None,
                 cwd=ctx.repo_root,
                 capture_output=True,
                 text=True,
             )
+        except subprocess.TimeoutExpired as exc:
+            log_path.write_text(
+                f"command: {command_text}\nargv: {argv}\ntimeout: {exc.timeout}\n",
+                encoding="utf-8",
+            )
+            return GateResult(
+                state="block",
+                reason=f"gate {self.id}: command timed out after {exc.timeout}s",
+                evidence_path=str(log_path),
+            )
         except OSError as exc:
             log_path.write_text(
-                f"command: {self.spec.command}\nstart_error: {exc}\n",
+                f"command: {command_text}\nargv: {argv}\nstart_error: {exc}\n",
                 encoding="utf-8",
             )
             return GateResult(
@@ -82,7 +95,8 @@ class CommandGate:
 
         log_path.write_text(
             (
-                f"command: {self.spec.command}\n"
+                f"command: {command_text}\n"
+                f"argv: {argv}\n"
                 f"exit_code: {proc.returncode}\n"
                 f"--- stdout ---\n{proc.stdout}\n"
                 f"--- stderr ---\n{proc.stderr}\n"
@@ -125,7 +139,7 @@ class SecretScanGate:
 
 
 def build_gate(spec: GateSpec) -> Gate:
-    if spec.command is not None:
+    if spec.command is not None or spec.argv is not None:
         return CommandGate(spec)
     if spec.type == "secret_scan":
         return SecretScanGate(spec)
@@ -138,6 +152,7 @@ def gates_locked_payload(gates: list[GateSpec]) -> list[dict]:
             "id": gate.id,
             "stage": sorted(gate.stage),
             "command": gate.command,
+            "argv": gate.argv,
             "type": gate.type,
         }
         for gate in gates
@@ -146,9 +161,9 @@ def gates_locked_payload(gates: list[GateSpec]) -> list[dict]:
 
 def gates_match(locked: list[dict], current: list[GateSpec]) -> bool:
     return sorted(
-        (entry["id"], tuple(entry["stage"]), entry["command"], entry["type"])
+        (entry["id"], tuple(entry["stage"]), entry.get("command"), tuple(entry.get("argv") or []), entry["type"])
         for entry in locked
     ) == sorted(
-        (gate.id, tuple(sorted(gate.stage)), gate.command, gate.type)
+        (gate.id, tuple(sorted(gate.stage)), gate.command, tuple(gate.argv or []), gate.type)
         for gate in current
     )

@@ -51,6 +51,17 @@ def test_command_gate_block_when_command_missing(tmp_repo: Path):
     assert "not" in res.reason.lower() or "fail" in res.reason.lower()
 
 
+def test_command_gate_supports_structured_argv(tmp_repo: Path):
+    spec = GateSpec(id="argv_ok", stage=["pre-commit"], argv=[sys.executable, "-c", "raise SystemExit(0)"])
+
+    res = CommandGate(spec).evaluate(ctx(tmp_repo))
+
+    assert res.state == "pass"
+    assert res.evidence_path is not None
+    log = Path(res.evidence_path).read_text(encoding="utf-8")
+    assert "argv:" in log
+
+
 def test_secret_scan_clear(tmp_repo: Path):
     spec = GateSpec(id="no_secrets", stage=["pre-commit"], type="secret_scan")
     res = SecretScanGate(spec).evaluate(ctx(tmp_repo, diff="print('hello world')\n"))
@@ -86,13 +97,13 @@ def test_build_gate_factory():
 
 def test_gates_locked_payload_stable():
     specs = [
-        GateSpec(id="tests_pass", stage=["pre-commit", "pre-push"], command="pytest -q"),
+        GateSpec(id="tests_pass", stage=["pre-commit", "pre-push"], argv=["pytest", "-q"]),
         GateSpec(id="no_secrets", stage=["pre-commit"], type="secret_scan"),
     ]
     p = gates_locked_payload(specs)
     assert p[0]["id"] == "tests_pass"
     assert p[0]["stage"] == ["pre-commit", "pre-push"]
-    assert p[0]["command"] == "pytest -q"
+    assert p[0]["argv"] == ["pytest", "-q"]
     assert p[1]["type"] == "secret_scan"
 
 

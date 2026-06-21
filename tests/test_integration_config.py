@@ -2,8 +2,6 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import subprocess
-
 from tests.integration.test_round_trip import (
     _extract_messages,
     _integration_agent,

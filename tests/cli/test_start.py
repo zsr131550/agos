@@ -64,6 +64,15 @@ def test_start_writes_task_status_and_dispatches(monkeypatch, tmp_repo):
     assert status["executor_run"]["run_id"] == "task-123"
     assert status["executor_run"]["issue_id"] == "AGO-77"
 
+    run_meta = json.loads(
+        (tmp_repo / ".agos" / "tasks" / "current" / "evidence" / "runs" / "task-123.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert run_meta["task_id"] == task_data["id"]
+    assert run_meta["adapter"] == "multica"
+    assert run_meta["issue_id"] == "AGO-77"
+
     ledger_path = tmp_repo / ".agos" / "tasks" / "current" / "ledger.jsonl"
     records = [json.loads(line) for line in ledger_path.read_text(encoding="utf-8").splitlines()]
     assert [record["type"] for record in records] == [
@@ -89,6 +98,27 @@ def test_start_aborts_if_task_already_active(monkeypatch, tmp_repo):
 
     assert result.exit_code == 1
     assert "Active task already exists" in result.stderr
+
+
+def test_start_stages_task_until_dispatch_succeeds(monkeypatch, tmp_repo):
+    _write_config(tmp_repo)
+    current_dir = tmp_repo / ".agos" / "tasks" / "current"
+    staging_root = tmp_repo / ".agos" / "tasks" / "staging"
+    monkeypatch.chdir(tmp_repo)
+
+    def fake_start(_self, task):
+        assert not current_dir.exists() or not any(current_dir.iterdir())
+        staged_task_yaml = staging_root / task.id / "task.yaml"
+        assert staged_task_yaml.is_file()
+        return SimpleNamespace(adapter="multica", run_id="task-staged", issue_id="AGO-100")
+
+    monkeypatch.setattr("agos.cli.cmd_start.MulticaAdapter.start", fake_start)
+
+    result = runner.invoke(app, ["start", "--title", "Staged"])
+
+    assert result.exit_code == 0
+    assert (current_dir / "task.yaml").is_file()
+    assert not staging_root.exists() or not any(staging_root.iterdir())
 
 
 def test_start_cleans_up_current_task_when_dispatch_fails(monkeypatch, tmp_repo):

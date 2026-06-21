@@ -1,21 +1,21 @@
 """`agos ci --local` command."""
 from __future__ import annotations
 
-import subprocess
 from pathlib import Path
 
 import typer
 
+from agos.core.command import run_command
 from agos.core.config import load_config, resolve_gates
 from agos.core.gate import GateContext, build_gate, gates_match
-from agos.core.ledger import Ledger, LedgerTamperError, append_task_record
+from agos.core.ledger import Ledger, LedgerTamperError
 from agos.core.repo import find_repo_root, repo_paths
 from agos.core.status import GateState, load_status, save_status
 from agos.core.task import load_task
 
 
 def _is_ancestor(repo_root: Path, ancestor: str, descendant: str) -> bool:
-    completed = subprocess.run(
+    completed = run_command(
         ["git", "merge-base", "--is-ancestor", ancestor, descendant],
         cwd=repo_root,
         capture_output=True,
@@ -29,7 +29,7 @@ def _git_diff_for_stage(repo_root, stage: str) -> str:
     if stage == "pre-commit":
         command = ["git", "diff", "--cached"]
     elif stage == "pre-push":
-        has_upstream = subprocess.run(
+        has_upstream = run_command(
             ["git", "rev-parse", "--verify", "--quiet", "@{u}"],
             cwd=repo_root,
             capture_output=True,
@@ -40,7 +40,7 @@ def _git_diff_for_stage(repo_root, stage: str) -> str:
     else:
         raise ValueError(f"unsupported stage: {stage}")
 
-    completed = subprocess.run(
+    completed = run_command(
         command,
         cwd=repo_root,
         check=True,
@@ -89,7 +89,8 @@ def ci_local_command(
         typer.echo(f"Current gate set does not match gates_locked: {exc}", err=True)
         raise typer.Exit(code=1) from exc
 
-    locked_records = [record for record in ledger.read_all() if record.get("type") == "gates_locked"]
+    records = ledger.read_all()
+    locked_records = [record for record in records if record.get("type") == "gates_locked"]
     locked = locked_records[-1]["gates"] if locked_records else []
     if not gates_match(locked, resolved_gates):
         typer.echo("Current gate set does not match gates_locked", err=True)
@@ -97,10 +98,10 @@ def ci_local_command(
 
     checkpoint_heads = [
         record.get("repo_head")
-        for record in ledger.read_all()
+        for record in records
         if record.get("type") == "checkpoint" and record.get("repo_head")
     ]
-    current_head = subprocess.run(
+    current_head = run_command(
         ["git", "rev-parse", "HEAD"],
         cwd=repo_root,
         capture_output=True,
@@ -109,12 +110,13 @@ def ci_local_command(
     ).stdout.strip()
     for repo_head in checkpoint_heads:
         if not _is_ancestor(repo_root, repo_head, current_head):
-            record = append_task_record(
-                paths.ledger,
-                "repo_history_drift",
-                stage=stage,
-                checkpoint_repo_head=repo_head,
-                current_repo_head=current_head,
+            record = ledger.append(
+                {
+                    "type": "repo_history_drift",
+                    "stage": stage,
+                    "checkpoint_repo_head": repo_head,
+                    "current_repo_head": current_head,
+                }
             )
             status.ledger_head_hash = record["hash"]
             save_status(status, paths)
@@ -136,14 +138,15 @@ def ci_local_command(
                 evidence_dir=paths.evidence,
             )
         )
-        record = append_task_record(
-            paths.ledger,
-            "gate_evaluated",
-            gate=gate_spec.id,
-            stage=stage,
-            state=result.state,
-            reason=result.reason,
-            evidence_path=result.evidence_path,
+        record = ledger.append(
+            {
+                "type": "gate_evaluated",
+                "gate": gate_spec.id,
+                "stage": stage,
+                "state": result.state,
+                "reason": result.reason,
+                "evidence_path": result.evidence_path,
+            }
         )
         gate_states[gate_spec.id] = GateState(state=result.state, last_evaluated=record["ts"])
         status.ledger_head_hash = record["hash"]

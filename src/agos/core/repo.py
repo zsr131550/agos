@@ -1,9 +1,10 @@
 """.agos/ path layout and git helpers (governed-repo side only)."""
 from __future__ import annotations
 
-import subprocess
 from dataclasses import dataclass
 from pathlib import Path
+
+from agos.core.command import run_command
 
 
 @dataclass(frozen=True)
@@ -23,24 +24,33 @@ class AgosPaths:
     hooks: Path
 
 
-def repo_paths(repo_root: Path) -> AgosPaths:
-    """Build the `.agos/` path layout for the given repo root."""
+def task_paths(repo_root: Path, task_dir: Path) -> AgosPaths:
+    """Build `.agos/` paths for a specific task directory."""
 
     agos = repo_root / ".agos"
-    current = agos / "tasks" / "current"
     return AgosPaths(
         root=repo_root,
         agos_dir=agos,
         agos_yaml=agos / "agos.yaml",
         repo_ledger=agos / "repo_ledger.jsonl",
         tasks=agos / "tasks",
-        current_task=current,
-        task_yaml=current / "task.yaml",
-        status_json=current / "status.json",
-        ledger=current / "ledger.jsonl",
-        evidence=current / "evidence",
+        current_task=task_dir,
+        task_yaml=task_dir / "task.yaml",
+        status_json=task_dir / "status.json",
+        ledger=task_dir / "ledger.jsonl",
+        evidence=task_dir / "evidence",
         hooks=agos / "hooks",
     )
+
+
+def repo_paths(repo_root: Path) -> AgosPaths:
+    """Build the `.agos/` path layout for the current task."""
+
+    return task_paths(repo_root, repo_root / ".agos" / "tasks" / "current")
+
+
+def staging_task_dir(repo_root: Path, task_id: str) -> Path:
+    return repo_root / ".agos" / "tasks" / "staging" / task_id
 
 
 def agos_dir(repo_root: Path) -> Path:
@@ -70,7 +80,7 @@ def current_task_is_active(task_dir: Path) -> bool:
 def git_head(repo_root: Path) -> str:
     """Return the full SHA of `HEAD` in the governed repo."""
 
-    out = subprocess.run(
+    out = run_command(
         ["git", "rev-parse", "HEAD"],
         cwd=repo_root,
         check=True,
@@ -83,7 +93,7 @@ def git_head(repo_root: Path) -> str:
 def git_status_porcelain(repo_root: Path) -> str:
     """Return `git status --porcelain` output."""
 
-    out = subprocess.run(
+    out = run_command(
         ["git", "status", "--porcelain"],
         cwd=repo_root,
         check=True,

@@ -45,13 +45,13 @@ def test_start_parses_issue_json_no_workdir_flag(tmp_path: Path, monkeypatch):
 
     stub = make_stub(tmp_path, monkeypatch)
     calls: list[list[str]] = []
-    real_run = multica_module.subprocess.run
+    real_run = multica_module.run_command
 
     def spy(args, **kwargs):
         calls.append(args)
         return real_run(args, **kwargs)
 
-    monkeypatch.setattr(multica_module.subprocess, "run", spy)
+    monkeypatch.setattr(multica_module, "run_command", spy)
 
     run = MulticaAdapter(multica_bin=stub).start(make_task())
 
@@ -114,11 +114,58 @@ def test_not_found_exit_code_maps_to_failed(tmp_path: Path, monkeypatch):
     def fake_run(args, **kwargs):
         return FakeProc()
 
-    monkeypatch.setattr(multica_module.subprocess, "run", fake_run)
+    monkeypatch.setattr(multica_module, "run_command", fake_run)
 
     status = MulticaAdapter(multica_bin=stub).status("fake-task-uuid", issue_id="MUL-1")
 
     assert status.state == "failed"
+
+
+def test_retryable_exit_retries_before_success(monkeypatch):
+    from agos.adapters.multica import MulticaAdapter
+    import agos.adapters.multica as multica_module
+
+    calls: list[list[str]] = []
+
+    class FakeProc:
+        def __init__(self, *, returncode: int, stdout: str = "", stderr: str = ""):
+            self.returncode = returncode
+            self.stdout = stdout
+            self.stderr = stderr
+
+    def fake_run(args, **kwargs):
+        del kwargs
+        calls.append(args)
+        if len(calls) == 1:
+            return FakeProc(returncode=2, stderr="network")
+        return FakeProc(returncode=0, stdout='{"runs":[{"id":"fake-task-uuid","status":"done"}]}')
+
+    sleeps: list[int] = []
+    monkeypatch.setattr(multica_module, "run_command", fake_run)
+    monkeypatch.setattr(multica_module.time, "sleep", lambda seconds: sleeps.append(seconds))
+
+    status = MulticaAdapter(multica_bin="multica").status("fake-task-uuid", issue_id="MUL-1")
+
+    assert status.state == "completed"
+    assert len(calls) == 2
+    assert sleeps == [2]
+
+
+def test_timeout_raises_runtime_error_after_retries(monkeypatch):
+    from agos.adapters.multica import MulticaAdapter
+    import agos.adapters.multica as multica_module
+
+    def timeout(*_args, **_kwargs):
+        raise multica_module.subprocess.TimeoutExpired(cmd="multica", timeout=30)
+
+    monkeypatch.setattr(multica_module, "run_command", timeout)
+
+    try:
+        MulticaAdapter(multica_bin="multica").status("fake-task-uuid", issue_id="MUL-1")
+    except RuntimeError as exc:
+        assert "timed out" in str(exc)
+    else:
+        raise AssertionError("expected RuntimeError")
 
 
 def test_status_prefers_issue_id_when_available(monkeypatch):
@@ -137,7 +184,7 @@ def test_status_prefers_issue_id_when_available(monkeypatch):
         calls.append(args)
         return FakeProc(returncode=0, stdout='{"runs":[{"id":"fake-task-uuid","status":"done"}]}')
 
-    monkeypatch.setattr(multica_module.subprocess, "run", fake_run)
+    monkeypatch.setattr(multica_module, "run_command", fake_run)
 
     status = MulticaAdapter(multica_bin="multica").status("fake-task-uuid", issue_id="MUL-1")
 
@@ -171,7 +218,7 @@ def test_default_binary_is_resolved_before_subprocess(monkeypatch):
         raise AssertionError(args)
 
     monkeypatch.setattr(multica_module.shutil, "which", fake_which)
-    monkeypatch.setattr(multica_module.subprocess, "run", fake_run)
+    monkeypatch.setattr(multica_module, "run_command", fake_run)
 
     run = MulticaAdapter().start(make_task())
 
@@ -199,7 +246,7 @@ def test_start_accepts_list_payload_from_issue_runs(tmp_path: Path, monkeypatch)
             return FakeProc(returncode=0, stdout='[{"id":"fake-task-uuid","status":"todo"}]')
         raise AssertionError(args)
 
-    monkeypatch.setattr(multica_module.subprocess, "run", fake_run)
+    monkeypatch.setattr(multica_module, "run_command", fake_run)
 
     run = MulticaAdapter(multica_bin=stub).start(make_task())
 
@@ -227,7 +274,7 @@ def test_stream_events_accepts_list_payload(tmp_path: Path, monkeypatch):
             )
         raise AssertionError(args)
 
-    monkeypatch.setattr(multica_module.subprocess, "run", fake_run)
+    monkeypatch.setattr(multica_module, "run_command", fake_run)
 
     events = list(MulticaAdapter(multica_bin=stub).stream_events("fake-task-uuid"))
 

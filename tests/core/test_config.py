@@ -83,9 +83,12 @@ def test_gate_spec_command_xor_type():
     from agos.core.config import GateSpec
 
     GateSpec(id="g", stage=["pre-commit"], command="pytest -q", type=None)
+    GateSpec(id="g", stage=["pre-commit"], argv=["pytest", "-q"], type=None)
     GateSpec(id="g", stage=["pre-commit"], command=None, type="secret_scan")
     with pytest.raises(Exception):
         GateSpec(id="g", stage=["pre-commit"], command="x", type="secret_scan")
+    with pytest.raises(Exception):
+        GateSpec(id="g", stage=["pre-commit"], command="x", argv=["pytest"])
     with pytest.raises(Exception):
         GateSpec(id="g", stage=["pre-commit"], command=None, type=None)
 
@@ -95,3 +98,6 @@ def test_default_config_has_feature_workflow():
     assert "feature" in cfg.workflows
     ids = {g.id for g in cfg.workflows["feature"].gates}
     assert {"tests_pass", "no_secrets_in_diff"} <= ids
+    tests_gate = next(g for g in cfg.workflows["feature"].gates if g.id == "tests_pass")
+    assert tests_gate.argv == ["pytest", "-q"]
+    assert tests_gate.command is None

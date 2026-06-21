@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-from types import SimpleNamespace
 
 import yaml
 from typer.testing import CliRunner
@@ -183,15 +182,24 @@ def test_checkpoint_follow_stops_after_run_complete(monkeypatch, tmp_repo):
     assert calls == [None, 1]
 
     ledger_records = [json.loads(line) for line in paths.ledger.read_text(encoding="utf-8").splitlines()]
-    assert [record["type"] for record in ledger_records[-2:]] == ["checkpoint", "checkpoint"]
+    assert [record["type"] for record in ledger_records[-3:]] == [
+        "checkpoint",
+        "checkpoint",
+        "executor_completed",
+    ]
 
     status = load_status(paths)
     assert status is not None
     assert status.last_event_seq == 2
+    assert status.phase == "done"
 
     message_path = paths.evidence / "messages" / "run-123.jsonl"
     lines = [json.loads(line) for line in message_path.read_text(encoding="utf-8").splitlines()]
     assert [line["kind"] for line in lines] == ["text", "run_complete"]
+
+    ledger_records = [json.loads(line) for line in paths.ledger.read_text(encoding="utf-8").splitlines()]
+    assert ledger_records[-1]["type"] == "executor_completed"
+    assert ledger_records[-1]["run_id"] == "run-123"
 
 
 def test_checkpoint_once_marks_completed_when_run_finished_without_new_events(monkeypatch, tmp_repo):
@@ -220,3 +228,42 @@ def test_checkpoint_once_marks_completed_when_run_finished_without_new_events(mo
 
     assert completed is True
     assert last_seq is None
+    reloaded = load_status(paths)
+    assert reloaded is not None
+    assert reloaded.phase == "done"
+    ledger_records = [json.loads(line) for line in paths.ledger.read_text(encoding="utf-8").splitlines()]
+    assert ledger_records[-1]["type"] == "executor_completed"
+
+
+def test_checkpoint_once_marks_blocked_when_run_blocked_without_new_events(tmp_repo):
+    paths, _task = _write_active_task(tmp_repo)
+
+    class FakeAdapter:
+        def stream_events(self, run_id: str, since: int | None = None):
+            del run_id, since
+            return iter([])
+
+        def status(self, run_id: str, issue_id: str | None = None):
+            assert run_id == "run-123"
+            assert issue_id == "AGO-99"
+            return RunStatus(state="blocked", detail="needs human")
+
+    status = load_status(paths)
+    assert status is not None
+
+    from agos.cli import cmd_checkpoint
+
+    completed, last_seq = cmd_checkpoint._checkpoint_once(
+        adapter=FakeAdapter(),
+        status=status,
+        paths=paths,
+    )
+
+    assert completed is True
+    assert last_seq is None
+    reloaded = load_status(paths)
+    assert reloaded is not None
+    assert reloaded.phase == "blocked"
+    ledger_records = [json.loads(line) for line in paths.ledger.read_text(encoding="utf-8").splitlines()]
+    assert ledger_records[-1]["type"] == "executor_blocked"
+    assert ledger_records[-1]["detail"] == "needs human"

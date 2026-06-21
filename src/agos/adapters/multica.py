@@ -7,6 +7,7 @@ import subprocess
 import time
 from collections.abc import Iterator
 
+from agos.core.command import run_command
 from agos.core.adapter import Event, ExecutorAdapter, ExecutorRun, RunStatus
 from agos.core.task import Task
 
@@ -48,12 +49,20 @@ class MulticaAdapter(ExecutorAdapter):
         delay = 2
         last_proc: subprocess.CompletedProcess[str] | None = None
         for attempt in range(3):
-            last_proc = subprocess.run(
-                full_args,
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-            )
+            try:
+                last_proc = run_command(
+                    full_args,
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                )
+            except subprocess.TimeoutExpired as exc:
+                return subprocess.CompletedProcess(
+                    full_args,
+                    EXIT_NETWORK,
+                    stdout="",
+                    stderr=f"timed out after {exc.timeout}s",
+                )
             if last_proc.returncode not in RETRYABLE_EXITS:
                 return last_proc
             if attempt < 2:

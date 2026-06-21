@@ -1,11 +1,21 @@
 from __future__ import annotations
 
+import json
+import subprocess
+
 import yaml
 from typer.testing import CliRunner
 
 from agos.cli.main import app
 
 runner = CliRunner()
+
+
+class _Proc:
+    def __init__(self, returncode: int = 0, stdout: str = "", stderr: str = "") -> None:
+        self.returncode = returncode
+        self.stdout = stdout
+        self.stderr = stderr
 
 
 def test_init_creates_layout_config_and_hooks(monkeypatch, tmp_repo):
@@ -25,6 +35,71 @@ def test_init_creates_layout_config_and_hooks(monkeypatch, tmp_repo):
     assert config["executor"]["name"] == "multica"
     assert config["executor"]["agent"] == "Lambda"
     assert config["default_workflow"] == "feature"
+
+
+def test_discover_multica_agents_filters_named_items(monkeypatch):
+    import agos.cli.cmd_init as cmd_init
+
+    payload = [
+        {"name": "codex-gpt-5.4 xhigh"},
+        {"name": ""},
+        {"missing": "name"},
+        {"name": "glm-5.2"},
+    ]
+    monkeypatch.setattr(cmd_init, "resolve_multica_bin", lambda: "multica")
+    monkeypatch.setattr(cmd_init, "run_command", lambda *_args, **_kwargs: _Proc(stdout=json.dumps(payload)))
+
+    assert cmd_init.discover_multica_agents() == ["codex-gpt-5.4 xhigh", "glm-5.2"]
+
+
+def test_discover_multica_agents_rejects_invalid_json(monkeypatch):
+    import agos.cli.cmd_init as cmd_init
+
+    monkeypatch.setattr(cmd_init, "resolve_multica_bin", lambda: "multica")
+    monkeypatch.setattr(cmd_init, "run_command", lambda *_args, **_kwargs: _Proc(stdout="{not json"))
+
+    try:
+        cmd_init.discover_multica_agents()
+    except RuntimeError as exc:
+        assert "invalid JSON" in str(exc)
+    else:
+        raise AssertionError("expected RuntimeError")
+
+
+def test_validate_multica_environment_reports_failed_checks(monkeypatch):
+    import agos.cli.cmd_init as cmd_init
+
+    monkeypatch.setattr(cmd_init, "resolve_multica_bin", lambda: "multica")
+    monkeypatch.setattr(cmd_init, "run_command", lambda *_args, **_kwargs: _Proc(returncode=1, stderr="down"))
+
+    warnings = cmd_init.validate_multica_environment("multica")
+
+    assert len(warnings) == 2
+    assert all("down" in warning for warning in warnings)
+
+
+def test_validate_multica_environment_reports_timeouts(monkeypatch):
+    import agos.cli.cmd_init as cmd_init
+
+    def timeout(*_args, **_kwargs):
+        raise subprocess.TimeoutExpired(cmd="multica daemon status", timeout=30)
+
+    monkeypatch.setattr(cmd_init, "resolve_multica_bin", lambda: "multica")
+    monkeypatch.setattr(cmd_init, "run_command", timeout)
+
+    warnings = cmd_init.validate_multica_environment("multica")
+
+    assert len(warnings) == 2
+    assert all("timed out" in warning for warning in warnings)
+
+
+def test_init_rejects_unsupported_executor(monkeypatch, tmp_repo):
+    monkeypatch.chdir(tmp_repo)
+
+    result = runner.invoke(app, ["init", "--executor", "other", "--agent", "Lambda"])
+
+    assert result.exit_code != 0
+    assert "Only the 'multica' executor is supported" in result.stderr
 
 
 def test_init_lists_discovered_agents_and_requires_explicit_choice(monkeypatch, tmp_repo):

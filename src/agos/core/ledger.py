@@ -46,9 +46,16 @@ class Ledger:
 
     def __init__(self, path: Path) -> None:
         self.path = path
+        self._tail_loaded = False
+        self._tail_record: dict | None = None
 
     def _last_record(self) -> dict | None:
+        if self._tail_loaded:
+            return self._tail_record
+
         if not self.path.exists():
+            self._tail_loaded = True
+            self._tail_record = None
             return None
 
         with self.path.open("rb") as handle:
@@ -81,17 +88,26 @@ class Ledger:
             handle.seek(position)
             line = handle.read(end - position).decode("utf-8").strip()
             if not line:
+                self._tail_loaded = True
+                self._tail_record = None
                 return None
-            return json.loads(line)
+            self._tail_loaded = True
+            self._tail_record = json.loads(line)
+            return self._tail_record
 
     def _records(self) -> list[dict]:
         if not self.path.exists():
+            self._tail_loaded = True
+            self._tail_record = None
             return []
-        return [
+        records = [
             json.loads(line)
             for line in self.path.read_text(encoding="utf-8").splitlines()
             if line.strip()
         ]
+        self._tail_loaded = True
+        self._tail_record = records[-1] if records else None
+        return records
 
     def read_all(self) -> list[dict]:
         """Return all ledger records in order."""
@@ -125,6 +141,8 @@ class Ledger:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with self.path.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(full, ensure_ascii=False) + "\n")
+        self._tail_loaded = True
+        self._tail_record = full
         return full
 
     def verify_chain(self) -> None:

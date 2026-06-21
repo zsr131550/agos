@@ -6,8 +6,9 @@ import time
 import typer
 
 from agos.adapters.multica import MulticaAdapter
+from agos.core.adapter import RunStatus
 from agos.core.evidence import EvidenceStore
-from agos.core.ledger import append_task_record
+from agos.core.ledger import Ledger
 from agos.core.repo import find_initialized_repo_root, git_head, git_status_porcelain, repo_paths
 from agos.core.status import ExecutorRunInfo, TaskStatus, load_status, save_status
 
@@ -22,13 +23,48 @@ def _as_run_info(run_info: ExecutorRunInfo | None) -> ExecutorRunInfo:
     return run_info
 
 
+def _record_terminal_status(
+    *,
+    run_info: ExecutorRunInfo,
+    run_status: RunStatus,
+    status: TaskStatus,
+    paths,
+) -> bool:
+    if run_status.state == "running":
+        return False
+
+    phase = "done" if run_status.state == "completed" else "blocked"
+    if status.phase == phase:
+        return True
+
+    ledger = Ledger(paths.ledger)
+    record = ledger.append(
+        {
+            "type": "executor_completed" if run_status.state == "completed" else "executor_blocked",
+            "run_id": run_info.run_id,
+            "issue_id": run_info.issue_id,
+            "state": run_status.state,
+            "detail": run_status.detail,
+        }
+    )
+    status.phase = phase
+    status.ledger_head_hash = record["hash"]
+    save_status(status, paths)
+    return True
+
+
 def _checkpoint_once(*, adapter: MulticaAdapter, status: TaskStatus, paths) -> tuple[bool, int | None]:
     run_info = _as_run_info(status.executor_run)
     store = EvidenceStore(paths.evidence)
     events = list(adapter.stream_events(run_info.run_id, since=status.last_event_seq))
     if not events:
         run_status = adapter.status(run_info.run_id, issue_id=run_info.issue_id)
-        return run_status.state == "completed", status.last_event_seq
+        return _record_terminal_status(
+            run_info=run_info,
+            run_status=run_status,
+            status=status,
+            paths=paths,
+        ), status.last_event_seq
 
     for event in events:
         store.append_message(run_info.run_id, event.raw or {
@@ -45,21 +81,31 @@ def _checkpoint_once(*, adapter: MulticaAdapter, status: TaskStatus, paths) -> t
         repo_head,
         git_status_porcelain(paths.root),
     )
-    record = append_task_record(
-        paths.ledger,
-        "checkpoint",
-        run_id=run_info.run_id,
-        evidence_refs=[
-            f"messages/{run_info.run_id}.jsonl",
-            f"repo_anchor/{anchor_path.name}",
-        ],
-        repo_head=repo_head,
-        last_seq=events[-1].seq,
+    ledger = Ledger(paths.ledger)
+    record = ledger.append(
+        {
+            "type": "checkpoint",
+            "run_id": run_info.run_id,
+            "evidence_refs": [
+                f"messages/{run_info.run_id}.jsonl",
+                f"repo_anchor/{anchor_path.name}",
+            ],
+            "repo_head": repo_head,
+            "last_seq": events[-1].seq,
+        }
     )
     status.last_event_seq = events[-1].seq
     status.ledger_head_hash = record["hash"]
     save_status(status, paths)
-    return any(event.kind == "run_complete" for event in events), events[-1].seq
+    if any(event.kind == "run_complete" for event in events):
+        completed = _record_terminal_status(
+            run_info=run_info,
+            run_status=RunStatus(state="completed", detail="run_complete"),
+            status=status,
+            paths=paths,
+        )
+        return completed, events[-1].seq
+    return False, events[-1].seq
 
 
 def checkpoint_command(
