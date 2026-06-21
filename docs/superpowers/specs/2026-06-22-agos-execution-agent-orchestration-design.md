@@ -412,6 +412,7 @@ candidate_test_started
 candidate_test_completed
 candidate_review_started
 candidate_review_completed
+candidate_review_failed
 candidate_decision_recorded
 candidate_applied
 candidate_apply_blocked
@@ -577,7 +578,8 @@ execution to Review for v0.3.
 
 If review ingestion fails or produces malformed findings, AGOS must keep the
 raw evidence where available, mark that review binding as failed, and leave the
-candidate non-applyable.
+candidate non-applyable. The failure is ledgered with `candidate_review_failed`
+including `task_id`, `candidate_id`, `review_id`, and the parse/ingest error.
 
 #### Apply-Time Review Selection
 
@@ -670,6 +672,8 @@ Service tests:
   and records a candidate-bound review ref.
 - `candidate review --ingest` updates only the matching candidate review binding
   and records `candidate_review_completed` with `open_blocking_count`.
+- Failed `candidate review --ingest` marks only that binding as `failed` and
+  records `candidate_review_failed`.
 - `candidate apply` blocks without tests, review, accepted decision, or valid
   hash.
 - `candidate apply` ignores unrelated task/global reviews and uses only the

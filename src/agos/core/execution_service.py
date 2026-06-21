@@ -137,10 +137,10 @@ class ExecutionService:
         candidate = candidate.model_copy(update={"status": "testing"})
         self.store.write_candidate(candidate)
         runs: list[CandidateTestRun] = []
-        patch_run = self._record_patch_applies(candidate, patch_bytes)
+        patch_run = self._record_patch_applies(task.id, candidate, patch_bytes)
         runs.append(patch_run)
         if patch_run.state == "passed":
-            runs.extend(self._run_candidate_gates(candidate, patch_bytes, gates))
+            runs.extend(self._run_candidate_gates(task.id, candidate, patch_bytes, gates))
 
         test_refs = [*candidate.test_refs, *[self.store.write_test_run(run) for run in runs]]
         final_status = "tested" if all(run.state == "passed" for run in runs) else "proposed"
@@ -212,13 +212,21 @@ class ExecutionService:
 
         try:
             report_ref, report = ReviewService(self.paths).ingest_findings(review_id, findings)
-        except Exception:
-            completion_status = _load_active_status(self.paths)
+        except Exception as exc:
+            failed_event = self._append_event(
+                {
+                    "type": "candidate_review_failed",
+                    "task_id": task.id,
+                    "candidate_id": candidate.id,
+                    "review_id": review_id,
+                    "error": str(exc),
+                }
+            )
             failed = binding.model_copy(
                 update={
                     "state": "failed",
                     "completed_at": utc_now_iso(),
-                    "ledger_head_at_completion": completion_status.ledger_head_hash,
+                    "ledger_head_at_completion": failed_event["hash"],
                 }
             )
             bindings = list(candidate.review_refs)
@@ -226,21 +234,7 @@ class ExecutionService:
             self.store.write_candidate(candidate.model_copy(update={"review_refs": bindings}))
             raise
 
-        completion_status = _load_active_status(self.paths)
-        completed = binding.model_copy(
-            update={
-                "report_ref": report_ref,
-                "state": "completed",
-                "completed_at": utc_now_iso(),
-                "ledger_head_at_completion": completion_status.ledger_head_hash,
-                "open_blocking_count": len(report.open_blocking_findings()),
-            }
-        )
-        bindings = list(candidate.review_refs)
-        bindings[binding_index] = completed
-        updated = candidate.model_copy(update={"status": "reviewed", "review_refs": bindings})
-        self.store.write_candidate(updated)
-        self._append_event(
+        completed_event = self._append_event(
             {
                 "type": "candidate_review_completed",
                 "task_id": task.id,
@@ -249,6 +243,20 @@ class ExecutionService:
                 "report_ref": report_ref,
                 "open_blocking_count": len(report.open_blocking_findings()),
             }
+        )
+        completed = binding.model_copy(
+            update={
+                "report_ref": report_ref,
+                "state": "completed",
+                "completed_at": utc_now_iso(),
+                "ledger_head_at_completion": completed_event["hash"],
+                "open_blocking_count": len(report.open_blocking_findings()),
+            }
+        )
+        bindings = list(candidate.review_refs)
+        bindings[binding_index] = completed
+        self.store.write_candidate(
+            candidate.model_copy(update={"status": "reviewed", "review_refs": bindings})
         )
         return report_ref, report
 
@@ -297,9 +305,13 @@ class ExecutionService:
             }
         )
         if decision == "rejected":
-            self._append_event({"type": "candidate_rejected", "candidate_id": candidate.id})
+            self._append_event(
+                {"type": "candidate_rejected", "task_id": task.id, "candidate_id": candidate.id}
+            )
         if decision == "superseded":
-            self._append_event({"type": "candidate_superseded", "candidate_id": candidate.id})
+            self._append_event(
+                {"type": "candidate_superseded", "task_id": task.id, "candidate_id": candidate.id}
+            )
         return decision_model
 
     def apply_candidate(self, candidate_id: str) -> CandidatePatch:
@@ -358,10 +370,16 @@ class ExecutionService:
         )
         return applied
 
-    def _record_patch_applies(self, candidate: CandidatePatch, patch_bytes: bytes) -> CandidateTestRun:
+    def _record_patch_applies(
+        self,
+        task_id: str,
+        candidate: CandidatePatch,
+        patch_bytes: bytes,
+    ) -> CandidateTestRun:
         self._append_event(
             {
                 "type": "candidate_test_started",
+                "task_id": task_id,
                 "candidate_id": candidate.id,
                 "gate_id": "patch_applies",
             }
@@ -384,6 +402,7 @@ class ExecutionService:
         self._append_event(
             {
                 "type": "candidate_test_completed",
+                "task_id": task_id,
                 "candidate_id": candidate.id,
                 "gate_id": "patch_applies",
                 "state": run.state,
@@ -394,6 +413,7 @@ class ExecutionService:
 
     def _run_candidate_gates(
         self,
+        task_id: str,
         candidate: CandidatePatch,
         patch_bytes: bytes,
         gates: list[Any],
@@ -415,6 +435,7 @@ class ExecutionService:
                 self._append_event(
                     {
                         "type": "candidate_test_started",
+                        "task_id": task_id,
                         "candidate_id": candidate.id,
                         "gate_id": gate_spec.id,
                     }
@@ -441,6 +462,7 @@ class ExecutionService:
                 self._append_event(
                     {
                         "type": "candidate_test_completed",
+                        "task_id": task_id,
                         "candidate_id": candidate.id,
                         "gate_id": gate_spec.id,
                         "state": run.state,
@@ -499,7 +521,9 @@ class ExecutionService:
 
     def _latest_completed_review_binding(self, candidate: CandidatePatch) -> ReviewBinding | None:
         completed = [binding for binding in candidate.review_refs if binding.state == "completed"]
-        return completed[-1] if completed else None
+        if not completed:
+            return None
+        return max(completed, key=self._review_completion_seq)
 
     def _latest_completed_review_and_report(
         self,
@@ -540,6 +564,16 @@ class ExecutionService:
             raise ValueError("candidate-bound review open blocking count is stale")
         if open_blocking_count:
             raise ValueError("candidate-bound review has open blocking findings")
+
+    def _review_completion_seq(self, binding: ReviewBinding) -> int:
+        if binding.ledger_head_at_completion is None:
+            raise ValueError("candidate-bound review is missing completion ledger head")
+        for record in Ledger(self.paths.ledger).read_all():
+            if record.get("hash") == binding.ledger_head_at_completion:
+                return int(record["seq"])
+        raise ValueError(
+            f"candidate-bound review completion ledger hash not found: {binding.review_id}"
+        )
 
     def _assert_latest_decision_accepted(self, candidate: CandidatePatch) -> None:
         decisions = self.store.read_decisions(candidate.id)

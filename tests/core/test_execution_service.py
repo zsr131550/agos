@@ -124,6 +124,10 @@ def _ledger_types(paths) -> list[str]:
     return [json.loads(line)["type"] for line in paths.ledger.read_text(encoding="utf-8").splitlines()]
 
 
+def _ledger_records(paths) -> list[dict]:
+    return [json.loads(line) for line in paths.ledger.read_text(encoding="utf-8").splitlines()]
+
+
 def _commit(repo: Path, message: str) -> None:
     env = {
         **os.environ,
@@ -184,6 +188,9 @@ def test_submit_candidate_captures_scoped_patch_and_hash(tmp_repo):
 
 def test_candidate_happy_path_reviews_decides_and_applies(tmp_repo):
     paths, service, candidate_id = _ready_candidate(tmp_repo)
+    for record in _ledger_records(paths):
+        if record["type"] in {"candidate_test_started", "candidate_test_completed"}:
+            assert record["task_id"] == "agos-01"
 
     packet_ref, packet = service.review_candidate(candidate_id)
     assert packet_ref.startswith("reviews/")
@@ -221,8 +228,33 @@ def test_task_level_review_does_not_satisfy_candidate_review_guard(tmp_repo):
         )
 
 
-def test_failed_candidate_review_ingest_marks_binding_failed(tmp_repo):
+def test_latest_completed_candidate_review_uses_ledger_order(tmp_repo):
     _paths, service, candidate_id = _ready_candidate(tmp_repo)
+    _first_packet_ref, first_packet = service.review_candidate(candidate_id)
+    _second_packet_ref, second_packet = service.review_candidate(candidate_id)
+    service.ingest_candidate_review(candidate_id, second_packet.review_id, findings=[])
+    blocker = Finding(
+        id="finding-01",
+        review_id=first_packet.review_id,
+        source_agent="security_reviewer",
+        category="security",
+        severity="high",
+        blocking=True,
+        title="Blocking risk",
+        body="The later-completed review found a blocking issue.",
+    )
+    service.ingest_candidate_review(candidate_id, first_packet.review_id, findings=[blocker])
+
+    with pytest.raises(ValueError, match="open blocking findings"):
+        service.decide_candidate(
+            candidate_id,
+            decision="accepted",
+            reason="Clean earlier completion should not override later blocker.",
+        )
+
+
+def test_failed_candidate_review_ingest_marks_binding_failed(tmp_repo):
+    paths, service, candidate_id = _ready_candidate(tmp_repo)
     _packet_ref, packet = service.review_candidate(candidate_id)
     closed_finding = Finding(
         id="finding-01",
@@ -245,6 +277,8 @@ def test_failed_candidate_review_ingest_marks_binding_failed(tmp_repo):
 
     candidate = ExecutionStore(service.paths).read_candidate(candidate_id)
     assert candidate.review_refs[-1].state == "failed"
+    assert _ledger_types(paths)[-1] == "candidate_review_failed"
+    assert _ledger_records(paths)[-1]["task_id"] == "agos-01"
 
 
 def test_accepted_decision_rejects_missing_candidate_review_report(tmp_repo):
