@@ -1,3 +1,0 @@
-{"type": "task_started_forged", "seq": 1, "ts": "2026-06-21T13:13:57Z", "prev_hash": "", "hash": "3582cf35909decf95f4d4464b5ab55238546701f9229cf20c2a9bfb3a1108003"}
-{"type": "gates_locked_forged", "gates": ["a"], "seq": 2, "ts": "2026-06-21T13:13:57Z", "prev_hash": "3582cf35909decf95f4d4464b5ab55238546701f9229cf20c2a9bfb3a1108003", "hash": "fcd0ee594b643a86921bb5dc933a27f08fdd558e390d111540812cd5eb0c27d7"}
-{"type": "checkpoint_forged", "seq": 3, "ts": "2026-06-21T13:13:57Z", "prev_hash": "fcd0ee594b643a86921bb5dc933a27f08fdd558e390d111540812cd5eb0c27d7", "hash": "a1255aa0bbd639d29bfdfce19143d4c6fdc69f80686b90b552b45d5e937bab1e"}

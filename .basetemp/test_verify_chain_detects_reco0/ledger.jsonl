@@ -1,2 +1,0 @@
-{"type": "task_started_X", "seq": 1, "ts": "2026-06-21T13:13:57Z", "prev_hash": "", "hash": "35c5a45917bc3b18f342921d7a3f61dc5034f1537c3cdbe3fd3578e0c372445a"}
-{"type": "gates_locked", "gates": ["a"], "seq": 2, "ts": "2026-06-21T13:13:57Z", "prev_hash": "00fad5fe975f8df608a817f6afe8f0834535fce48d905bcb52055244d4df3072", "hash": "72824251393bdd74c6f943688906a5be9ba162e22ddb22bdbb65bee264924c5d"}
