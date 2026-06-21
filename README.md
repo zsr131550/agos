@@ -16,6 +16,10 @@ pip install -e ".[dev]"
 agos init [--executor multica] [--agent "Lambda"]
 agos start --title "..." [--intent "..."] [--workflow feature] [--gate tests_pass,...]
 agos checkpoint [--follow] [--once]
+agos review --packet-only
+agos review --ingest findings.json --review-id review-...
+agos resolve <finding-id> --status resolved --evidence <ref> --rationale "..."
+agos closeout
 agos ci --local --stage <pre-commit|pre-push>
 agos task status
 agos task clear --force
@@ -26,6 +30,10 @@ agos task clear --force
 ```
 init -> start -> checkpoint --once -> ci --local
 ```
+
+The v0.2 review loop adds evidence-backed review findings:
+`review --packet-only -> external or human review -> review --ingest -> resolve -> closeout`.
+Blocking findings prevent closeout until they are resolved with evidence or explicitly accepted by a human.
 
 - The agent runs in multica's isolated workspace (`~/multica_workspaces/<per-task>/`), not in your repo.
 - `agos checkpoint` streams the agent's reported activity into an evidence ledger and records a governed-repo anchor (HEAD + status) at capture time. It does not claim the agent edited your working tree.
