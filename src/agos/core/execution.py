@@ -148,6 +148,13 @@ class ReviewBinding(BaseModel):
     packet_ref: str
     report_ref: str | None = None
     raw_refs: list[str] = Field(default_factory=list)
+    patch_sha256: str | None = None
+    base_commit: str | None = None
+    write_scope: list[str] = Field(default_factory=list)
+    test_refs: list[str] = Field(default_factory=list)
+    ledger_head_at_start: str | None = None
+    ledger_head_at_completion: str | None = None
+    open_blocking_count: int | None = None
     state: ReviewBindingState = "started"
     created_at: str = Field(default_factory=utc_now_iso)
     completed_at: str | None = None
