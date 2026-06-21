@@ -150,8 +150,14 @@ class ReviewService:
 
     def closeout(self) -> CloseoutProof:
         status = _load_active_status(self.paths)
+        if status.phase == "done":
+            raise ValueError("task is already done")
+
         task = load_task(self.paths.task_yaml)
         reports = self.store.read_reports()
+        if not reports:
+            raise ValueError("at least one completed review report is required")
+
         findings = [finding for report in reports for finding in report.findings]
         open_blocking = [
             finding for finding in findings if finding.blocking and finding.status == "open"
@@ -164,10 +170,9 @@ class ReviewService:
             task_id=task.id,
             ledger_head_hash=status.ledger_head_hash,
             review_refs=[
-                f"reviews/{report.review_id}/findings.json"
-                for report in reports
+                f"reviews/{report.review_id}/findings.json" for report in reports
             ],
-            gate_refs={},
+            gate_refs=self._gate_refs(),
             finding_count=len(findings),
             blocking_open_count=0,
         )
