@@ -59,6 +59,18 @@ class _FakeArbiterBackend:
 class _FakeOrchestrationBackend:
     name: str
 
+    def start(self, spec: OrchestrationRunSpec) -> BackendRunHandle:
+        return BackendRunHandle(backend=self.name, run_id=spec.run_id)
+
+    def poll(self, handle: BackendRunHandle):
+        return {"run_id": handle.run_id, "state": "running"}
+
+    def cancel(self, handle: BackendRunHandle):
+        return {"run_id": handle.run_id, "state": "cancelled"}
+
+    def collect(self, handle: BackendRunHandle) -> dict[str, str]:
+        return {"run_id": handle.run_id}
+
     def run(self, spec: OrchestrationRunSpec) -> dict[str, str]:
         return {"run_id": spec.run_id}
 

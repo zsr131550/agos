@@ -1,30 +1,17 @@
 """Minimal native orchestration backend skeleton."""
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Literal
-
-from agos.core.orchestration.models import NodeSpec, OrchestrationRunSpec
+from agos.core.orchestration.models import (
+    NodeSpec,
+    OrchestrationRunSpec,
+    OrchestratorRunHandle,
+    OrchestratorRunStatus,
+)
 from agos.core.orchestration.scheduler import runnable_nodes
 
 
-@dataclass(frozen=True)
-class BackendRunHandle:
-    """Handle returned when a native orchestration run starts."""
-
-    backend: str
-    run_id: str
-
-
-@dataclass(frozen=True)
-class BackendRunStatus:
-    """High-level status snapshot for a native orchestration run."""
-
-    run_id: str
-    state: Literal["running", "waiting", "completed", "failed"]
-    waiting_nodes: tuple[str, ...] = ()
-    completed_nodes: tuple[str, ...] = ()
-    failed_nodes: tuple[str, ...] = ()
+BackendRunHandle = OrchestratorRunHandle
+BackendRunStatus = OrchestratorRunStatus
 
 
 class NativeAsyncBackend:
@@ -34,9 +21,11 @@ class NativeAsyncBackend:
 
     def __init__(self) -> None:
         self._runs: dict[str, OrchestrationRunSpec] = {}
+        self._cancelled: set[str] = set()
 
     def start(self, spec: OrchestrationRunSpec) -> BackendRunHandle:
         self._runs[spec.run_id] = spec
+        self._cancelled.discard(spec.run_id)
         return BackendRunHandle(backend=self.name, run_id=spec.run_id)
 
     def run(self, spec: OrchestrationRunSpec) -> BackendRunHandle:
@@ -46,6 +35,12 @@ class NativeAsyncBackend:
 
     def poll(self, handle: BackendRunHandle) -> BackendRunStatus:
         spec = self._require_run(handle)
+        if handle.run_id in self._cancelled:
+            return BackendRunStatus(
+                backend=self.name,
+                run_id=handle.run_id,
+                state="cancelled",
+            )
         ready_nodes = runnable_nodes(spec.nodes, {})
         waiting_nodes = tuple(
             node_id
@@ -54,15 +49,25 @@ class NativeAsyncBackend:
         )
         if waiting_nodes:
             return BackendRunStatus(
+                backend=self.name,
                 run_id=handle.run_id,
                 state="waiting",
                 waiting_nodes=waiting_nodes,
             )
 
         if ready_nodes:
-            return BackendRunStatus(run_id=handle.run_id, state="running")
+            return BackendRunStatus(backend=self.name, run_id=handle.run_id, state="running")
 
-        return BackendRunStatus(run_id=handle.run_id, state="completed")
+        return BackendRunStatus(backend=self.name, run_id=handle.run_id, state="completed")
+
+    def cancel(self, handle: BackendRunHandle) -> BackendRunStatus:
+        self._require_run(handle)
+        self._cancelled.add(handle.run_id)
+        return BackendRunStatus(
+            backend=self.name,
+            run_id=handle.run_id,
+            state="cancelled",
+        )
 
     def collect(self, handle: BackendRunHandle) -> dict[str, object]:
         status = self.poll(handle)

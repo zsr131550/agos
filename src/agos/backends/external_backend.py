@@ -4,7 +4,11 @@ from __future__ import annotations
 from copy import deepcopy
 from dataclasses import dataclass
 
-from agos.core.orchestration.models import NodeSpec, OrchestrationRunSpec
+from agos.core.orchestration.models import (
+    NodeSpec,
+    OrchestrationRunSpec,
+    OrchestratorRunStatus,
+)
 from agos.core.orchestration.scheduler import runnable_nodes
 
 
@@ -26,7 +30,7 @@ class ExternalBackend:
     def __init__(self) -> None:
         self._submitted: dict[str, dict[str, object]] = {}
 
-    def run(self, spec: OrchestrationRunSpec) -> ExternalRunHandle:
+    def start(self, spec: OrchestrationRunSpec) -> ExternalRunHandle:
         payload = self._submission_payload(spec)
         self._submitted[spec.run_id] = deepcopy(payload)
         return ExternalRunHandle(
@@ -34,6 +38,34 @@ class ExternalBackend:
             run_id=spec.run_id,
             job_id=spec.run_id,
             payload=deepcopy(payload),
+        )
+
+    def run(self, spec: OrchestrationRunSpec) -> ExternalRunHandle:
+        return self.start(spec)
+
+    def poll(self, handle: ExternalRunHandle) -> OrchestratorRunStatus:
+        snapshot = self.collect(handle)
+        return OrchestratorRunStatus(
+            backend=self.name,
+            run_id=handle.run_id,
+            state=_state(snapshot.get("state")),
+            waiting_nodes=tuple(str(node) for node in snapshot.get("waiting_nodes", [])),
+            completed_nodes=tuple(str(node) for node in snapshot.get("completed_nodes", [])),
+            failed_nodes=tuple(str(node) for node in snapshot.get("failed_nodes", [])),
+            output_refs={
+                str(key): str(value)
+                for key, value in dict(snapshot.get("output_refs", {})).items()
+            },
+        )
+
+    def cancel(self, handle: ExternalRunHandle) -> OrchestratorRunStatus:
+        payload = self.collect(handle)
+        payload["state"] = "cancelled"
+        self._submitted[handle.run_id] = deepcopy(payload)
+        return OrchestratorRunStatus(
+            backend=self.name,
+            run_id=handle.run_id,
+            state="cancelled",
         )
 
     def collect(self, handle: ExternalRunHandle) -> dict[str, object]:
@@ -79,3 +111,8 @@ def _output_refs_for_nodes(
         if output_ref:
             output_refs[node_id] = output_ref
     return output_refs
+
+
+def _state(value: object) -> str:
+    state = str(value or "queued")
+    return "queued" if state == "submitted" else state

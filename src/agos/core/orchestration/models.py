@@ -31,6 +31,38 @@ class AgentJobHandle:
     run_id: str
 
 
+OrchestratorRunState = Literal[
+    "queued",
+    "running",
+    "waiting",
+    "completed",
+    "failed",
+    "cancelled",
+]
+
+
+@dataclass(frozen=True)
+class OrchestratorRunHandle:
+    """Handle returned when an orchestration backend starts a run."""
+
+    backend: str
+    run_id: str
+    job_id: str | None = None
+
+
+@dataclass(frozen=True)
+class OrchestratorRunStatus:
+    """Normalized orchestration backend status snapshot."""
+
+    backend: str
+    run_id: str
+    state: OrchestratorRunState
+    waiting_nodes: tuple[str, ...] = ()
+    completed_nodes: tuple[str, ...] = ()
+    failed_nodes: tuple[str, ...] = ()
+    output_refs: dict[str, str] | None = None
+
+
 class NodeSpec(BaseModel):
     """One node in an orchestration run graph."""
 

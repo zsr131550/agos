@@ -5,8 +5,13 @@ from dataclasses import dataclass
 from importlib.util import find_spec
 from typing import Any, TypedDict
 
-from agos.backends.native_async import BackendRunHandle, NativeAsyncBackend
-from agos.core.orchestration.models import NodeSpec, OrchestrationRunSpec
+from agos.backends.native_async import NativeAsyncBackend
+from agos.core.orchestration.models import (
+    NodeSpec,
+    OrchestrationRunSpec,
+    OrchestratorRunHandle,
+    OrchestratorRunStatus,
+)
 
 
 @dataclass(frozen=True)
@@ -46,23 +51,56 @@ class LangGraphBackend:
     def is_available() -> bool:
         return find_spec("langgraph") is not None
 
-    def run(self, spec: OrchestrationRunSpec) -> BackendRunHandle:
+    def start(self, spec: OrchestrationRunSpec) -> OrchestratorRunHandle:
         graph_module = self._graph_module or _load_langgraph_module()
         if graph_module is None:
             raise RuntimeError("langgraph is not installed")
 
         self._compiled_runs[spec.run_id] = _compile_run(spec, graph_module)
         self._native.start(spec.model_copy(update={"backend": self.name}))
-        return BackendRunHandle(backend=self.name, run_id=spec.run_id)
+        return OrchestratorRunHandle(backend=self.name, run_id=spec.run_id)
 
-    def collect(self, handle: BackendRunHandle) -> dict[str, object]:
+    def run(self, spec: OrchestrationRunSpec) -> OrchestratorRunHandle:
+        return self.start(spec)
+
+    def poll(self, handle: OrchestratorRunHandle) -> OrchestratorRunStatus:
+        status = self._native.poll(
+            OrchestratorRunHandle(backend=self._native.name, run_id=handle.run_id)
+        )
+        return OrchestratorRunStatus(
+            backend=self.name,
+            run_id=status.run_id,
+            state=status.state,
+            waiting_nodes=status.waiting_nodes,
+            completed_nodes=status.completed_nodes,
+            failed_nodes=status.failed_nodes,
+            output_refs=status.output_refs,
+        )
+
+    def cancel(self, handle: OrchestratorRunHandle) -> OrchestratorRunStatus:
+        status = self._native.cancel(
+            OrchestratorRunHandle(backend=self._native.name, run_id=handle.run_id)
+        )
+        return OrchestratorRunStatus(
+            backend=self.name,
+            run_id=status.run_id,
+            state=status.state,
+            waiting_nodes=status.waiting_nodes,
+            completed_nodes=status.completed_nodes,
+            failed_nodes=status.failed_nodes,
+            output_refs=status.output_refs,
+        )
+
+    def collect(self, handle: OrchestratorRunHandle) -> dict[str, object]:
         if handle.run_id not in self._compiled_runs:
             raise ValueError(f"unknown orchestration run handle: {handle.run_id}")
 
-        snapshot = self._native.collect(BackendRunHandle(backend=self._native.name, run_id=handle.run_id))
+        snapshot = self._native.collect(
+            OrchestratorRunHandle(backend=self._native.name, run_id=handle.run_id)
+        )
         return {**snapshot, "backend": self.name}
 
-    def compiled_run(self, handle: BackendRunHandle) -> LangGraphCompiledRun:
+    def compiled_run(self, handle: OrchestratorRunHandle) -> LangGraphCompiledRun:
         try:
             return self._compiled_runs[handle.run_id]
         except KeyError as exc:

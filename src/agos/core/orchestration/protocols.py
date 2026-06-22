@@ -3,7 +3,13 @@ from __future__ import annotations
 
 from typing import Any, Protocol, runtime_checkable
 
-from agos.core.orchestration.models import AgentJobHandle, NodeSpec, OrchestrationRunSpec
+from agos.core.orchestration.models import (
+    AgentJobHandle,
+    NodeSpec,
+    OrchestrationRunSpec,
+    OrchestratorRunHandle,
+    OrchestratorRunStatus,
+)
 
 
 @runtime_checkable
@@ -39,4 +45,12 @@ class OrchestrationBackend(Protocol):
 
     name: str
 
-    def run(self, spec: OrchestrationRunSpec) -> Any: ...
+    def start(self, spec: OrchestrationRunSpec) -> OrchestratorRunHandle: ...
+
+    def poll(self, handle: OrchestratorRunHandle) -> OrchestratorRunStatus: ...
+
+    def cancel(self, handle: OrchestratorRunHandle) -> OrchestratorRunStatus: ...
+
+    def collect(self, handle: OrchestratorRunHandle) -> dict[str, Any]: ...
+
+    def run(self, spec: OrchestrationRunSpec) -> OrchestratorRunHandle: ...
