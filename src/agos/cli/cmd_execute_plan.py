@@ -1,6 +1,7 @@
 """`agos execute-plan` commands."""
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import typer
@@ -40,43 +41,53 @@ def execute_plan_command(
 @execute_plan_app.command("run")
 def execute_plan_run_command(
     plan: Path = typer.Option(..., "--plan", help="Execution plan YAML or JSON file."),
+    json_output: bool = typer.Option(False, "--json", help="Print machine-readable JSON."),
 ) -> None:
     try:
         snapshot = _service().start_execution_run(plan)
     except Exception as exc:
         typer.echo(str(exc), err=True)
         raise typer.Exit(code=1) from exc
-    typer.echo(_format_snapshot(snapshot))
+    typer.echo(_snapshot_json(snapshot) if json_output else _format_snapshot(snapshot))
 
 
 @execute_plan_app.command("resume")
-def execute_plan_resume_command(run_id: str) -> None:
+def execute_plan_resume_command(
+    run_id: str,
+    json_output: bool = typer.Option(False, "--json", help="Print machine-readable JSON."),
+) -> None:
     try:
         snapshot = _service().resume_execution_run(run_id)
     except Exception as exc:
         typer.echo(str(exc), err=True)
         raise typer.Exit(code=1) from exc
-    typer.echo(_format_snapshot(snapshot))
+    typer.echo(_snapshot_json(snapshot) if json_output else _format_snapshot(snapshot))
 
 
 @execute_plan_app.command("status")
-def execute_plan_status_command(run_id: str) -> None:
+def execute_plan_status_command(
+    run_id: str,
+    json_output: bool = typer.Option(False, "--json", help="Print machine-readable JSON."),
+) -> None:
     try:
         snapshot = _service().status_execution_run(run_id)
     except Exception as exc:
         typer.echo(str(exc), err=True)
         raise typer.Exit(code=1) from exc
-    typer.echo(_format_snapshot(snapshot))
+    typer.echo(_snapshot_json(snapshot) if json_output else _format_snapshot(snapshot))
 
 
 @execute_plan_app.command("cancel")
-def execute_plan_cancel_command(run_id: str) -> None:
+def execute_plan_cancel_command(
+    run_id: str,
+    json_output: bool = typer.Option(False, "--json", help="Print machine-readable JSON."),
+) -> None:
     try:
         snapshot = _service().cancel_execution_run(run_id)
     except Exception as exc:
         typer.echo(str(exc), err=True)
         raise typer.Exit(code=1) from exc
-    typer.echo(_format_snapshot(snapshot))
+    typer.echo(_snapshot_json(snapshot) if json_output else _format_snapshot(snapshot))
 
 
 def _service() -> ExecutionService:
@@ -94,6 +105,19 @@ def _format_snapshot(snapshot: ExecutionRuntimeSnapshot) -> str:
     parts.append(f"failed: {_join(snapshot.failed_subtasks)}")
     parts.append(f"cancelled: {_join(snapshot.cancelled_subtasks)}")
     return " | ".join(parts)
+
+
+def _snapshot_json(snapshot: ExecutionRuntimeSnapshot) -> str:
+    return json.dumps(
+        {
+            "run_id": snapshot.run_id,
+            "running_subtasks": list(snapshot.running_subtasks),
+            "completed_subtasks": list(snapshot.completed_subtasks),
+            "failed_subtasks": list(snapshot.failed_subtasks),
+            "cancelled_subtasks": list(snapshot.cancelled_subtasks),
+        },
+        sort_keys=True,
+    )
 
 
 def _join(values: tuple[str, ...]) -> str:
