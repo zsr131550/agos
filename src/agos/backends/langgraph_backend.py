@@ -1,10 +1,10 @@
-"""Optional LangGraph orchestration backend shim."""
+﻿"""Optional LangGraph orchestration backend shim."""
 from __future__ import annotations
 
-from operator import add
 from dataclasses import dataclass
 from importlib.util import find_spec
-from typing import Annotated, Any, TypedDict
+from operator import add
+from typing import Annotated, Any, Callable, TypedDict
 
 from agos.backends.native_async import NativeAsyncBackend
 from agos.core.orchestration.models import (
@@ -34,8 +34,16 @@ class LangGraphCompiledRun:
     edges: tuple[tuple[str | tuple[str, ...], str], ...]
 
 
+NodeDispatch = Callable[[NodeSpec, dict[str, Any]], dict[str, Any]]
+
+
+def _merge_output_refs(left: dict[str, str] | None, right: dict[str, str] | None) -> dict[str, str]:
+    return {**(left or {}), **(right or {})}
+
+
 class _LangGraphState(TypedDict, total=False):
     visited_nodes: Annotated[list[str], add]
+    output_refs: Annotated[dict[str, str], _merge_output_refs]
 
 
 class LangGraphBackend:
@@ -43,9 +51,15 @@ class LangGraphBackend:
 
     name = "langgraph"
 
-    def __init__(self, *, graph_module: LangGraphModule | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        graph_module: LangGraphModule | None = None,
+        node_dispatch: NodeDispatch | None = None,
+    ) -> None:
         self._native = NativeAsyncBackend()
         self._graph_module = graph_module
+        self._node_dispatch = node_dispatch or _default_node_dispatch
         self._compiled_runs: dict[str, LangGraphCompiledRun] = {}
         self._completed_runs: dict[str, dict[str, Any]] = {}
 
@@ -58,7 +72,7 @@ class LangGraphBackend:
         if graph_module is None:
             raise RuntimeError("langgraph is not installed")
 
-        compiled = _compile_run(spec, graph_module)
+        compiled = _compile_run(spec, graph_module, self._node_dispatch)
         self._compiled_runs[spec.run_id] = compiled
         if hasattr(compiled.graph, "invoke"):
             result = compiled.graph.invoke({"visited_nodes": []})
@@ -106,7 +120,14 @@ class LangGraphBackend:
             OrchestratorRunHandle(backend=self._native.name, run_id=handle.run_id)
         )
         completed = self._completed_runs.get(handle.run_id, {})
-        return {**snapshot, **completed, "backend": self.name}
+        output_refs = {
+            **_string_dict(snapshot.get("output_refs", {})),
+            **_string_dict(completed.get("output_refs", {})),
+        }
+        combined = {**snapshot, **completed, "backend": self.name}
+        if output_refs:
+            combined["output_refs"] = output_refs
+        return combined
 
     def compiled_run(self, handle: OrchestratorRunHandle) -> LangGraphCompiledRun:
         try:
@@ -124,10 +145,14 @@ def _load_langgraph_module() -> LangGraphModule | None:
     return LangGraphModule(state_graph=StateGraph, start=START, end=END)
 
 
-def _compile_run(spec: OrchestrationRunSpec, graph_module: LangGraphModule) -> LangGraphCompiledRun:
+def _compile_run(
+    spec: OrchestrationRunSpec,
+    graph_module: LangGraphModule,
+    node_dispatch: NodeDispatch,
+) -> LangGraphCompiledRun:
     graph = graph_module.state_graph(_LangGraphState)
     for node in spec.nodes:
-        graph.add_node(node.id, _node_action(node))
+        graph.add_node(node.id, _node_action(node, node_dispatch))
 
     edges = _graph_edges(spec, graph_module)
     for source, target in edges:
@@ -141,12 +166,18 @@ def _compile_run(spec: OrchestrationRunSpec, graph_module: LangGraphModule) -> L
     )
 
 
-def _node_action(node: NodeSpec):
+def _node_action(node: NodeSpec, dispatch: NodeDispatch):
     def action(state: dict[str, Any]) -> dict[str, Any]:
-        del state
-        return {"visited_nodes": [node.id]}
+        return dispatch(node, state)
 
     return action
+
+
+def _default_node_dispatch(node: NodeSpec, state: dict[str, Any]) -> dict[str, Any]:
+    del state
+    output_ref = node.metadata.get("output_ref")
+    output_refs = {node.id: output_ref} if output_ref else {}
+    return {"visited_nodes": [node.id], "output_refs": output_refs}
 
 
 def _graph_edges(
@@ -177,3 +208,9 @@ def _graph_edges(
         if not dependents[node.id]
     )
     return tuple(edges)
+
+
+def _string_dict(value: object) -> dict[str, str]:
+    if not isinstance(value, dict):
+        return {}
+    return {str(key): str(item) for key, item in value.items()}
