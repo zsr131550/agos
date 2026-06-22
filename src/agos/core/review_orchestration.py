@@ -70,8 +70,7 @@ class ReviewOrchestrator:
         )
 
     def start_manual_review(self, *, diff_kind: str, reviewers: list[str]) -> ReviewRun:
-        if not reviewers:
-            raise ValueError("at least one reviewer is required")
+        reviewers = _validated_reviewers(reviewers)
 
         packet_ref, packet = self.review_service.start_manual_review_packet(diff_kind=diff_kind)
         spec = self.build_spec(
@@ -114,3 +113,21 @@ class ReviewOrchestrator:
 
 def _new_run_id() -> str:
     return f"review-run-{ULID()}"
+
+
+def _validated_reviewers(reviewers: list[str]) -> list[str]:
+    if not reviewers:
+        raise ValueError("at least one reviewer is required")
+
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for reviewer in reviewers:
+        if not reviewer:
+            raise ValueError("reviewer names must be non-empty")
+        if reviewer != reviewer.strip():
+            raise ValueError("reviewer names must not contain leading or trailing whitespace")
+        if reviewer in seen:
+            raise ValueError(f"duplicate reviewer: {reviewer}")
+        normalized.append(reviewer)
+        seen.add(reviewer)
+    return normalized

@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from agos.backends.native_async import BackendRunHandle, NativeAsyncBackend
 from agos.core.adapter import ExecutorRun
 from agos.core.orchestration.registry import OrchestrationRegistry
@@ -29,6 +31,16 @@ def _active_task(tmp_repo):
     )
     save_status(status, paths)
     return paths
+
+
+def _ledger_types(paths):
+    if not paths.ledger.exists():
+        return []
+    return [
+        json.loads(line)["type"]
+        for line in paths.ledger.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
 
 
 def test_review_orchestrator_builds_manual_review_run(tmp_repo):
@@ -90,3 +102,29 @@ def test_review_orchestrator_resume_manual_review_reuses_persisted_run(tmp_repo)
     assert resumed.review_id == started.review_id
     assert resumed.packet_ref == started.packet_ref
     assert resumed.handle == BackendRunHandle(backend="native_async", run_id=started.run_id)
+
+
+@pytest.mark.parametrize(
+    ("reviewers", "message"),
+    [
+        (["security_reviewer", "security_reviewer"], "duplicate reviewer"),
+        ([" security_reviewer"], "reviewer names must not contain leading or trailing whitespace"),
+        ([""], "reviewer names must be non-empty"),
+    ],
+)
+def test_invalid_reviewers_fail_without_creating_review_side_effects(tmp_repo, reviewers, message):
+    paths = _active_task(tmp_repo)
+    registry = OrchestrationRegistry()
+    registry.register_orchestration(NativeAsyncBackend())
+    orchestrator = ReviewOrchestrator(paths, registry=registry)
+    ledger_types_before = _ledger_types(paths)
+
+    with pytest.raises(ValueError, match=message):
+        orchestrator.start_manual_review(
+            diff_kind="governed_repo_diff",
+            reviewers=reviewers,
+        )
+
+    assert list(paths.reviews.glob("*/packet.json")) == []
+    assert list(paths.orchestration_runs.glob("*.json")) == []
+    assert _ledger_types(paths) == ledger_types_before
