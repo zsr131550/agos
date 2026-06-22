@@ -1,9 +1,9 @@
-"""Manual reviewer adapter for human-in-the-loop review steps."""
+﻿"""Manual reviewer adapter for human-in-the-loop review steps."""
 from __future__ import annotations
 
 from pydantic import BaseModel, Field
 
-from agos.core.orchestration.models import AgentJobHandle
+from agos.core.orchestration.models import AgentJobHandle, NodeRunStatus
 from agos.core.review_adapter import ReviewerRun, ReviewerRunStatus, ReviewerStartRequest
 
 
@@ -50,19 +50,37 @@ class ManualReviewerAdapter:
             state="running",
         )
 
-    def poll(self, run_id: str, *, reviewer_id: str) -> ReviewerRunStatus:
+    def poll(self, run_id: str | AgentJobHandle, *, reviewer_id: str | None = None) -> ReviewerRunStatus | NodeRunStatus:
+        if isinstance(run_id, AgentJobHandle):
+            return NodeRunStatus(
+                backend=self.name,
+                run_id=run_id.run_id,
+                node_id=run_id.node_id,
+                job_id=run_id.job_id,
+                state="waiting",
+                detail="waiting for manual review",
+            )
+        reviewer = reviewer_id or "unknown"
         return self._runs.get(
             run_id,
             ReviewerRunStatus(
                 backend=self.name,
                 run_id=run_id,
-                reviewer_id=reviewer_id,
+                reviewer_id=reviewer,
                 state="failed",
                 detail="unknown manual review run",
             ),
         )
 
-    def cancel(self, run_id: str) -> ReviewerRunStatus:
+    def cancel(self, run_id: str | AgentJobHandle) -> ReviewerRunStatus | NodeRunStatus:
+        if isinstance(run_id, AgentJobHandle):
+            return NodeRunStatus(
+                backend=self.name,
+                run_id=run_id.run_id,
+                node_id=run_id.node_id,
+                job_id=run_id.job_id,
+                state="cancelled",
+            )
         previous = self._runs.get(run_id)
         status = ReviewerRunStatus(
             backend=self.name,
@@ -73,6 +91,9 @@ class ManualReviewerAdapter:
         self._runs[run_id] = status
         return status
 
+    def collect(self, handle: AgentJobHandle) -> dict[str, str]:
+        return {"run_id": handle.run_id, "node_id": handle.node_id, "job_id": handle.job_id}
+
     def submit(self, request: ManualReviewRequest) -> AgentJobHandle:
         return AgentJobHandle(
             backend=self.name,
@@ -80,3 +101,4 @@ class ManualReviewerAdapter:
             node_id=request.node_id,
             run_id=request.run_id,
         )
+

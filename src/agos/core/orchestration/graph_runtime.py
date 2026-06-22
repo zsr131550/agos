@@ -1,4 +1,4 @@
-"""Native DAG runtime for orchestration node dispatch."""
+﻿"""Native DAG runtime for orchestration node dispatch."""
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -7,7 +7,7 @@ from pathlib import Path
 from pydantic import BaseModel, Field
 
 from agos.core.execution import utc_now_iso
-from agos.core.orchestration.models import NodeSpec, OrchestrationRunSpec
+from agos.core.orchestration.models import AgentJobHandle, NodeSpec, OrchestrationRunSpec
 from agos.core.orchestration.registry import OrchestrationRegistry
 from agos.core.orchestration.runtime import PersistedNodeState, load_node_state, save_node_state
 from agos.core.orchestration.scheduler import runnable_nodes
@@ -44,6 +44,7 @@ class GraphRuntime:
 
     def tick(self, spec: OrchestrationRunSpec) -> RuntimeSnapshot:
         states = self._load_states(spec)
+        states = self._poll_running(spec, states)
         scheduler_states = _retryable_failed_as_ready(states, self.policy.max_retries)
         running_count = sum(1 for state in states.values() if state.state == "running")
         capacity = max(0, self.policy.max_parallel - running_count)
@@ -84,18 +85,62 @@ class GraphRuntime:
             state = states.get(node.id)
             if state is None or state.state != "running":
                 continue
+            handle = _handle_from_state(spec.run_id, node, state)
+            status = self._backend_for(node).cancel(handle)
             cancelled = PersistedNodeState(
                 node_id=node.id,
-                state="cancelled",
+                state=status.state,
                 attempts=state.attempts,
-                backend=state.backend,
-                job_id=state.job_id,
+                backend=status.backend,
+                job_id=status.job_id,
                 started_at=state.started_at,
                 updated_at=utc_now_iso(),
+                output_refs=status.output_refs or {},
+                error=status.detail if status.state == "failed" else None,
             )
             states[node.id] = cancelled
             save_node_state(self._state_path(spec.run_id, node.id), cancelled)
         return _snapshot(spec.run_id, spec.nodes, states)
+
+    def _poll_running(
+        self,
+        spec: OrchestrationRunSpec,
+        states: dict[str, PersistedNodeState],
+    ) -> dict[str, PersistedNodeState]:
+        for node in spec.nodes:
+            state = states.get(node.id)
+            if state is None or state.state != "running":
+                continue
+            handle = _handle_from_state(spec.run_id, node, state)
+            try:
+                status = self._backend_for(node).poll(handle)
+            except Exception as exc:
+                updated = PersistedNodeState(
+                    node_id=node.id,
+                    state="failed",
+                    attempts=state.attempts,
+                    backend=state.backend or node.backend,
+                    job_id=state.job_id,
+                    started_at=state.started_at,
+                    updated_at=utc_now_iso(),
+                    output_refs=state.output_refs,
+                    error=str(exc),
+                )
+            else:
+                updated = PersistedNodeState(
+                    node_id=node.id,
+                    state=status.state,
+                    attempts=state.attempts,
+                    backend=status.backend,
+                    job_id=status.job_id,
+                    started_at=state.started_at,
+                    updated_at=utc_now_iso(),
+                    output_refs=status.output_refs or {},
+                    error=status.detail if status.state == "failed" else None,
+                )
+            states[node.id] = updated
+            save_node_state(self._state_path(spec.run_id, node.id), updated)
+        return states
 
     def _backend_for(self, node: NodeSpec):
         if node.kind in {"worker", "worker_submit"}:
@@ -158,3 +203,12 @@ def _node_by_id(spec: OrchestrationRunSpec, node_id: str) -> NodeSpec:
         if node.id == node_id:
             return node
     raise ValueError(f"unknown node in orchestration run: {node_id}")
+
+
+def _handle_from_state(run_id: str, node: NodeSpec, state: PersistedNodeState) -> AgentJobHandle:
+    return AgentJobHandle(
+        backend=state.backend or node.backend,
+        job_id=state.job_id or f"{run_id}:{node.id}",
+        node_id=node.id,
+        run_id=run_id,
+    )

@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from dataclasses import dataclass
 
@@ -6,7 +6,7 @@ import pytest
 
 from agos.adapters.reviewers.manual import ManualReviewerAdapter
 from agos.backends.native_async import BackendRunHandle, NativeAsyncBackend
-from agos.core.orchestration.models import AgentJobHandle, NodeSpec, OrchestrationRunSpec
+from agos.core.orchestration.models import AgentJobHandle, NodeRunStatus, NodeSpec, OrchestrationRunSpec
 from agos.core.orchestration.protocols import (
     ArbiterBackend,
     OrchestrationBackend,
@@ -16,8 +16,31 @@ from agos.core.orchestration.protocols import (
 from agos.core.orchestration.registry import OrchestrationRegistry, RegistryResolutionError
 
 
+
+class _NodeLifecycleMixin:
+    def poll(self, handle: AgentJobHandle) -> NodeRunStatus:
+        return NodeRunStatus(
+            backend=self.name,
+            run_id=handle.run_id,
+            node_id=handle.node_id,
+            job_id=handle.job_id,
+            state="completed",
+        )
+
+    def cancel(self, handle: AgentJobHandle) -> NodeRunStatus:
+        return NodeRunStatus(
+            backend=self.name,
+            run_id=handle.run_id,
+            node_id=handle.node_id,
+            job_id=handle.job_id,
+            state="cancelled",
+        )
+
+    def collect(self, handle: AgentJobHandle) -> dict[str, str]:
+        return {"run_id": handle.run_id, "node_id": handle.node_id}
+
 @dataclass(frozen=True)
-class _FakeWorkerBackend:
+class _FakeWorkerBackend(_NodeLifecycleMixin):
     name: str
 
     def start(self, run: OrchestrationRunSpec, node: NodeSpec) -> AgentJobHandle:
@@ -30,7 +53,7 @@ class _FakeWorkerBackend:
 
 
 @dataclass(frozen=True)
-class _FakeReviewerBackend:
+class _FakeReviewerBackend(_NodeLifecycleMixin):
     name: str
 
     def start(self, run: OrchestrationRunSpec, node: NodeSpec) -> AgentJobHandle:
@@ -43,7 +66,7 @@ class _FakeReviewerBackend:
 
 
 @dataclass(frozen=True)
-class _FakeArbiterBackend:
+class _FakeArbiterBackend(_NodeLifecycleMixin):
     name: str
 
     def start(self, run: OrchestrationRunSpec, node: NodeSpec) -> AgentJobHandle:
@@ -86,7 +109,7 @@ class _NamelessWorkerBackend:
 
 
 @dataclass(frozen=True)
-class _WrongNameTypeWorkerBackend:
+class _WrongNameTypeWorkerBackend(_NodeLifecycleMixin):
     name: object
 
     def start(self, run: OrchestrationRunSpec, node: NodeSpec) -> AgentJobHandle:
@@ -255,3 +278,4 @@ def test_register_rejects_whitespace_padded_names(register: str, backend: object
 
     with pytest.raises(RegistryResolutionError, match=message):
         getattr(registry, register)(backend)
+

@@ -1,10 +1,11 @@
-"""Protocol seams for orchestration backends."""
+﻿"""Protocol seams for orchestration backends."""
 from __future__ import annotations
 
 from typing import Any, Protocol, runtime_checkable
 
 from agos.core.orchestration.models import (
     AgentJobHandle,
+    NodeRunStatus,
     NodeSpec,
     OrchestrationRunSpec,
     OrchestratorRunHandle,
@@ -20,6 +21,12 @@ class WorkerBackend(Protocol):
 
     def start(self, run: OrchestrationRunSpec, node: NodeSpec) -> AgentJobHandle: ...
 
+    def poll(self, handle: AgentJobHandle) -> NodeRunStatus: ...
+
+    def cancel(self, handle: AgentJobHandle) -> NodeRunStatus: ...
+
+    def collect(self, handle: AgentJobHandle) -> dict[str, Any]: ...
+
 
 @runtime_checkable
 class ReviewerBackend(Protocol):
@@ -29,6 +36,12 @@ class ReviewerBackend(Protocol):
 
     def start(self, run: OrchestrationRunSpec, node: NodeSpec) -> AgentJobHandle: ...
 
+    def poll(self, handle: AgentJobHandle) -> NodeRunStatus: ...
+
+    def cancel(self, handle: AgentJobHandle) -> NodeRunStatus: ...
+
+    def collect(self, handle: AgentJobHandle) -> dict[str, Any]: ...
+
 
 @runtime_checkable
 class ArbiterBackend(Protocol):
@@ -37,6 +50,12 @@ class ArbiterBackend(Protocol):
     name: str
 
     def start(self, run: OrchestrationRunSpec, node: NodeSpec) -> AgentJobHandle: ...
+
+    def poll(self, handle: AgentJobHandle) -> NodeRunStatus: ...
+
+    def cancel(self, handle: AgentJobHandle) -> NodeRunStatus: ...
+
+    def collect(self, handle: AgentJobHandle) -> dict[str, Any]: ...
 
 
 @runtime_checkable

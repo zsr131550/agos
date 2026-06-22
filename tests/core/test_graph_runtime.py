@@ -1,7 +1,7 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from agos.core.orchestration.graph_runtime import GraphRuntime, RuntimePolicy
-from agos.core.orchestration.models import AgentJobHandle, NodeSpec, OrchestrationRunSpec
+from agos.core.orchestration.models import AgentJobHandle, NodeRunStatus, NodeSpec, OrchestrationRunSpec
 from agos.core.orchestration.registry import OrchestrationRegistry
 
 
@@ -9,6 +9,7 @@ class RecordingBackend:
     def __init__(self, name: str) -> None:
         self.name = name
         self.started: list[str] = []
+        self.cancelled: list[str] = []
 
     def start(self, run, node):
         self.started.append(node.id)
@@ -18,6 +19,28 @@ class RecordingBackend:
             node_id=node.id,
             run_id=run.run_id,
         )
+
+    def poll(self, handle):
+        return NodeRunStatus(
+            backend=self.name,
+            run_id=handle.run_id,
+            node_id=handle.node_id,
+            job_id=handle.job_id,
+            state="completed",
+        )
+
+    def cancel(self, handle):
+        self.cancelled.append(handle.node_id)
+        return NodeRunStatus(
+            backend=self.name,
+            run_id=handle.run_id,
+            node_id=handle.node_id,
+            job_id=handle.job_id,
+            state="cancelled",
+        )
+
+    def collect(self, handle):
+        return {"run_id": handle.run_id, "node_id": handle.node_id}
 
 
 class FlakyBackend:
@@ -36,6 +59,27 @@ class FlakyBackend:
             node_id=node.id,
             run_id=run.run_id,
         )
+
+    def poll(self, handle):
+        return NodeRunStatus(
+            backend=self.name,
+            run_id=handle.run_id,
+            node_id=handle.node_id,
+            job_id=handle.job_id,
+            state="completed",
+        )
+
+    def cancel(self, handle):
+        return NodeRunStatus(
+            backend=self.name,
+            run_id=handle.run_id,
+            node_id=handle.node_id,
+            job_id=handle.job_id,
+            state="cancelled",
+        )
+
+    def collect(self, handle):
+        return {"run_id": handle.run_id, "node_id": handle.node_id}
 
 
 def test_graph_runtime_respects_max_parallel_and_dependencies(tmp_path):
@@ -115,3 +159,4 @@ def _spec() -> OrchestrationRunSpec:
         ],
         limits={"max_parallel": 2},
     )
+

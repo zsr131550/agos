@@ -1,4 +1,4 @@
-"""Persisted orchestration specs and lightweight runtime handles."""
+﻿"""Persisted orchestration specs and lightweight runtime handles."""
 from __future__ import annotations
 
 from collections.abc import Mapping
@@ -29,6 +29,22 @@ class AgentJobHandle:
     job_id: str
     node_id: str
     run_id: str
+
+
+NodeRunState = Literal["queued", "running", "waiting", "completed", "failed", "cancelled"]
+
+
+@dataclass(frozen=True)
+class NodeRunStatus:
+    """Normalized status for one graph node backend job."""
+
+    backend: str
+    run_id: str
+    node_id: str
+    job_id: str
+    state: NodeRunState
+    detail: str | None = None
+    output_refs: dict[str, str] | None = None
 
 
 OrchestratorRunState = Literal[
@@ -213,3 +229,4 @@ class OrchestrationRunSpec(BaseModel):
 
         for node in self.nodes:
             visit(node.id)
+
