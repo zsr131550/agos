@@ -4,7 +4,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from agos.core.execution import WorkspaceBinding
-from agos.adapters.workers.local_worktree import (
+from agos.core.execution_worker import (
     WorkerAssignment,
     WorkerPreparedWorkspace,
     WorkerWorkspaceHandle,

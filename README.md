@@ -46,6 +46,12 @@ Blocking findings prevent closeout until they are resolved with evidence or expl
 The v0.3 execution loop adds isolated candidate worktrees and guarded apply:
 `execute-plan -> candidate submit -> candidate test -> candidate review -> candidate decide -> candidate apply`.
 
+The v0.4 orchestration seam keeps the same AGOS run graph portable across
+backends:
+`native_async` is the semantic reference backend, `external` serializes the
+normalized run for a remote orchestrator, and `langgraph` can compile the same
+DAG when the optional LangGraph dependency is installed.
+
 - The agent runs in multica's isolated workspace (`~/multica_workspaces/<per-task>/`), not in your repo.
 - `agos checkpoint` streams the agent's reported activity into an evidence ledger and records a governed-repo anchor (HEAD + status) at capture time. It does not claim the agent edited your working tree.
 - `agos ci --local` gates a human developer's commit/push only (advisory and bypassable with `--no-verify`). The agent's own commits never pass through these hooks. Agent output is gated server-side at the merge gate, which lands in v0.2.

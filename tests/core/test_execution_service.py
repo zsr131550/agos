@@ -9,8 +9,8 @@ from pathlib import Path
 import pytest
 import yaml
 
+from agos.adapters.workers import LocalWorktreeWorkerAdapter
 from agos.core.adapter import ExecutorRun
-from agos.core.execution import ExecutionSubtask, ExecutionWorker
 from agos.core.execution_service import ExecutionService
 from agos.core.execution_store import ExecutionStore
 from agos.core.ledger import Ledger
@@ -142,11 +142,14 @@ def _commit(repo: Path, message: str) -> None:
 
 
 def _service(tmp_repo: Path, *, worker_adapters=None) -> ExecutionService:
-    return ExecutionService(
+    service = ExecutionService(
         repo_paths(tmp_repo),
         worktree_root=tmp_repo.parent / ".agos-worktrees" / "agos-01",
         worker_adapters=worker_adapters,
     )
+    if worker_adapters is None:
+        service.register_worker_adapter(LocalWorktreeWorkerAdapter(service.workspace_manager))
+    return service
 
 
 def _ready_candidate(tmp_repo: Path):
@@ -190,7 +193,7 @@ def test_execute_plan_routes_workspace_creation_through_worker_adapter(tmp_repo,
         def export_candidate(self, handle):  # pragma: no cover - not used here
             raise AssertionError
 
-    service._worker_adapters["local_worktree"] = _Adapter(service.workspace_manager)
+    service.register_worker_adapter(_Adapter(service.workspace_manager))
 
     service.execute_plan(_plan_file(tmp_repo))
 
@@ -234,7 +237,7 @@ def test_submit_candidate_routes_patch_export_through_worker_adapter(tmp_repo, m
             called.append(handle.metadata["workspace_path"])
             return {"patch_bytes": self.manager.capture_patch(Path(handle.metadata["workspace_path"]))}
 
-    service._worker_adapters["local_worktree"] = _Adapter(service.workspace_manager)
+    service.register_worker_adapter(_Adapter(service.workspace_manager))
 
     service.submit_candidate("subtask-readme", summary="Update README heading.")
 

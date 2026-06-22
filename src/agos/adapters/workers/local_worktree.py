@@ -1,28 +1,10 @@
 """Local worktree worker adapter."""
 from __future__ import annotations
 
-from dataclasses import dataclass
 from pathlib import Path
 
-from agos.core.execution import ExecutionSubtask, WorkspaceBinding
+from agos.core.execution_worker import WorkerAssignment, WorkerPreparedWorkspace, WorkerWorkspaceHandle
 from agos.core.execution_workspace import ExecutionWorkspaceManager
-
-
-@dataclass(frozen=True)
-class WorkerAssignment:
-    subtask: ExecutionSubtask
-
-
-@dataclass(frozen=True)
-class WorkerWorkspaceHandle:
-    subtask_id: str
-    metadata: dict[str, str]
-
-
-@dataclass(frozen=True)
-class WorkerPreparedWorkspace:
-    binding: WorkspaceBinding
-    handle: WorkerWorkspaceHandle
 
 
 class LocalWorktreeWorkerAdapter:

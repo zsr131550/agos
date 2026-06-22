@@ -6,6 +6,7 @@ from pathlib import Path
 
 import typer
 
+from agos.adapters.workers import LocalWorktreeWorkerAdapter
 from agos.core.execution_service import ExecutionService
 from agos.core.execution_store import ExecutionStore
 from agos.core.repo import find_initialized_repo_root, repo_paths
@@ -42,7 +43,11 @@ def candidate_submit_command(
     try:
         repo_root = find_initialized_repo_root()
         paths = repo_paths(repo_root)
-        candidate = ExecutionService(paths).submit_candidate(
+        service = ExecutionService(paths)
+        service.register_worker_adapter(
+            LocalWorktreeWorkerAdapter(service.workspace_manager),
+        )
+        candidate = service.submit_candidate(
             subtask_id,
             summary=summary,
         )

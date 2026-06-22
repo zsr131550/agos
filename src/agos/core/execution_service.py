@@ -32,9 +32,8 @@ from agos.core.execution import (
 )
 from agos.core.execution_orchestration import ExecutionOrchestrator
 from agos.core.execution_store import ExecutionStore
-from agos.adapters.workers import (
-    FakeWorkerAdapter,
-    LocalWorktreeWorkerAdapter,
+from agos.core.execution_worker import (
+    ExecutionWorkerAdapter,
     WorkerAssignment,
     WorkerWorkspaceHandle,
 )
@@ -60,7 +59,7 @@ class ExecutionService:
         paths: AgosPaths,
         *,
         worktree_root: Path | None = None,
-        worker_adapters: dict[str, object] | None = None,
+        worker_adapters: dict[str, ExecutionWorkerAdapter] | None = None,
     ) -> None:
         self.paths = paths
         self.store = ExecutionStore(paths)
@@ -73,12 +72,10 @@ class ExecutionService:
         self.review_arbiter = ReviewDecisionArbiter()
         self.candidate_arbiter = CandidateDecisionArbiter()
         self.merge_arbiter = CandidateMergeArbiter()
-        self._worker_adapters: dict[str, object] = {
-            LocalWorktreeWorkerAdapter.name: LocalWorktreeWorkerAdapter(self.workspace_manager),
-            FakeWorkerAdapter.name: FakeWorkerAdapter(),
-        }
-        if worker_adapters:
-            self._worker_adapters.update(worker_adapters)
+        self._worker_adapters: dict[str, ExecutionWorkerAdapter] = dict(worker_adapters or {})
+
+    def register_worker_adapter(self, adapter: ExecutionWorkerAdapter) -> None:
+        self._worker_adapters[adapter.name] = adapter
 
     def execute_plan(self, plan_path: Path) -> ExecutionPlan:
         status, task = self._active_task()
@@ -690,7 +687,7 @@ class ExecutionService:
         status = load_status(self.paths)
         return status.task_id if status is not None else "unknown-task"
 
-    def _worker_adapter(self, adapter_name: str):
+    def _worker_adapter(self, adapter_name: str) -> ExecutionWorkerAdapter:
         if adapter_name not in self._worker_adapters:
             raise ValueError(f"unsupported worker adapter: {adapter_name}")
         return self._worker_adapters[adapter_name]

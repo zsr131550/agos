@@ -5,6 +5,7 @@ from pathlib import Path
 
 import typer
 
+from agos.adapters.workers import LocalWorktreeWorkerAdapter
 from agos.core.execution_service import ExecutionService
 from agos.core.repo import find_initialized_repo_root, repo_paths
 
@@ -15,7 +16,11 @@ def execute_plan_command(
     try:
         repo_root = find_initialized_repo_root()
         paths = repo_paths(repo_root)
-        execution_plan = ExecutionService(paths).execute_plan(plan)
+        service = ExecutionService(paths)
+        service.register_worker_adapter(
+            LocalWorktreeWorkerAdapter(service.workspace_manager),
+        )
+        execution_plan = service.execute_plan(plan)
     except Exception as exc:
         typer.echo(str(exc), err=True)
         raise typer.Exit(code=1) from exc

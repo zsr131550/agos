@@ -4,7 +4,7 @@ from __future__ import annotations
 from collections.abc import Iterable
 from dataclasses import dataclass
 
-from agos.core.execution import ArbiterDecision, CandidatePatch, DecisionValue, utc_now_iso
+from agos.core.execution import ArbiterDecision, CandidatePatch, DecisionValue
 from agos.core.review import Finding
 from uuid import uuid4
 
