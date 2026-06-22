@@ -856,6 +856,7 @@ class ExecutionService:
         return self._worker_adapters[adapter_name]
 
     def _execution_runtime(self, plan: ExecutionPlan) -> ExecutionRuntime:
+        runtime_config = load_config(self.paths.root).orchestration
         return ExecutionRuntime(
             state_dir=self.paths.current_task / "execution" / "runs",
             worker_adapters=self._worker_adapters,
@@ -864,6 +865,9 @@ class ExecutionService:
                 for subtask in plan.subtasks
                 if subtask.workspace_ref is not None
             },
+            max_retries=runtime_config.max_retries,
+            retry_backoff_seconds=runtime_config.retry_backoff_seconds,
+            worker_timeout_seconds=runtime_config.worker_timeout_seconds,
         )
 
 
@@ -937,6 +941,7 @@ def _decode(value: str | bytes | None) -> str:
     if isinstance(value, str):
         return value
     return value.decode("utf-8", errors="replace")
+
 
 
 

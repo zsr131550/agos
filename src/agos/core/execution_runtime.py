@@ -1,6 +1,7 @@
-"""Runtime scheduler for execution-plan worker attempts."""
+﻿"""Runtime scheduler for execution-plan worker attempts."""
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -24,6 +25,8 @@ class WorkerAttempt(BaseModel):
     output_refs: list[str] = Field(default_factory=list)
     started_at: str = Field(default_factory=utc_now_iso)
     updated_at: str = Field(default_factory=utc_now_iso)
+    retry_after: str | None = None
+    terminal_reason: str | None = None
 
 
 @dataclass(frozen=True)
@@ -45,26 +48,39 @@ class ExecutionRuntime:
         worker_adapters: dict[str, ExecutionWorkerAdapter],
         workspace_paths: dict[str, str] | None = None,
         max_retries: int = 0,
+        retry_backoff_seconds: int = 0,
+        worker_timeout_seconds: int | None = None,
     ) -> None:
         self.state_dir = state_dir
         self.worker_adapters = dict(worker_adapters)
         self.workspace_paths = dict(workspace_paths or {})
         self.max_retries = max_retries
+        self.retry_backoff_seconds = retry_backoff_seconds
+        self.worker_timeout_seconds = worker_timeout_seconds
 
     def tick(self, plan: ExecutionPlan, *, run_id: str) -> ExecutionRuntimeSnapshot:
         attempts = self._load_attempts(plan, run_id)
+        retryable_failed = {
+            subtask_id
+            for subtask_id, attempt in attempts.items()
+            if _can_retry(attempt, self.max_retries)
+        }
         attempts = self._poll_running(plan, run_id, attempts)
         capacity = max(0, plan.max_parallel - _count_state(attempts, "running"))
 
-        for subtask in _ready_subtasks(plan, attempts)[:capacity]:
+        for subtask in _ready_subtasks(plan, attempts, retryable_failed=retryable_failed)[:capacity]:
             attempt = self._start_subtask(plan, run_id, subtask, attempts.get(subtask.id))
             attempts[subtask.id] = attempt
             self._write_attempt(run_id, attempt)
 
-        return _execution_snapshot(run_id, plan, attempts)
+        snapshot = _execution_snapshot(run_id, plan, attempts)
+        self._write_run_status(snapshot)
+        return snapshot
 
     def status(self, plan: ExecutionPlan, *, run_id: str) -> ExecutionRuntimeSnapshot:
-        return _execution_snapshot(run_id, plan, self._load_attempts(plan, run_id))
+        snapshot = _execution_snapshot(run_id, plan, self._load_attempts(plan, run_id))
+        self._write_run_status(snapshot)
+        return snapshot
 
     def cancel(self, plan: ExecutionPlan, *, run_id: str) -> ExecutionRuntimeSnapshot:
         attempts = self._load_attempts(plan, run_id)
@@ -79,12 +95,15 @@ class ExecutionRuntime:
                     "state": status.state,
                     "detail": status.detail,
                     "output_refs": status.output_refs,
+                    "terminal_reason": status.detail if status.is_terminal else None,
                     "updated_at": utc_now_iso(),
                 }
             )
             attempts[subtask.id] = updated
             self._write_attempt(run_id, updated)
-        return _execution_snapshot(run_id, plan, attempts)
+        snapshot = _execution_snapshot(run_id, plan, attempts)
+        self._write_run_status(snapshot)
+        return snapshot
 
     def _poll_running(
         self,
@@ -103,6 +122,7 @@ class ExecutionRuntime:
                     "state": status.state,
                     "detail": status.detail,
                     "output_refs": status.output_refs,
+                    "terminal_reason": status.detail if status.state == "failed" else None,
                     "updated_at": utc_now_iso(),
                 }
             )
@@ -139,6 +159,7 @@ class ExecutionRuntime:
                 state=state,
                 attempts=attempts,
                 detail=str(exc),
+                terminal_reason=str(exc),
             )
         return WorkerAttempt(
             subtask_id=subtask.id,
@@ -163,6 +184,24 @@ class ExecutionRuntime:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(attempt.model_dump_json(indent=2), encoding="utf-8")
 
+    def _write_run_status(self, snapshot: ExecutionRuntimeSnapshot) -> None:
+        path = self.state_dir / snapshot.run_id / "status.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            json.dumps(
+                {
+                    "run_id": snapshot.run_id,
+                    "running_subtasks": list(snapshot.running_subtasks),
+                    "completed_subtasks": list(snapshot.completed_subtasks),
+                    "failed_subtasks": list(snapshot.failed_subtasks),
+                    "cancelled_subtasks": list(snapshot.cancelled_subtasks),
+                },
+                indent=2,
+                sort_keys=True,
+            ),
+            encoding="utf-8",
+        )
+
     def _attempt_path(self, run_id: str, subtask_id: str) -> Path:
         return self.state_dir / run_id / "attempts" / f"{subtask_id}.json"
 
@@ -170,12 +209,15 @@ class ExecutionRuntime:
 def _ready_subtasks(
     plan: ExecutionPlan,
     attempts: dict[str, WorkerAttempt],
+    *,
+    retryable_failed: set[str] | None = None,
 ) -> list[ExecutionSubtask]:
+    retryable_failed = retryable_failed or set()
     ready: list[ExecutionSubtask] = []
     for subtask in plan.subtasks:
         attempt = attempts.get(subtask.id)
         if attempt is not None:
-            if attempt.state == "failed" and attempt.attempts <= 0:
+            if attempt.state == "failed" and subtask.id in retryable_failed:
                 pass
             else:
                 continue
@@ -212,3 +254,7 @@ def _subtasks_in_state(
 
 def _count_state(attempts: dict[str, WorkerAttempt], state: str) -> int:
     return sum(1 for attempt in attempts.values() if attempt.state == state)
+
+
+def _can_retry(attempt: WorkerAttempt, max_retries: int) -> bool:
+    return attempt.state == "failed" and attempt.attempts <= max_retries
