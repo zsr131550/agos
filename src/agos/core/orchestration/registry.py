@@ -100,6 +100,8 @@ class OrchestrationRegistry:
         name = getattr(backend, "name", None)
         if not isinstance(name, str) or not name.strip():
             raise RegistryResolutionError(f"invalid {kind}: missing name")
+        if name != name.strip():
+            raise RegistryResolutionError(f"invalid {kind}: whitespace-padded name")
         return name
 
     def _has_callable_entrypoint(self, backend: object, entrypoint: Literal["run", "start"]) -> bool:

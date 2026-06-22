@@ -38,12 +38,16 @@ class NodeSpec(BaseModel):
     def _non_empty(cls, value: str) -> str:
         if not value.strip():
             raise ValueError("node id and backend must be non-empty")
+        if value != value.strip():
+            raise ValueError("node id and backend must not contain leading or trailing whitespace")
         return value
 
     @field_validator("depends_on")
     @classmethod
     def _unique_dependencies(cls, value: tuple[str, ...] | list[str]) -> tuple[str, ...]:
         value = tuple(value)
+        if any(entry != entry.strip() for entry in value):
+            raise ValueError("depends_on entries must not contain leading or trailing whitespace")
         if len(set(value)) != len(value):
             raise ValueError("depends_on entries must be unique")
         return value
@@ -75,6 +79,8 @@ class OrchestrationRunSpec(BaseModel):
     def _required_text(cls, value: str) -> str:
         if not value.strip():
             raise ValueError("run_id and task_id must be non-empty")
+        if value != value.strip():
+            raise ValueError("run_id and task_id must not contain leading or trailing whitespace")
         return value
 
     @field_validator("nodes")

@@ -183,3 +183,21 @@ def test_register_orchestration_rejects_non_callable_run():
         registry.register_orchestration(
             _NonCallableOrchestrationRunBackend(name="local_orchestration", run="not-callable")
         )
+
+
+@pytest.mark.parametrize(
+    ("register", "backend", "message"),
+    [
+        ("register_worker", _FakeWorkerBackend(name="local_worker "), "invalid worker backend: whitespace-padded name"),
+        (
+            "register_orchestration",
+            _FakeOrchestrationBackend(name="local_orchestration "),
+            "invalid orchestration backend: whitespace-padded name",
+        ),
+    ],
+)
+def test_register_rejects_whitespace_padded_names(register: str, backend: object, message: str):
+    registry = OrchestrationRegistry()
+
+    with pytest.raises(RegistryResolutionError, match=message):
+        getattr(registry, register)(backend)

@@ -94,6 +94,35 @@ def test_orchestration_run_spec_rejects_dependency_cycles():
         )
 
 
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("id", "worker-01 "),
+        ("backend", "local_worker "),
+    ],
+)
+def test_node_spec_rejects_whitespace_padded_identifiers(field: str, value: str):
+    kwargs = {
+        "id": "worker-01",
+        "kind": "worker",
+        "backend": "local_worker",
+    }
+    kwargs[field] = value
+
+    with pytest.raises(ValidationError, match="must not contain leading or trailing whitespace"):
+        NodeSpec(**kwargs)
+
+
+def test_orchestration_run_spec_rejects_whitespace_padded_dependency_ids():
+    with pytest.raises(ValidationError, match="depends_on entries must not contain leading or trailing whitespace"):
+        NodeSpec(
+            id="reviewer-01",
+            kind="reviewer",
+            backend="local_reviewer",
+            depends_on=["worker-01 "],
+        )
+
+
 def test_node_spec_is_immutable_after_construction():
     node = NodeSpec(
         id="worker-01",
