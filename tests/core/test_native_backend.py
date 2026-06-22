@@ -62,10 +62,12 @@ def test_native_backend_collects_waiting_snapshot():
 
     assert backend.collect(handle) == {
         "run_id": "run-01",
+        "backend": "native_async",
         "state": "waiting",
         "waiting_nodes": ["manual-review"],
         "completed_nodes": [],
         "failed_nodes": [],
+        "output_refs": {},
     }
 
 

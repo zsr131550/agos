@@ -68,10 +68,15 @@ class NativeAsyncBackend:
         status = self.poll(handle)
         return {
             "run_id": status.run_id,
+            "backend": self.name,
             "state": status.state,
             "waiting_nodes": list(status.waiting_nodes),
             "completed_nodes": list(status.completed_nodes),
             "failed_nodes": list(status.failed_nodes),
+            "output_refs": _output_refs_for_nodes(
+                self._require_run(handle),
+                status.waiting_nodes + status.completed_nodes,
+            ),
         }
 
     def _require_run(self, handle: BackendRunHandle) -> OrchestrationRunSpec:
@@ -90,3 +95,15 @@ def _node_by_id(spec: OrchestrationRunSpec, node_id: str) -> NodeSpec:
         if node.id == node_id:
             return node
     raise ValueError(f"unknown node in orchestration run: {node_id}")
+
+
+def _output_refs_for_nodes(
+    spec: OrchestrationRunSpec,
+    node_ids: tuple[str, ...],
+) -> dict[str, str]:
+    output_refs: dict[str, str] = {}
+    for node_id in node_ids:
+        output_ref = _node_by_id(spec, node_id).metadata.get("output_ref")
+        if output_ref:
+            output_refs[node_id] = output_ref
+    return output_refs
