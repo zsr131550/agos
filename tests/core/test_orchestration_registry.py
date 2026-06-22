@@ -66,6 +66,36 @@ class _MalformedBackend:
     name: str
 
 
+@dataclass(frozen=True)
+class _NamelessWorkerBackend:
+    start: object
+
+
+@dataclass(frozen=True)
+class _WrongNameTypeWorkerBackend:
+    name: object
+
+    def start(self, run: OrchestrationRunSpec, node: NodeSpec) -> AgentJobHandle:
+        return AgentJobHandle(
+            backend="wrong-name-type",
+            job_id=f"job-{node.id}",
+            node_id=node.id,
+            run_id=run.run_id,
+        )
+
+
+@dataclass(frozen=True)
+class _NonCallableWorkerStartBackend:
+    name: str
+    start: object
+
+
+@dataclass(frozen=True)
+class _NonCallableOrchestrationRunBackend:
+    name: str
+    run: object
+
+
 def test_missing_backend_lookup_raises_registry_resolution_error():
     registry = OrchestrationRegistry()
 
@@ -122,3 +152,34 @@ def test_register_rejects_malformed_backends(register: str, backend: _MalformedB
 
     with pytest.raises(RegistryResolutionError, match=message):
         getattr(registry, register)(backend)
+
+
+def test_register_worker_rejects_backend_without_name():
+    registry = OrchestrationRegistry()
+
+    with pytest.raises(RegistryResolutionError, match="invalid worker backend: missing name"):
+        registry.register_worker(_NamelessWorkerBackend(start=lambda run, node: None))
+
+
+@pytest.mark.parametrize("name", ["", 123])
+def test_register_worker_rejects_empty_or_non_string_name(name: object):
+    registry = OrchestrationRegistry()
+
+    with pytest.raises(RegistryResolutionError, match="invalid worker backend: missing name"):
+        registry.register_worker(_WrongNameTypeWorkerBackend(name=name))
+
+
+def test_register_worker_rejects_non_callable_start():
+    registry = OrchestrationRegistry()
+
+    with pytest.raises(RegistryResolutionError, match="invalid worker backend: local_worker"):
+        registry.register_worker(_NonCallableWorkerStartBackend(name="local_worker", start="not-callable"))
+
+
+def test_register_orchestration_rejects_non_callable_run():
+    registry = OrchestrationRegistry()
+
+    with pytest.raises(RegistryResolutionError, match="invalid orchestration backend: local_orchestration"):
+        registry.register_orchestration(
+            _NonCallableOrchestrationRunBackend(name="local_orchestration", run="not-callable")
+        )
