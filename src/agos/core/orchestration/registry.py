@@ -25,16 +25,16 @@ class OrchestrationRegistry:
     arbiter_backends: dict[str, ArbiterBackend] = field(default_factory=dict)
 
     def register_orchestration(self, backend: OrchestrationBackend) -> None:
-        self._register(backend, self.orchestration_backends, "orchestration backend")
+        self._register(backend, self.orchestration_backends, "orchestration backend", OrchestrationBackend)
 
     def register_worker(self, backend: WorkerBackend) -> None:
-        self._register(backend, self.worker_backends, "worker backend")
+        self._register(backend, self.worker_backends, "worker backend", WorkerBackend)
 
     def register_reviewer(self, backend: ReviewerBackend) -> None:
-        self._register(backend, self.reviewer_backends, "reviewer backend")
+        self._register(backend, self.reviewer_backends, "reviewer backend", ReviewerBackend)
 
     def register_arbiter(self, backend: ArbiterBackend) -> None:
-        self._register(backend, self.arbiter_backends, "arbiter backend")
+        self._register(backend, self.arbiter_backends, "arbiter backend", ArbiterBackend)
 
     def resolve_orchestration(self, name: str) -> OrchestrationBackend:
         return self._resolve(name, self.orchestration_backends, "orchestration backend")
@@ -54,8 +54,16 @@ class OrchestrationRegistry:
         except KeyError as exc:
             raise RegistryResolutionError(f"missing {kind}: {name}") from exc
 
-    def _register(self, backend: object, registry: dict[str, object], kind: str) -> None:
+    def _register(
+        self,
+        backend: object,
+        registry: dict[str, object],
+        kind: str,
+        protocol: type[object],
+    ) -> None:
         name = getattr(backend, "name")
+        if not isinstance(backend, protocol):
+            raise RegistryResolutionError(f"invalid {kind}: {name}")
         if name in registry:
             raise RegistryResolutionError(f"duplicate {kind}: {name}")
         registry[name] = backend

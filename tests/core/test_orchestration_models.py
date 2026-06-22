@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import MappingProxyType
 
 import pytest
 from pydantic import ValidationError
@@ -50,7 +51,7 @@ def test_orchestration_run_spec_round_trips_with_node_spec():
     assert reloaded.run_id == "run-01"
     assert isinstance(reloaded.nodes[0], NodeSpec)
     assert reloaded.nodes[0].metadata == {"role": "implementation"}
-    assert reloaded.nodes[1].depends_on == ["worker-01"]
+    assert reloaded.nodes[1].depends_on == ("worker-01",)
 
 
 def test_orchestration_run_spec_rejects_duplicate_node_ids():
@@ -91,6 +92,43 @@ def test_orchestration_run_spec_rejects_dependency_cycles():
                 _node("worker-b", depends_on=["worker-a"]),
             ],
         )
+
+
+def test_node_spec_is_immutable_after_construction():
+    node = NodeSpec(
+        id="worker-01",
+        kind="worker",
+        backend="local_worker",
+        depends_on=["reviewer-01"],
+        metadata={"role": "implementation"},
+    )
+
+    assert isinstance(node.depends_on, tuple)
+    assert isinstance(node.metadata, MappingProxyType)
+
+    with pytest.raises(AttributeError):
+        node.depends_on.append("arbiter-01")
+
+    with pytest.raises(TypeError):
+        node.metadata["role"] = "mutated"
+
+
+def test_orchestration_run_spec_is_immutable_after_construction():
+    spec = OrchestrationRunSpec(
+        run_id="run-01",
+        task_id="agos-01",
+        nodes=[_node("worker-01"), _node("reviewer-01", kind="reviewer", backend="local_reviewer", depends_on=["worker-01"])],
+        metadata={"mode": "serial"},
+    )
+
+    assert isinstance(spec.nodes, tuple)
+    assert isinstance(spec.metadata, MappingProxyType)
+
+    with pytest.raises(AttributeError):
+        spec.nodes.append(_node("arbiter-01", kind="arbiter", backend="local_arbiter"))
+
+    with pytest.raises(TypeError):
+        spec.metadata["mode"] = "parallel"
 
 
 def test_repo_paths_include_orchestration_layout(tmp_repo: Path):

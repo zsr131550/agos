@@ -1,10 +1,12 @@
 """Persisted orchestration specs and lightweight runtime handles."""
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
+from types import MappingProxyType
 from typing import Literal
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_serializer, field_validator, model_validator
 
 
 NodeKind = Literal["worker", "reviewer", "arbiter"]
@@ -23,11 +25,13 @@ class AgentJobHandle:
 class NodeSpec(BaseModel):
     """One node in an orchestration run graph."""
 
+    model_config = ConfigDict(frozen=True)
+
     id: str
     kind: NodeKind
     backend: str
-    depends_on: list[str] = Field(default_factory=list)
-    metadata: dict[str, str] = Field(default_factory=dict)
+    depends_on: tuple[str, ...] = Field(default_factory=tuple)
+    metadata: Mapping[str, str] = Field(default_factory=lambda: MappingProxyType({}))
 
     @field_validator("id", "backend")
     @classmethod
@@ -38,19 +42,33 @@ class NodeSpec(BaseModel):
 
     @field_validator("depends_on")
     @classmethod
-    def _unique_dependencies(cls, value: list[str]) -> list[str]:
+    def _unique_dependencies(cls, value: tuple[str, ...] | list[str]) -> tuple[str, ...]:
+        value = tuple(value)
         if len(set(value)) != len(value):
             raise ValueError("depends_on entries must be unique")
         return value
+
+    @field_validator("metadata")
+    @classmethod
+    def _freeze_metadata(cls, value: Mapping[str, str]) -> Mapping[str, str]:
+        if isinstance(value, MappingProxyType):
+            return value
+        return MappingProxyType(dict(value))
+
+    @field_serializer("metadata")
+    def _serialize_metadata(self, value: Mapping[str, str]) -> dict[str, str]:
+        return dict(value)
 
 
 class OrchestrationRunSpec(BaseModel):
     """Serialized orchestration plan for a single task run."""
 
+    model_config = ConfigDict(frozen=True)
+
     run_id: str
     task_id: str
-    nodes: list[NodeSpec]
-    metadata: dict[str, str] = Field(default_factory=dict)
+    nodes: tuple[NodeSpec, ...]
+    metadata: Mapping[str, str] = Field(default_factory=lambda: MappingProxyType({}))
 
     @field_validator("run_id", "task_id")
     @classmethod
@@ -58,6 +76,22 @@ class OrchestrationRunSpec(BaseModel):
         if not value.strip():
             raise ValueError("run_id and task_id must be non-empty")
         return value
+
+    @field_validator("nodes")
+    @classmethod
+    def _freeze_nodes(cls, value: tuple[NodeSpec, ...] | list[NodeSpec]) -> tuple[NodeSpec, ...]:
+        return tuple(value)
+
+    @field_validator("metadata")
+    @classmethod
+    def _freeze_metadata(cls, value: Mapping[str, str]) -> Mapping[str, str]:
+        if isinstance(value, MappingProxyType):
+            return value
+        return MappingProxyType(dict(value))
+
+    @field_serializer("metadata")
+    def _serialize_metadata(self, value: Mapping[str, str]) -> dict[str, str]:
+        return dict(value)
 
     @model_validator(mode="after")
     def _validate_nodes(self) -> "OrchestrationRunSpec":
