@@ -14,7 +14,8 @@ def execute_plan_command(
 ) -> None:
     try:
         repo_root = find_initialized_repo_root()
-        execution_plan = ExecutionService(repo_paths(repo_root)).execute_plan(plan)
+        paths = repo_paths(repo_root)
+        execution_plan = ExecutionService(paths).execute_plan(plan)
     except Exception as exc:
         typer.echo(str(exc), err=True)
         raise typer.Exit(code=1) from exc

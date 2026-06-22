@@ -19,7 +19,8 @@ candidate_app = typer.Typer(help="Inspect and manage execution candidates.")
 def candidate_list_command() -> None:
     try:
         repo_root = find_initialized_repo_root()
-        store = ExecutionStore(repo_paths(repo_root))
+        paths = repo_paths(repo_root)
+        store = ExecutionStore(paths)
         candidates = store.read_candidates()
     except Exception as exc:
         typer.echo(str(exc), err=True)
@@ -40,7 +41,8 @@ def candidate_submit_command(
 ) -> None:
     try:
         repo_root = find_initialized_repo_root()
-        candidate = ExecutionService(repo_paths(repo_root)).submit_candidate(
+        paths = repo_paths(repo_root)
+        candidate = ExecutionService(paths).submit_candidate(
             subtask_id,
             summary=summary,
         )
@@ -58,7 +60,8 @@ def candidate_test_command(
 ) -> None:
     try:
         repo_root = find_initialized_repo_root()
-        runs = ExecutionService(repo_paths(repo_root)).test_candidate(candidate_id, gate_id=gate)
+        paths = repo_paths(repo_root)
+        runs = ExecutionService(paths).test_candidate(candidate_id, gate_id=gate)
     except Exception as exc:
         typer.echo(str(exc), err=True)
         raise typer.Exit(code=1) from exc
@@ -76,7 +79,8 @@ def candidate_review_command(
 ) -> None:
     try:
         repo_root = find_initialized_repo_root()
-        service = ExecutionService(repo_paths(repo_root))
+        paths = repo_paths(repo_root)
+        service = ExecutionService(paths)
         if packet_only and ingest is not None:
             raise ValueError("--packet-only and --ingest cannot be used together")
         if packet_only:
@@ -111,7 +115,8 @@ def candidate_decide_command(
 ) -> None:
     try:
         repo_root = find_initialized_repo_root()
-        outcome = ExecutionService(repo_paths(repo_root)).decide_candidate(
+        paths = repo_paths(repo_root)
+        outcome = ExecutionService(paths).decide_candidate(
             candidate_id,
             decision=decision.replace("-", "_"),
             reason=reason,
@@ -127,7 +132,8 @@ def candidate_decide_command(
 def candidate_apply_command(candidate_id: str) -> None:
     try:
         repo_root = find_initialized_repo_root()
-        candidate = ExecutionService(repo_paths(repo_root)).apply_candidate(candidate_id)
+        paths = repo_paths(repo_root)
+        candidate = ExecutionService(paths).apply_candidate(candidate_id)
     except Exception as exc:
         typer.echo(str(exc), err=True)
         raise typer.Exit(code=1) from exc

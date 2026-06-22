@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from agos.core.arbiters import DeterministicReviewArbiter
+from agos.core.arbiters import CandidateMergeArbiter
+from agos.core.execution import CandidatePatch
 from agos.core.review import Finding
 
 
@@ -63,3 +65,42 @@ def test_deterministic_review_arbiter_preserves_input_payloads():
     ordered = arbiter.arbitrate(findings)
 
     assert ordered[0].model_dump() == findings[0].model_dump()
+
+
+def test_candidate_merge_arbiter_rejects_overlapping_accepted_candidates():
+    arbiter = CandidateMergeArbiter()
+    candidate = CandidatePatch(
+        id="candidate-01",
+        task_id="agos-01",
+        subtask_id="subtask-01",
+        source_agent="local_worktree",
+        workspace_ref="execution/workspaces/subtask-01.json",
+        patch_ref="evidence/candidate_patches/candidate-01.patch",
+        patch_sha256="sha",
+        base_commit="base",
+        summary="summary",
+        status="accepted",
+    )
+    other = CandidatePatch(
+        id="candidate-02",
+        task_id="agos-01",
+        subtask_id="subtask-02",
+        source_agent="local_worktree",
+        workspace_ref="execution/workspaces/subtask-02.json",
+        patch_ref="evidence/candidate_patches/candidate-02.patch",
+        patch_sha256="sha",
+        base_commit="base",
+        summary="summary",
+        status="accepted",
+    )
+
+    decision = arbiter.decide(
+        candidate,
+        accepted_candidate_paths={
+            other.id: ["src/agos/core/execution.py"],
+        },
+        dirty_paths=[],
+        patch_paths=["src/agos/core/execution.py"],
+    )
+
+    assert not decision.allowed

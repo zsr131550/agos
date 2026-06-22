@@ -9,7 +9,16 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, field_serializer, field_validator, model_validator
 
 
-NodeKind = Literal["worker", "reviewer", "arbiter", "wait_for_manual_input"]
+NodeKind = Literal[
+    "worker",
+    "reviewer",
+    "arbiter",
+    "wait_for_manual_input",
+    "validate_plan",
+    "prepare_workspace",
+    "worker_submit",
+    "candidate_review_subgraph",
+]
 
 
 @dataclass(frozen=True)
@@ -30,7 +39,10 @@ class NodeSpec(BaseModel):
     id: str
     kind: NodeKind
     backend: str
+    adapter: str | None = None
     depends_on: tuple[str, ...] = Field(default_factory=tuple)
+    inputs: Mapping[str, str] = Field(default_factory=lambda: MappingProxyType({}))
+    policy: Mapping[str, str] = Field(default_factory=lambda: MappingProxyType({}))
     metadata: Mapping[str, str] = Field(default_factory=lambda: MappingProxyType({}))
 
     @field_validator("id", "backend")
@@ -59,6 +71,17 @@ class NodeSpec(BaseModel):
             return value
         return MappingProxyType(dict(value))
 
+    @field_validator("inputs", "policy")
+    @classmethod
+    def _freeze_inputs_and_policy(cls, value: Mapping[str, object]) -> Mapping[str, object]:
+        if isinstance(value, MappingProxyType):
+            return value
+        return MappingProxyType(dict(value))
+
+    @field_serializer("inputs", "policy")
+    def _serialize_inputs_and_policy(self, value: Mapping[str, object]) -> dict[str, object]:
+        return dict(value)
+
     @field_serializer("metadata")
     def _serialize_metadata(self, value: Mapping[str, str]) -> dict[str, str]:
         return dict(value)
@@ -71,7 +94,12 @@ class OrchestrationRunSpec(BaseModel):
 
     run_id: str
     task_id: str
+    kind: str = "orchestration_run"
+    backend: str = "native_async"
+    entry_nodes: tuple[str, ...] = Field(default_factory=tuple)
     nodes: tuple[NodeSpec, ...]
+    limits: Mapping[str, int] = Field(default_factory=lambda: MappingProxyType({}))
+    artifacts: Mapping[str, str] = Field(default_factory=lambda: MappingProxyType({}))
     metadata: Mapping[str, str] = Field(default_factory=lambda: MappingProxyType({}))
 
     @field_validator("run_id", "task_id")
@@ -88,15 +116,25 @@ class OrchestrationRunSpec(BaseModel):
     def _freeze_nodes(cls, value: tuple[NodeSpec, ...] | list[NodeSpec]) -> tuple[NodeSpec, ...]:
         return tuple(value)
 
-    @field_validator("metadata")
+    @field_validator("entry_nodes")
     @classmethod
-    def _freeze_metadata(cls, value: Mapping[str, str]) -> Mapping[str, str]:
+    def _freeze_entry_nodes(cls, value: tuple[str, ...] | list[str]) -> tuple[str, ...]:
+        value = tuple(value)
+        if any(entry != entry.strip() for entry in value):
+            raise ValueError("entry_nodes entries must not contain leading or trailing whitespace")
+        if len(set(value)) != len(value):
+            raise ValueError("entry_nodes entries must be unique")
+        return value
+
+    @field_validator("metadata", "limits", "artifacts")
+    @classmethod
+    def _freeze_metadata(cls, value: Mapping[str, object]) -> Mapping[str, object]:
         if isinstance(value, MappingProxyType):
             return value
         return MappingProxyType(dict(value))
 
-    @field_serializer("metadata")
-    def _serialize_metadata(self, value: Mapping[str, str]) -> dict[str, str]:
+    @field_serializer("metadata", "limits", "artifacts")
+    def _serialize_metadata(self, value: Mapping[str, object]) -> dict[str, object]:
         return dict(value)
 
     @model_validator(mode="after")
@@ -107,6 +145,12 @@ class OrchestrationRunSpec(BaseModel):
         ids = [node.id for node in self.nodes]
         if len(set(ids)) != len(ids):
             raise ValueError("node ids must be unique")
+
+        if self.entry_nodes:
+            node_ids = set(ids)
+            for entry_node in self.entry_nodes:
+                if entry_node not in node_ids:
+                    raise ValueError(f"unknown entry node {entry_node!r}")
 
         node_ids = set(ids)
         for node in self.nodes:

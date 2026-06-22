@@ -10,6 +10,11 @@ from uuid import uuid4
 
 import yaml
 
+from agos.core.arbiters import (
+    CandidateDecisionArbiter,
+    CandidateDecisionSnapshot,
+    CandidateMergeArbiter,
+)
 from agos.core.command import run_command
 from agos.core.config import load_config, resolve_gates
 from agos.core.execution import (
@@ -22,6 +27,7 @@ from agos.core.execution import (
     ReviewBinding,
     utc_now_iso,
 )
+from agos.core.execution_orchestration import ExecutionOrchestrator
 from agos.core.execution_store import ExecutionStore
 from agos.core.execution_workspace import (
     ExecutionWorkspaceManager,
@@ -48,6 +54,9 @@ class ExecutionService:
             task_id=self._task_id_or_placeholder(),
             worktree_root=worktree_root,
         )
+        self.execution_orchestrator = ExecutionOrchestrator(paths)
+        self.candidate_arbiter = CandidateDecisionArbiter()
+        self.merge_arbiter = CandidateMergeArbiter()
 
     def execute_plan(self, plan_path: Path) -> ExecutionPlan:
         status, task = self._active_task()
@@ -58,6 +67,7 @@ class ExecutionService:
             raise ValueError(f"execution plan task_id {plan.task_id!r} does not match active task {task.id!r}")
 
         plan_ref = self.store.write_plan(plan)
+        self.execution_orchestrator.build_spec(plan_path)
         self._append_event(
             {
                 "type": "execution_plan_created",
@@ -282,17 +292,20 @@ class ExecutionService:
         else:
             evidence_refs = [candidate.patch_ref]
 
-        decision_model = ArbiterDecision(
-            id=_new_id("decision"),
-            candidate_id=candidate.id,
-            decision=cast(DecisionValue, decision),
-            reason=reason,
-            evidence_refs=evidence_refs,
-            decided_by=decided_by,
+        decision_result = self.candidate_arbiter.decide(
+            CandidateDecisionSnapshot(
+                candidate_id=candidate.id,
+                decision=cast(DecisionValue, decision),
+                reason=reason,
+                decided_by=decided_by,
+                evidence_refs=tuple(evidence_refs),
+            )
         )
+        decision_model = decision_result.decision
         decision_ref = self.store.write_decision(decision_model)
-        status_update = _candidate_status_for_decision(decision)
-        updated = candidate.model_copy(update={"status": status_update, "decision_ref": decision_ref})
+        updated = candidate.model_copy(
+            update={"status": decision_result.candidate_status, "decision_ref": decision_ref}
+        )
         self.store.write_candidate(updated)
         self._append_event(
             {
@@ -329,8 +342,26 @@ class ExecutionService:
         review, report = self._latest_completed_review_and_report(candidate)
         self._assert_review_binding_current(candidate, review, report)
         self._assert_latest_decision_accepted(candidate)
-        self._assert_no_accepted_overlap(candidate)
-        self._assert_no_dirty_overlap(candidate_patch_paths(patch_bytes))
+        merge_decision = self.merge_arbiter.decide(
+            candidate,
+            accepted_candidate_paths={
+                other.id: candidate_patch_paths(self._patch_bytes(other))
+                for other in self.store.read_candidates()
+                if other.id != candidate.id and other.status in {"accepted", "applied"}
+            },
+            dirty_paths=_dirty_paths(self.paths.root),
+            patch_paths=candidate_patch_paths(patch_bytes),
+        )
+        if not merge_decision.allowed:
+            if merge_decision.dirty_paths:
+                raise ValueError(
+                    f"governed repo has dirty files in candidate scope: {', '.join(merge_decision.dirty_paths)}"
+                )
+            if merge_decision.conflict_candidate_ids:
+                raise ValueError(
+                    "candidate conflicts with accepted/applied candidate: "
+                    f"{merge_decision.conflict_candidate_ids[0]}"
+                )
 
         check = run_command(
             ["git", "apply", "--check", "--binary", "-"],
@@ -580,20 +611,6 @@ class ExecutionService:
         if not decisions or decisions[-1].decision != "accepted":
             raise ValueError("latest arbiter decision is not accepted")
 
-    def _assert_no_accepted_overlap(self, candidate: CandidatePatch) -> None:
-        patch_paths = candidate_patch_paths(self._patch_bytes(candidate))
-        for other in self.store.read_candidates():
-            if other.id == candidate.id or other.status not in {"accepted", "applied"}:
-                continue
-            if patch_paths & candidate_patch_paths(self._patch_bytes(other)):
-                raise ValueError(f"candidate conflicts with accepted/applied candidate: {other.id}")
-
-    def _assert_no_dirty_overlap(self, patch_paths: set[str]) -> None:
-        dirty_paths = _dirty_paths(self.paths.root)
-        overlap = sorted(patch_paths & dirty_paths)
-        if overlap:
-            raise ValueError(f"governed repo has dirty files in candidate scope: {', '.join(overlap)}")
-
     def _write_apply_blocked_evidence(
         self,
         candidate: CandidatePatch,
@@ -636,16 +653,6 @@ def _load_active_status(paths: AgosPaths) -> TaskStatus:
 
 def _new_id(prefix: str) -> str:
     return f"{prefix}-{uuid4().hex[:12]}"
-
-
-def _candidate_status_for_decision(decision: str) -> str:
-    if decision == "accepted":
-        return "accepted"
-    if decision == "rejected":
-        return "rejected"
-    if decision == "superseded":
-        return "superseded"
-    return "reviewed"
 
 
 def _evidence_ref(evidence_dir: Path, evidence_path: str | None) -> str:

@@ -41,6 +41,9 @@ class ExecutionWorkspaceManager:
             else paths.root.parent / ".agos-worktrees" / task_id
         )
 
+    def workspace_path_for_subtask(self, subtask_id: str) -> Path:
+        return self.validate_workspace_path(self.worktree_root / _safe_path_component(subtask_id))
+
     def validate_workspace_path(self, path: Path) -> Path:
         resolved = path.resolve()
         governed_root = self.paths.root.resolve()
@@ -52,9 +55,7 @@ class ExecutionWorkspaceManager:
         return resolved
 
     def create_workspace(self, subtask: ExecutionSubtask) -> WorkspaceBinding:
-        workspace_path = self.validate_workspace_path(
-            self.worktree_root / _safe_path_component(subtask.id)
-        )
+        workspace_path = self.workspace_path_for_subtask(subtask.id)
         workspace_path.parent.mkdir(parents=True, exist_ok=True)
         base_commit = _git_text(self.paths.root, "rev-parse", "HEAD")
         base_ref = _git_text(self.paths.root, "rev-parse", "--abbrev-ref", "HEAD")
