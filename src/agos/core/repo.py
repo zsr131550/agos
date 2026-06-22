@@ -22,6 +22,10 @@ class AgosPaths:
     ledger: Path
     evidence: Path
     reviews: Path
+    orchestration_dir: Path
+    orchestration_runs: Path
+    orchestration_node_states: Path
+    orchestration_logs: Path
     proof_json: Path
     proof_md: Path
     hooks: Path
@@ -31,6 +35,8 @@ def task_paths(repo_root: Path, task_dir: Path) -> AgosPaths:
     """Build `.agos/` paths for a specific task directory."""
 
     agos = repo_root / ".agos"
+    orchestration_dir = task_dir / "orchestration"
+    evidence = task_dir / "evidence"
     return AgosPaths(
         root=repo_root,
         agos_dir=agos,
@@ -41,8 +47,12 @@ def task_paths(repo_root: Path, task_dir: Path) -> AgosPaths:
         task_yaml=task_dir / "task.yaml",
         status_json=task_dir / "status.json",
         ledger=task_dir / "ledger.jsonl",
-        evidence=task_dir / "evidence",
+        evidence=evidence,
         reviews=task_dir / "reviews",
+        orchestration_dir=orchestration_dir,
+        orchestration_runs=orchestration_dir / "runs",
+        orchestration_node_states=orchestration_dir / "node_states",
+        orchestration_logs=evidence / "orchestration",
         proof_json=task_dir / "proof.json",
         proof_md=task_dir / "proof.md",
         hooks=agos / "hooks",
