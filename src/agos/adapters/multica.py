@@ -18,12 +18,16 @@ EXIT_VALIDATION = 5
 
 RETRYABLE_EXITS = {EXIT_NETWORK, EXIT_AUTH}
 STATUS_MAP = {
+    "dispatched": "running",
     "todo": "running",
     "in_progress": "running",
     "in_review": "running",
+    "running": "running",
+    "completed": "completed",
     "done": "completed",
     "blocked": "blocked",
     "cancelled": "failed",
+    "failed": "failed",
 }
 
 

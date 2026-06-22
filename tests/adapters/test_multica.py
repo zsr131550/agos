@@ -100,6 +100,27 @@ def test_status_maps_done_to_completed(tmp_path: Path, monkeypatch):
     assert status.state == "completed"
 
 
+def test_status_maps_completed_to_completed(monkeypatch):
+    from agos.adapters.multica import MulticaAdapter
+    import agos.adapters.multica as multica_module
+
+    class FakeProc:
+        returncode = 0
+        stdout = '{"runs":[{"id":"fake-task-uuid","status":"completed"}]}'
+        stderr = ""
+
+    def fake_run(args, **kwargs):
+        del args, kwargs
+        return FakeProc()
+
+    monkeypatch.setattr(multica_module, "run_command", fake_run)
+
+    status = MulticaAdapter(multica_bin="multica").status("fake-task-uuid", issue_id="MUL-1")
+
+    assert status.state == "completed"
+    assert status.detail == "completed"
+
+
 def test_not_found_exit_code_maps_to_failed(tmp_path: Path, monkeypatch):
     from agos.adapters.multica import MulticaAdapter
     import agos.adapters.multica as multica_module

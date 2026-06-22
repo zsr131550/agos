@@ -34,6 +34,7 @@ where = ["src"]
 testpaths = ["tests"]
 addopts = "-ra"
 pythonpath = ["src"]
+cache_dir = ".pytest_cache_active"
 markers = [
     "integration: opt-in end-to-end tests (set AGOS_INTEGRATION=1)",
 ]
