@@ -34,15 +34,14 @@ def test_native_backend_waits_for_manual_reviewer_node():
         nodes=[
             _node(
                 "manual-review",
-                kind="reviewer",
-                backend="manual",
-                metadata={"mode": "wait_for_manual_input"},
+                kind="wait_for_manual_input",
+                backend="native_async",
             )
         ],
     )
 
     handle = backend.start(spec)
-    state = backend.poll(handle, spec)
+    state = backend.poll(handle)
 
     assert state.run_id == "run-01"
     assert state.state == "waiting"
@@ -56,18 +55,31 @@ def test_native_backend_collects_waiting_snapshot():
     spec = OrchestrationRunSpec(
         run_id="run-01",
         task_id="agos-01",
-        nodes=[_node("manual-review", kind="reviewer", backend="manual")],
+        nodes=[_node("manual-review", kind="wait_for_manual_input", backend="native_async")],
     )
 
     handle = backend.start(spec)
 
-    assert backend.collect(handle, spec) == {
+    assert backend.collect(handle) == {
         "run_id": "run-01",
         "state": "waiting",
         "waiting_nodes": ["manual-review"],
         "completed_nodes": [],
         "failed_nodes": [],
     }
+
+
+def test_native_backend_marks_non_waiting_run_as_running_from_stored_spec():
+    backend = NativeAsyncBackend()
+    spec = OrchestrationRunSpec(
+        run_id="run-02",
+        task_id="agos-02",
+        nodes=[_node("worker-01", kind="worker", backend="native_async")],
+    )
+
+    handle = backend.start(spec)
+
+    assert backend.poll(handle).state == "running"
 
 
 def test_manual_reviewer_adapter_submit_returns_waiting_job_handle():

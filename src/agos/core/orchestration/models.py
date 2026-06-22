@@ -9,7 +9,7 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, field_serializer, field_validator, model_validator
 
 
-NodeKind = Literal["worker", "reviewer", "arbiter"]
+NodeKind = Literal["worker", "reviewer", "arbiter", "wait_for_manual_input"]
 
 
 @dataclass(frozen=True)

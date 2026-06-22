@@ -32,10 +32,15 @@ class NativeAsyncBackend:
 
     name = "native_async"
 
+    def __init__(self) -> None:
+        self._runs: dict[str, OrchestrationRunSpec] = {}
+
     def start(self, spec: OrchestrationRunSpec) -> BackendRunHandle:
+        self._runs[spec.run_id] = spec
         return BackendRunHandle(backend=self.name, run_id=spec.run_id)
 
-    def poll(self, handle: BackendRunHandle, spec: OrchestrationRunSpec) -> BackendRunStatus:
+    def poll(self, handle: BackendRunHandle) -> BackendRunStatus:
+        spec = self._require_run(handle)
         waiting_nodes = tuple(
             node.id for node in spec.nodes if _is_waiting_manual_node(node)
         )
@@ -52,8 +57,8 @@ class NativeAsyncBackend:
 
         return BackendRunStatus(run_id=handle.run_id, state="completed")
 
-    def collect(self, handle: BackendRunHandle, spec: OrchestrationRunSpec) -> dict[str, object]:
-        status = self.poll(handle, spec)
+    def collect(self, handle: BackendRunHandle) -> dict[str, object]:
+        status = self.poll(handle)
         return {
             "run_id": status.run_id,
             "state": status.state,
@@ -62,6 +67,9 @@ class NativeAsyncBackend:
             "failed_nodes": list(status.failed_nodes),
         }
 
+    def _require_run(self, handle: BackendRunHandle) -> OrchestrationRunSpec:
+        return self._runs[handle.run_id]
+
 
 def _is_waiting_manual_node(node: NodeSpec) -> bool:
-    return node.kind == "reviewer" and node.backend == "manual"
+    return node.kind == "wait_for_manual_input"
