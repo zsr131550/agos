@@ -1,4 +1,4 @@
-﻿# AGOS
+# AGOS
 
 Executor-agnostic governance layer for AI coding agents. *Agent writes. AGOS verifies. CI enforces.*
 
@@ -51,6 +51,60 @@ backends:
 `native_async` is the semantic reference backend, `external` serializes the
 normalized run for a remote orchestrator, and `langgraph` can compile the same
 DAG when the optional LangGraph dependency is installed.
+
+### Production Orchestration Config
+
+```yaml
+workers:
+  codex:
+    type: codex_cli
+    command: codex
+    timeout_seconds: 120
+    poll_interval_seconds: 2
+    artifact_globs:
+      - .agos-worker/*.json
+  multica:
+    type: multica
+    command: multica
+    agent: Lambda
+    timeout_seconds: 120
+  openhands:
+    type: openhands
+    endpoint: http://openhands.local
+    token: ${OPENHANDS_TOKEN}
+    timeout_seconds: 120
+
+reviewers:
+  security:
+    type: manual
+    role: security_reviewer
+    required: true
+
+orchestration:
+  backend: native_async
+  max_parallel: 2
+  max_retries: 1
+  worker_timeout_seconds: 900
+  retry_backoff_seconds: 5
+```
+
+Runtime commands can be read by humans or tools:
+
+```bash
+agos execute-plan run --plan plan.json --json
+agos execute-plan status <run-id> --json
+agos execute-plan resume <run-id> --json
+agos execute-plan cancel <run-id> --json
+```
+
+### Merge Strategies
+
+| Strategy | Automatic Apply | Meaning |
+|---|---:|---|
+| `single_candidate` | Yes | One accepted candidate passes all guards. |
+| `non_overlapping_bundle` | Yes | Multiple accepted candidates touch disjoint paths. |
+| `ordered_patch_stack` | Yes, after stack dry-run | Multiple accepted candidates have explicit order and apply cleanly in a temporary stack workspace. |
+| `manual_merge_required` | No | Dirty paths, conflicts, missing review/test evidence, or ambiguous ordering require human action. |
 
 ### External Orchestrator Backend
 

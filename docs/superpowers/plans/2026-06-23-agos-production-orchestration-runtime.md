@@ -90,6 +90,8 @@ The repository is currently around v0.4 seam maturity:
 
 ## Task 0: Baseline Guardrail
 
+**Status:** Implemented in `0ee82de`.
+
 **Files:**
 - Read: `docs/superpowers/specs/2026-06-22-agos-multi-agent-orchestration-design.md`
 - Read: `docs/superpowers/specs/2026-06-22-agos-execution-agent-orchestration-design.md`
@@ -126,6 +128,8 @@ git commit -m "docs: plan production orchestration runtime"
 ```
 
 ## Task 1: Worker Lifecycle Protocol and Concrete Worker Adapters
+
+**Status:** Implemented in `52bf964`; production config hardened in `d8eee4c`.
 
 **Files:**
 - Modify: `src/agos/core/execution_worker.py`
@@ -438,6 +442,8 @@ git commit -m "feat: add execution worker lifecycle adapters"
 ```
 
 ## Task 2: ReviewerAdapter and Parallel Reviewer Scheduling
+
+**Status:** Implemented in `7964616`.
 
 **Files:**
 - Create: `src/agos/core/review_adapter.py`
@@ -856,6 +862,8 @@ git commit -m "feat: add pluggable parallel reviewer adapters"
 
 ## Task 3: Unified OrchestratorBackend Lifecycle
 
+**Status:** Implemented in `1565b5f`.
+
 **Files:**
 - Modify: `src/agos/core/orchestration/protocols.py`
 - Modify: `src/agos/core/orchestration/models.py`
@@ -997,6 +1005,8 @@ git commit -m "feat: standardize orchestration backend lifecycle"
 ```
 
 ## Task 4: Native Multi-Agent Graph Runtime with Failure Recovery
+
+**Status:** Implemented in `ac2846b`; recovery and lifecycle polling hardened in `9e5c3bd`, `e070306`, and `9c8960b`.
 
 **Files:**
 - Modify: `src/agos/core/orchestration/runtime.py`
@@ -1360,6 +1370,8 @@ git commit -m "feat: add recoverable multi-worker execution runtime"
 
 ## Task 5: Real Optional LangGraph Backend
 
+**Status:** Implemented in `877d831`; normalized dispatch added in `41b5f81`.
+
 **Files:**
 - Modify: `pyproject.toml`
 - Modify: `src/agos/backends/langgraph_backend.py`
@@ -1491,6 +1503,8 @@ git commit -m "feat: execute optional langgraph orchestration backend"
 ```
 
 ## Task 6: External HTTP Orchestrator Backend
+
+**Status:** Implemented in `4369676`; remote contract documented in `c4e8dfd`.
 
 **Files:**
 - Modify: `src/agos/backends/external_backend.py`
@@ -1655,6 +1669,8 @@ git commit -m "feat: add external HTTP orchestration backend"
 ```
 
 ## Task 7: Merge Arbiter Bundle Strategies
+
+**Status:** Implemented in `c17e993`; ordered patch stack added in `3cbe207`.
 
 **Files:**
 - Modify: `src/agos/core/execution.py`
@@ -1948,6 +1964,8 @@ git commit -m "feat: add merge arbiter bundle strategies"
 ```
 
 ## Task 8: End-to-End Multi-Agent Runtime Wiring and Documentation
+
+**Status:** Implemented in `4a8863a`.
 
 **Files:**
 - Modify: `src/agos/cli/cmd_execute_plan.py`
