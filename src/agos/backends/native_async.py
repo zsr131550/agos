@@ -39,10 +39,18 @@ class NativeAsyncBackend:
         self._runs[spec.run_id] = spec
         return BackendRunHandle(backend=self.name, run_id=spec.run_id)
 
+    def run(self, spec: OrchestrationRunSpec) -> BackendRunHandle:
+        """Compatibility entrypoint for the Task 1 orchestration registry seam."""
+
+        return self.start(spec)
+
     def poll(self, handle: BackendRunHandle) -> BackendRunStatus:
         spec = self._require_run(handle)
+        ready_nodes = runnable_nodes(spec.nodes, {})
         waiting_nodes = tuple(
-            node.id for node in spec.nodes if _is_waiting_manual_node(node)
+            node_id
+            for node_id in ready_nodes
+            if _is_waiting_manual_node(_node_by_id(spec, node_id))
         )
         if waiting_nodes:
             return BackendRunStatus(
@@ -51,7 +59,6 @@ class NativeAsyncBackend:
                 waiting_nodes=waiting_nodes,
             )
 
-        ready_nodes = runnable_nodes(spec.nodes, {})
         if ready_nodes:
             return BackendRunStatus(run_id=handle.run_id, state="running")
 
@@ -68,8 +75,18 @@ class NativeAsyncBackend:
         }
 
     def _require_run(self, handle: BackendRunHandle) -> OrchestrationRunSpec:
-        return self._runs[handle.run_id]
+        try:
+            return self._runs[handle.run_id]
+        except KeyError as exc:
+            raise ValueError(f"unknown orchestration run handle: {handle.run_id}") from exc
 
 
 def _is_waiting_manual_node(node: NodeSpec) -> bool:
     return node.kind == "wait_for_manual_input"
+
+
+def _node_by_id(spec: OrchestrationRunSpec, node_id: str) -> NodeSpec:
+    for node in spec.nodes:
+        if node.id == node_id:
+            return node
+    raise ValueError(f"unknown node in orchestration run: {node_id}")

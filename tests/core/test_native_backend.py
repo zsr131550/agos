@@ -82,6 +82,29 @@ def test_native_backend_marks_non_waiting_run_as_running_from_stored_spec():
     assert backend.poll(handle).state == "running"
 
 
+def test_native_backend_does_not_wait_for_manual_node_before_dependencies_are_ready():
+    backend = NativeAsyncBackend()
+    spec = OrchestrationRunSpec(
+        run_id="run-03",
+        task_id="agos-03",
+        nodes=[
+            _node("worker-01", kind="worker", backend="native_async"),
+            _node(
+                "manual-review",
+                kind="wait_for_manual_input",
+                backend="native_async",
+                depends_on=["worker-01"],
+            ),
+        ],
+    )
+
+    handle = backend.start(spec)
+    state = backend.poll(handle)
+
+    assert state.state == "running"
+    assert state.waiting_nodes == ()
+
+
 def test_manual_reviewer_adapter_submit_returns_waiting_job_handle():
     adapter = ManualReviewerAdapter()
 

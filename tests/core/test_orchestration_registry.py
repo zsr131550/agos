@@ -4,6 +4,8 @@ from dataclasses import dataclass
 
 import pytest
 
+from agos.adapters.reviewers.manual import ManualReviewerAdapter
+from agos.backends.native_async import BackendRunHandle, NativeAsyncBackend
 from agos.core.orchestration.models import AgentJobHandle, NodeSpec, OrchestrationRunSpec
 from agos.core.orchestration.protocols import (
     ArbiterBackend,
@@ -136,6 +138,46 @@ def test_register_all_backend_types_allow_resolution_by_name():
     assert registry.resolve_worker("local_worker") is worker
     assert registry.resolve_reviewer("local_reviewer") is reviewer
     assert registry.resolve_arbiter("local_arbiter") is arbiter
+
+
+def test_register_native_async_backend_allows_resolution_through_orchestration_seam():
+    registry = OrchestrationRegistry()
+    backend = NativeAsyncBackend()
+    spec = OrchestrationRunSpec(
+        run_id="run-01",
+        task_id="agos-01",
+        nodes=[NodeSpec(id="wait", kind="wait_for_manual_input", backend="native_async")],
+    )
+
+    registry.register_orchestration(backend)
+
+    resolved = registry.resolve_orchestration("native_async")
+
+    assert resolved is backend
+    assert resolved.run(spec) == BackendRunHandle(backend="native_async", run_id="run-01")
+
+
+def test_register_manual_reviewer_adapter_allows_resolution_through_reviewer_seam():
+    registry = OrchestrationRegistry()
+    adapter = ManualReviewerAdapter()
+    spec = OrchestrationRunSpec(
+        run_id="run-01",
+        task_id="agos-01",
+        nodes=[NodeSpec(id="wait", kind="wait_for_manual_input", backend="manual")],
+    )
+    node = spec.nodes[0]
+
+    registry.register_reviewer(adapter)
+
+    resolved = registry.resolve_reviewer("manual")
+
+    assert resolved is adapter
+    assert resolved.start(spec, node) == AgentJobHandle(
+        backend="manual",
+        job_id="run-01:wait",
+        node_id="wait",
+        run_id="run-01",
+    )
 
 
 @pytest.mark.parametrize(

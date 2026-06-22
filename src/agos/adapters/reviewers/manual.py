@@ -20,6 +20,16 @@ class ManualReviewerAdapter:
 
     name = "manual"
 
+    def start(self, run, node) -> AgentJobHandle:
+        """Compatibility entrypoint for the Task 1 reviewer registry seam."""
+
+        return AgentJobHandle(
+            backend=self.name,
+            job_id=f"{run.run_id}:{node.id}",
+            node_id=node.id,
+            run_id=run.run_id,
+        )
+
     def submit(self, request: ManualReviewRequest) -> AgentJobHandle:
         return AgentJobHandle(
             backend=self.name,
