@@ -25,6 +25,12 @@ class CandidateDecisionSnapshot:
     reason: str
     decided_by: str
     evidence_refs: tuple[str, ...]
+    tests_passed: bool
+    review_binding_current: bool
+    review_open_blocking_count: int
+    patch_ref: str
+    test_refs: tuple[str, ...]
+    review_report_ref: str | None
     conflict_evidence_refs: tuple[str, ...] = ()
 
 
@@ -40,6 +46,21 @@ class CandidateDecisionArbiter:
     name = "candidate_decision"
 
     def decide(self, snapshot: CandidateDecisionSnapshot) -> CandidateDecisionResult:
+        if snapshot.decision == "accepted":
+            if not snapshot.tests_passed:
+                raise ValueError("accepted candidate decisions require passed tests")
+            if not snapshot.review_binding_current:
+                raise ValueError("accepted candidate decisions require current candidate-bound review")
+            if snapshot.review_open_blocking_count:
+                raise ValueError("accepted candidate decisions require no open blocking findings")
+            if snapshot.review_report_ref is None:
+                raise ValueError("accepted candidate decisions require candidate review report")
+            required_refs = {snapshot.patch_ref, *snapshot.test_refs, snapshot.review_report_ref}
+            missing_refs = sorted(required_refs - set(snapshot.evidence_refs))
+            if missing_refs:
+                raise ValueError(
+                    "accepted candidate decisions require evidence refs for patch, tests, and review"
+                )
         decision = ArbiterDecision(
             id=_new_id("decision"),
             candidate_id=snapshot.candidate_id,
@@ -89,6 +110,21 @@ class CandidateMergeArbiter:
             conflict_candidate_ids=tuple(conflicts),
             dirty_paths=tuple(dirty),
         )
+
+
+@dataclass(frozen=True)
+class ReviewDecisionSnapshot:
+    review_id: str
+    findings: tuple[Finding, ...]
+
+
+class ReviewDecisionArbiter:
+    """Normalize candidate review findings before they are stored."""
+
+    name = "review_decision"
+
+    def decide(self, snapshot: ReviewDecisionSnapshot) -> tuple[Finding, ...]:
+        return tuple(sorted(snapshot.findings, key=_finding_sort_key))
 
 
 def _finding_sort_key(finding: Finding) -> tuple[int, str]:

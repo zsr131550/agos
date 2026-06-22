@@ -14,6 +14,8 @@ from agos.core.arbiters import (
     CandidateDecisionArbiter,
     CandidateDecisionSnapshot,
     CandidateMergeArbiter,
+    ReviewDecisionArbiter,
+    ReviewDecisionSnapshot,
 )
 from agos.core.command import run_command
 from agos.core.config import load_config, resolve_gates
@@ -25,10 +27,16 @@ from agos.core.execution import (
     ExecutionPlan,
     ExecutionSubtask,
     ReviewBinding,
+    WorkspaceBinding,
     utc_now_iso,
 )
 from agos.core.execution_orchestration import ExecutionOrchestrator
 from agos.core.execution_store import ExecutionStore
+from agos.adapters.workers import (
+    LocalWorktreeWorkerAdapter,
+    WorkerAssignment,
+    WorkerWorkspaceHandle,
+)
 from agos.core.execution_workspace import (
     ExecutionWorkspaceManager,
     candidate_patch_paths,
@@ -55,8 +63,12 @@ class ExecutionService:
             worktree_root=worktree_root,
         )
         self.execution_orchestrator = ExecutionOrchestrator(paths)
+        self.review_arbiter = ReviewDecisionArbiter()
         self.candidate_arbiter = CandidateDecisionArbiter()
         self.merge_arbiter = CandidateMergeArbiter()
+        self._worker_adapters: dict[str, LocalWorktreeWorkerAdapter] = {
+            LocalWorktreeWorkerAdapter.name: LocalWorktreeWorkerAdapter(self.workspace_manager)
+        }
 
     def execute_plan(self, plan_path: Path) -> ExecutionPlan:
         status, task = self._active_task()
@@ -80,8 +92,9 @@ class ExecutionService:
 
         updated_subtasks: list[ExecutionSubtask] = []
         for subtask in plan.subtasks:
-            workspace = self.workspace_manager.create_workspace(subtask)
-            workspace_ref = self.store.write_workspace(workspace)
+            prepared = self._worker_adapter(subtask.worker.adapter).prepare(WorkerAssignment(subtask=subtask))
+            workspace_binding = _workspace_binding(prepared)
+            workspace_ref = self.store.write_workspace(workspace_binding)
             updated = subtask.model_copy(
                 update={"status": "workspace_ready", "workspace_ref": workspace_ref}
             )
@@ -93,7 +106,7 @@ class ExecutionService:
                     "task_id": task.id,
                     "subtask_id": subtask.id,
                     "workspace_ref": workspace_ref,
-                    "base_commit": workspace.base_commit,
+                    "base_commit": workspace_binding.base_commit,
                 }
             )
 
@@ -105,7 +118,17 @@ class ExecutionService:
         _status, task = self._active_task()
         subtask = self.store.read_subtask(subtask_id)
         workspace = self.store.read_workspace(subtask_id)
-        patch_bytes = self.workspace_manager.capture_patch(Path(workspace.path))
+        worker = self._worker_adapter(subtask.worker.adapter)
+        export = worker.export_candidate(
+            WorkerWorkspaceHandle(
+                subtask_id=subtask.id,
+                metadata={
+                    "workspace_path": workspace.path,
+                    "workspace_ref": workspace.ref,
+                },
+            )
+        )
+        patch_bytes = export["patch_bytes"]
         self.workspace_manager.validate_patch_scope(patch_bytes, subtask.write_scope)
         candidate_id = _new_id("candidate")
         patch_ref, patch_sha = self.store.write_candidate_patch(candidate_id, patch_bytes)
@@ -221,7 +244,10 @@ class ExecutionService:
             raise ValueError(f"candidate review binding is not started: {review_id}")
 
         try:
-            report_ref, report = ReviewService(self.paths).ingest_findings(review_id, findings)
+            ordered_findings = self.review_arbiter.decide(
+                ReviewDecisionSnapshot(review_id=review_id, findings=tuple(findings))
+            )
+            report_ref, report = ReviewService(self.paths).ingest_findings(review_id, ordered_findings)
         except Exception as exc:
             failed_event = self._append_event(
                 {
@@ -280,17 +306,21 @@ class ExecutionService:
     ) -> ArbiterDecision:
         _status, task = self._active_task()
         candidate = self._candidate_with_valid_patch(candidate_id)
-        if decision == "accepted":
-            self._assert_candidate_tests_passed(candidate, task)
-            review, report = self._latest_completed_review_and_report(candidate)
-            self._assert_review_binding_current(candidate, review, report)
-            evidence_refs = [
-                candidate.patch_ref,
-                *candidate.test_refs,
-                cast(str, review.report_ref),
-            ]
-        else:
-            evidence_refs = [candidate.patch_ref]
+        review_binding = self._latest_completed_review_binding(candidate)
+        review_report_ref = review_binding.report_ref if review_binding is not None else None
+        review_report = None
+        review_open_blocking_count = 0
+        review_binding_current = False
+        if review_binding is not None:
+            review_report = self._latest_completed_review_and_report(candidate)[1]
+            review_binding_current = True
+            review_open_blocking_count = len(review_report.open_blocking_findings())
+        tests_passed = self._candidate_tests_passed(candidate, task)
+        evidence_refs = [candidate.patch_ref]
+        if tests_passed:
+            evidence_refs.extend(candidate.test_refs)
+        if review_binding_current and review_report_ref is not None:
+            evidence_refs.append(cast(str, review_report_ref))
 
         decision_result = self.candidate_arbiter.decide(
             CandidateDecisionSnapshot(
@@ -299,6 +329,12 @@ class ExecutionService:
                 reason=reason,
                 decided_by=decided_by,
                 evidence_refs=tuple(evidence_refs),
+                tests_passed=tests_passed,
+                review_binding_current=review_binding_current,
+                review_open_blocking_count=review_open_blocking_count,
+                patch_ref=candidate.patch_ref,
+                test_refs=tuple(candidate.test_refs),
+                review_report_ref=review_report_ref,
             )
         )
         decision_model = decision_result.decision
@@ -341,7 +377,6 @@ class ExecutionService:
         self._assert_candidate_tests_passed(candidate, task)
         review, report = self._latest_completed_review_and_report(candidate)
         self._assert_review_binding_current(candidate, review, report)
-        self._assert_latest_decision_accepted(candidate)
         merge_decision = self.merge_arbiter.decide(
             candidate,
             accepted_candidate_paths={
@@ -521,6 +556,12 @@ class ExecutionService:
             raise ValueError(f"candidate patch hash mismatch: {candidate.id}")
         return candidate
 
+    def _candidate_tests_passed(self, candidate: CandidatePatch, task: Task) -> bool:
+        runs = self.store.read_test_runs(candidate.id)
+        passed = {run.gate_id for run in runs if run.state == "passed"}
+        required = {"patch_applies", *[gate.id for gate in self._active_gates(task)]}
+        return not (required - passed)
+
     def _patch_bytes(self, candidate: CandidatePatch) -> bytes:
         path = self.store.patch_path(candidate.patch_ref)
         if not path.is_file():
@@ -606,11 +647,6 @@ class ExecutionService:
             f"candidate-bound review completion ledger hash not found: {binding.review_id}"
         )
 
-    def _assert_latest_decision_accepted(self, candidate: CandidatePatch) -> None:
-        decisions = self.store.read_decisions(candidate.id)
-        if not decisions or decisions[-1].decision != "accepted":
-            raise ValueError("latest arbiter decision is not accepted")
-
     def _write_apply_blocked_evidence(
         self,
         candidate: CandidatePatch,
@@ -642,6 +678,20 @@ class ExecutionService:
     def _task_id_or_placeholder(self) -> str:
         status = load_status(self.paths)
         return status.task_id if status is not None else "unknown-task"
+
+    def _worker_adapter(self, adapter_name: str):
+        if adapter_name not in self._worker_adapters:
+            raise ValueError(f"unsupported worker adapter: {adapter_name}")
+        return self._worker_adapters[adapter_name]
+
+
+def _workspace_binding(prepared: object) -> WorkspaceBinding:
+    if isinstance(prepared, WorkspaceBinding):
+        return prepared
+    binding = getattr(prepared, "binding", None)
+    if isinstance(binding, WorkspaceBinding):
+        return binding
+    raise TypeError("worker prepare() must return a WorkspaceBinding or an object with binding")
 
 
 def _load_active_status(paths: AgosPaths) -> TaskStatus:

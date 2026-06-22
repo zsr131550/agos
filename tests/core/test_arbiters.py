@@ -1,6 +1,10 @@
 from __future__ import annotations
 
+import pytest
+
 from agos.core.arbiters import DeterministicReviewArbiter
+from agos.core.arbiters import CandidateDecisionArbiter
+from agos.core.arbiters import CandidateDecisionSnapshot
 from agos.core.arbiters import CandidateMergeArbiter
 from agos.core.execution import CandidatePatch
 from agos.core.review import Finding
@@ -104,3 +108,24 @@ def test_candidate_merge_arbiter_rejects_overlapping_accepted_candidates():
     )
 
     assert not decision.allowed
+
+
+def test_candidate_decision_arbiter_requires_tests_and_review_for_acceptance():
+    arbiter = CandidateDecisionArbiter()
+
+    with pytest.raises(ValueError, match="accepted candidate decisions require passed tests"):
+        arbiter.decide(
+            CandidateDecisionSnapshot(
+                candidate_id="candidate-01",
+                decision="accepted",
+                reason="looks good",
+                decided_by="local_user",
+                evidence_refs=("evidence/candidate_patches/candidate-01.patch",),
+                tests_passed=False,
+                review_binding_current=False,
+                review_open_blocking_count=1,
+                patch_ref="evidence/candidate_patches/candidate-01.patch",
+                test_refs=("execution/tests/candidate-test-01.json",),
+                review_report_ref="reviews/review-01/findings.json",
+            )
+        )

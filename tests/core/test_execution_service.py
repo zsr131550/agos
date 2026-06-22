@@ -10,6 +10,7 @@ import pytest
 import yaml
 
 from agos.core.adapter import ExecutorRun
+from agos.core.execution import ExecutionSubtask, ExecutionWorker
 from agos.core.execution_service import ExecutionService
 from agos.core.execution_store import ExecutionStore
 from agos.core.ledger import Ledger
@@ -170,6 +171,31 @@ def test_execute_plan_creates_workspaces_and_ledger_events(tmp_repo):
     assert _ledger_types(paths)[-2:] == ["execution_plan_created", "subtask_workspace_created"]
 
 
+def test_execute_plan_routes_workspace_creation_through_worker_adapter(tmp_repo, monkeypatch):
+    _active_task(tmp_repo)
+    service = _service(tmp_repo)
+    called: list[str] = []
+
+    class _Adapter:
+        name = "local_worktree"
+
+        def __init__(self, manager):
+            self.manager = manager
+
+        def prepare(self, assignment):
+            called.append(assignment.subtask.id)
+            return self.manager.create_workspace(assignment.subtask)
+
+        def export_candidate(self, handle):  # pragma: no cover - not used here
+            raise AssertionError
+
+    service._worker_adapters["local_worktree"] = _Adapter(service.workspace_manager)
+
+    service.execute_plan(_plan_file(tmp_repo))
+
+    assert called == ["subtask-readme"]
+
+
 def test_submit_candidate_captures_scoped_patch_and_hash(tmp_repo):
     paths = _active_task(tmp_repo)
     service = _service(tmp_repo)
@@ -184,6 +210,34 @@ def test_submit_candidate_captures_scoped_patch_and_hash(tmp_repo):
     assert b"# changed" in patch_bytes
     assert candidate.status == "proposed"
     assert _ledger_types(paths)[-1] == "candidate_patch_created"
+
+
+def test_submit_candidate_routes_patch_export_through_worker_adapter(tmp_repo, monkeypatch):
+    paths = _active_task(tmp_repo)
+    service = _service(tmp_repo)
+    service.execute_plan(_plan_file(tmp_repo))
+    workspace = Path(ExecutionStore(paths).read_workspace("subtask-readme").path)
+    (workspace / "README.md").write_text("# changed\n", encoding="utf-8")
+    called: list[str] = []
+
+    class _Adapter:
+        name = "local_worktree"
+
+        def __init__(self, manager):
+            self.manager = manager
+
+        def prepare(self, assignment):  # pragma: no cover - not used here
+            raise AssertionError
+
+        def export_candidate(self, handle):
+            called.append(handle.metadata["workspace_path"])
+            return {"patch_bytes": self.manager.capture_patch(Path(handle.metadata["workspace_path"]))}
+
+    service._worker_adapters["local_worktree"] = _Adapter(service.workspace_manager)
+
+    service.submit_candidate("subtask-readme", summary="Update README heading.")
+
+    assert called == [str(workspace)]
 
 
 def test_candidate_happy_path_reviews_decides_and_applies(tmp_repo):
@@ -212,6 +266,50 @@ def test_candidate_happy_path_reviews_decides_and_applies(tmp_repo):
     assert (tmp_repo / "README.md").read_text(encoding="utf-8") == "# changed\n"
     assert "candidate_review_completed" in _ledger_types(paths)
     assert _ledger_types(paths)[-1] == "candidate_applied"
+
+
+def test_review_candidate_routes_packet_through_review_arbiter(tmp_repo, monkeypatch):
+    paths, service, candidate_id = _ready_candidate(tmp_repo)
+    ordered: list[str] = []
+
+    class _ReviewArbiter:
+        name = "deterministic_review"
+
+        def decide(self, snapshot):
+            ordered.extend(finding.id for finding in snapshot.findings)
+            return tuple(reversed(snapshot.findings))
+
+    monkeypatch.setattr(service, "review_arbiter", _ReviewArbiter())
+
+    packet_ref, packet = service.review_candidate(candidate_id)
+    findings = [
+        Finding(
+            id="finding-a",
+            review_id=packet.review_id,
+            source_agent="reviewer-a",
+            category="test",
+            severity="low",
+            blocking=False,
+            title="First",
+            body="First body",
+        ),
+        Finding(
+            id="finding-b",
+            review_id=packet.review_id,
+            source_agent="reviewer-b",
+            category="test",
+            severity="high",
+            blocking=True,
+            title="Second",
+            body="Second body",
+        ),
+    ]
+    report_ref, report = service.ingest_candidate_review(candidate_id, packet.review_id, findings=findings)
+
+    assert packet_ref.startswith("reviews/")
+    assert report_ref == f"reviews/{packet.review_id}/findings.json"
+    assert ordered == ["finding-a", "finding-b"]
+    assert [finding.id for finding in report.findings] == ["finding-b", "finding-a"]
 
 
 def test_task_level_review_does_not_satisfy_candidate_review_guard(tmp_repo):
