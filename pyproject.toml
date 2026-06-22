@@ -20,6 +20,9 @@ dev = [
     "pytest-cov>=5.0",
     "ruff>=0.8",
 ]
+langgraph = [
+    "langgraph",
+]
 
 [project.scripts]
 agos = "agos.cli.main:app"

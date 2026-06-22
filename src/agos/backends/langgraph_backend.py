@@ -1,9 +1,10 @@
 """Optional LangGraph orchestration backend shim."""
 from __future__ import annotations
 
+from operator import add
 from dataclasses import dataclass
 from importlib.util import find_spec
-from typing import Any, TypedDict
+from typing import Annotated, Any, TypedDict
 
 from agos.backends.native_async import NativeAsyncBackend
 from agos.core.orchestration.models import (
@@ -34,7 +35,7 @@ class LangGraphCompiledRun:
 
 
 class _LangGraphState(TypedDict, total=False):
-    visited_nodes: list[str]
+    visited_nodes: Annotated[list[str], add]
 
 
 class LangGraphBackend:
@@ -46,6 +47,7 @@ class LangGraphBackend:
         self._native = NativeAsyncBackend()
         self._graph_module = graph_module
         self._compiled_runs: dict[str, LangGraphCompiledRun] = {}
+        self._completed_runs: dict[str, dict[str, Any]] = {}
 
     @staticmethod
     def is_available() -> bool:
@@ -56,7 +58,12 @@ class LangGraphBackend:
         if graph_module is None:
             raise RuntimeError("langgraph is not installed")
 
-        self._compiled_runs[spec.run_id] = _compile_run(spec, graph_module)
+        compiled = _compile_run(spec, graph_module)
+        self._compiled_runs[spec.run_id] = compiled
+        if hasattr(compiled.graph, "invoke"):
+            result = compiled.graph.invoke({"visited_nodes": []})
+            if isinstance(result, dict):
+                self._completed_runs[spec.run_id] = result
         self._native.start(spec.model_copy(update={"backend": self.name}))
         return OrchestratorRunHandle(backend=self.name, run_id=spec.run_id)
 
@@ -98,7 +105,8 @@ class LangGraphBackend:
         snapshot = self._native.collect(
             OrchestratorRunHandle(backend=self._native.name, run_id=handle.run_id)
         )
-        return {**snapshot, "backend": self.name}
+        completed = self._completed_runs.get(handle.run_id, {})
+        return {**snapshot, **completed, "backend": self.name}
 
     def compiled_run(self, handle: OrchestratorRunHandle) -> LangGraphCompiledRun:
         try:
@@ -135,8 +143,8 @@ def _compile_run(spec: OrchestrationRunSpec, graph_module: LangGraphModule) -> L
 
 def _node_action(node: NodeSpec):
     def action(state: dict[str, Any]) -> dict[str, Any]:
-        visited = list(state.get("visited_nodes", []))
-        return {**state, "visited_nodes": [*visited, node.id]}
+        del state
+        return {"visited_nodes": [node.id]}
 
     return action
 

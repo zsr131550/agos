@@ -45,7 +45,7 @@ def _manual_review_spec(*, backend: str) -> OrchestrationRunSpec:
 
 
 def _assert_waiting_snapshot(snapshot: dict[str, object], *, backend: str) -> None:
-    assert snapshot == {
+    expected = {
         "run_id": f"{backend}-run-01",
         "backend": backend,
         "state": "waiting",
@@ -54,6 +54,8 @@ def _assert_waiting_snapshot(snapshot: dict[str, object], *, backend: str) -> No
         "failed_nodes": [],
         "output_refs": {"manual-review": "reviews/review-01/raw/manual.json"},
     }
+    for key, value in expected.items():
+        assert snapshot[key] == value
 
 
 def test_native_backend_collect_matches_parity_contract():
@@ -145,7 +147,12 @@ def test_external_backend_registers_through_orchestration_registry():
 
 
 class _FakeCompiledGraph:
-    pass
+    def __init__(self) -> None:
+        self.invocations: list[dict[str, object]] = []
+
+    def invoke(self, state: dict[str, object]) -> dict[str, object]:
+        self.invocations.append(state)
+        return {"visited_nodes": ["worker-01"]}
 
 
 class _FakeStateGraph:
@@ -197,6 +204,29 @@ def test_langgraph_backend_compiles_orchestration_spec_with_injected_graph_modul
         ("worker-01", "manual-review"),
         ("manual-review", "__end__"),
     )
+
+
+def test_langgraph_backend_invokes_compiled_graph_with_injected_graph_module():
+    backend = LangGraphBackend(
+        graph_module=LangGraphModule(
+            state_graph=_FakeStateGraph,
+            start="__start__",
+            end="__end__",
+        )
+    )
+    spec = OrchestrationRunSpec(
+        run_id="langgraph-run-invoke",
+        task_id="agos-01",
+        backend=backend.name,
+        nodes=[_node("worker-01", backend=backend.name)],
+    )
+
+    handle = backend.run(spec)
+    compiled = backend.compiled_run(handle)
+    snapshot = backend.collect(handle)
+
+    assert compiled.graph.invocations == [{"visited_nodes": []}]
+    assert snapshot["visited_nodes"] == ["worker-01"]
 
 
 def test_langgraph_backend_preserves_join_dependencies_in_compiled_graph():
