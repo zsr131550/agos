@@ -41,18 +41,20 @@ class ExecutionOrchestrator:
                 policy={},
             )
         ]
+        review_enabled = plan.requires_candidate_review
+        completion_node_by_subtask: dict[str, str] = {}
         for subtask in plan.subtasks:
             prepare_id = f"prepare-{subtask.id}"
             worker_id = f"worker-{subtask.id}"
             review_id = f"review-{subtask.id}"
-            dependency_nodes = tuple(f"review-{dep}" for dep in subtask.depends_on)
+            dependency_nodes = tuple(completion_node_by_subtask[dep] for dep in subtask.depends_on)
             nodes.append(
                 NodeSpec(
                     id=prepare_id,
                     kind="prepare_workspace",
                     backend="native_async",
                     adapter=subtask.worker.adapter,
-                    depends_on=dependency_nodes,
+                    depends_on=("validate_plan", *dependency_nodes),
                     inputs={"subtask_id": subtask.id},
                     policy={},
                 )
@@ -68,6 +70,9 @@ class ExecutionOrchestrator:
                     policy={},
                 )
             )
+            completion_node_by_subtask[subtask.id] = review_id if review_enabled else worker_id
+            if not review_enabled:
+                continue
             nodes.append(
                 NodeSpec(
                     id=review_id,

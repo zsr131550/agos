@@ -33,6 +33,7 @@ from agos.core.execution import (
 from agos.core.execution_orchestration import ExecutionOrchestrator
 from agos.core.execution_store import ExecutionStore
 from agos.adapters.workers import (
+    FakeWorkerAdapter,
     LocalWorktreeWorkerAdapter,
     WorkerAssignment,
     WorkerWorkspaceHandle,
@@ -54,7 +55,13 @@ from agos.core.task import Task, load_task
 class ExecutionService:
     """Coordinate execution artifacts, review bindings, and guarded apply."""
 
-    def __init__(self, paths: AgosPaths, *, worktree_root: Path | None = None) -> None:
+    def __init__(
+        self,
+        paths: AgosPaths,
+        *,
+        worktree_root: Path | None = None,
+        worker_adapters: dict[str, object] | None = None,
+    ) -> None:
         self.paths = paths
         self.store = ExecutionStore(paths)
         self.workspace_manager = ExecutionWorkspaceManager(
@@ -66,9 +73,12 @@ class ExecutionService:
         self.review_arbiter = ReviewDecisionArbiter()
         self.candidate_arbiter = CandidateDecisionArbiter()
         self.merge_arbiter = CandidateMergeArbiter()
-        self._worker_adapters: dict[str, LocalWorktreeWorkerAdapter] = {
-            LocalWorktreeWorkerAdapter.name: LocalWorktreeWorkerAdapter(self.workspace_manager)
+        self._worker_adapters: dict[str, object] = {
+            LocalWorktreeWorkerAdapter.name: LocalWorktreeWorkerAdapter(self.workspace_manager),
+            FakeWorkerAdapter.name: FakeWorkerAdapter(),
         }
+        if worker_adapters:
+            self._worker_adapters.update(worker_adapters)
 
     def execute_plan(self, plan_path: Path) -> ExecutionPlan:
         status, task = self._active_task()
@@ -94,6 +104,9 @@ class ExecutionService:
         for subtask in plan.subtasks:
             prepared = self._worker_adapter(subtask.worker.adapter).prepare(WorkerAssignment(subtask=subtask))
             workspace_binding = _workspace_binding(prepared)
+            workspace_binding = workspace_binding.model_copy(
+                update={"worker_handle_metadata": _worker_handle_metadata(prepared)}
+            )
             workspace_ref = self.store.write_workspace(workspace_binding)
             updated = subtask.model_copy(
                 update={"status": "workspace_ready", "workspace_ref": workspace_ref}
@@ -122,10 +135,7 @@ class ExecutionService:
         export = worker.export_candidate(
             WorkerWorkspaceHandle(
                 subtask_id=subtask.id,
-                metadata={
-                    "workspace_path": workspace.path,
-                    "workspace_ref": workspace.ref,
-                },
+                metadata=_canonical_worker_handle_metadata(workspace),
             )
         )
         patch_bytes = export["patch_bytes"]
@@ -308,11 +318,12 @@ class ExecutionService:
         candidate = self._candidate_with_valid_patch(candidate_id)
         review_binding = self._latest_completed_review_binding(candidate)
         review_report_ref = review_binding.report_ref if review_binding is not None else None
-        review_report = None
         review_open_blocking_count = 0
         review_binding_current = False
         if review_binding is not None:
-            review_report = self._latest_completed_review_and_report(candidate)[1]
+            review_binding, review_report = self._latest_completed_review_and_report(candidate)
+            if cast(DecisionValue, decision) == "accepted":
+                self._assert_review_binding_current(candidate, review_binding, review_report)
             review_binding_current = True
             review_open_blocking_count = len(review_report.open_blocking_findings())
         tests_passed = self._candidate_tests_passed(candidate, task)
@@ -692,6 +703,21 @@ def _workspace_binding(prepared: object) -> WorkspaceBinding:
     if isinstance(binding, WorkspaceBinding):
         return binding
     raise TypeError("worker prepare() must return a WorkspaceBinding or an object with binding")
+
+
+def _worker_handle_metadata(prepared: object) -> dict[str, str]:
+    handle = getattr(prepared, "handle", None)
+    metadata = getattr(handle, "metadata", None)
+    if isinstance(metadata, dict):
+        return {str(key): str(value) for key, value in metadata.items()}
+    return {}
+
+
+def _canonical_worker_handle_metadata(workspace: WorkspaceBinding) -> dict[str, str]:
+    metadata = dict(workspace.worker_handle_metadata)
+    metadata["workspace_path"] = workspace.path
+    metadata["workspace_ref"] = workspace.ref
+    return metadata
 
 
 def _load_active_status(paths: AgosPaths) -> TaskStatus:

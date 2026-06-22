@@ -141,10 +141,11 @@ def _commit(repo: Path, message: str) -> None:
     subprocess.run(["git", "commit", "-q", "-m", message], cwd=repo, check=True, env=env)
 
 
-def _service(tmp_repo: Path) -> ExecutionService:
+def _service(tmp_repo: Path, *, worker_adapters=None) -> ExecutionService:
     return ExecutionService(
         repo_paths(tmp_repo),
         worktree_root=tmp_repo.parent / ".agos-worktrees" / "agos-01",
+        worker_adapters=worker_adapters,
     )
 
 
@@ -238,6 +239,151 @@ def test_submit_candidate_routes_patch_export_through_worker_adapter(tmp_repo, m
     service.submit_candidate("subtask-readme", summary="Update README heading.")
 
     assert called == [str(workspace)]
+
+
+def test_submit_candidate_reuses_prepared_worker_handle(tmp_repo):
+    _active_task(tmp_repo)
+    service = _service(tmp_repo)
+    prepared_handles: list[dict[str, str]] = []
+    exported_handles: list[dict[str, str]] = []
+
+    class _Prepared:
+        def __init__(self, binding, handle):
+            self.binding = binding
+            self.handle = handle
+
+    class _Handle:
+        def __init__(self, metadata):
+            self.metadata = metadata
+
+    class _Adapter:
+        name = "local_worktree"
+
+        def __init__(self, manager):
+            self.manager = manager
+
+        def prepare(self, assignment):
+            prepared = self.manager.create_workspace(assignment.subtask)
+            handle = _Handle(
+                {
+                    "workspace_path": prepared.path,
+                    "workspace_ref": prepared.ref,
+                    "prepared_marker": "kept",
+                }
+            )
+            prepared_handles.append(dict(handle.metadata))
+            return _Prepared(prepared, handle)
+
+        def export_candidate(self, handle):
+            exported_handles.append(dict(handle.metadata))
+            return {"patch_bytes": self.manager.capture_patch(Path(handle.metadata["workspace_path"]))}
+
+    service = _service(tmp_repo, worker_adapters={"local_worktree": _Adapter(service.workspace_manager)})
+    service.execute_plan(_plan_file(tmp_repo))
+    workspace = Path(ExecutionStore(service.paths).read_workspace("subtask-readme").path)
+    (workspace / "README.md").write_text("# changed\n", encoding="utf-8")
+
+    service.submit_candidate("subtask-readme", summary="Update README heading.")
+
+    assert prepared_handles and exported_handles
+    assert ExecutionStore(service.paths).read_workspace("subtask-readme").worker_handle_metadata[
+        "prepared_marker"
+    ] == "kept"
+    assert exported_handles[0]["prepared_marker"] == "kept"
+
+
+def test_submit_candidate_keeps_canonical_workspace_identity(tmp_repo):
+    _active_task(tmp_repo)
+    prepared_handles: list[dict[str, str]] = []
+    exported_handles: list[dict[str, str]] = []
+
+    class _Prepared:
+        def __init__(self, binding, handle):
+            self.binding = binding
+            self.handle = handle
+
+    class _Handle:
+        def __init__(self, metadata):
+            self.metadata = metadata
+
+    class _Adapter:
+        name = "local_worktree"
+
+        def __init__(self, manager):
+            self.manager = manager
+
+        def prepare(self, assignment):
+            prepared = self.manager.create_workspace(assignment.subtask)
+            handle = _Handle(
+                {
+                    "workspace_path": "override/path",
+                    "workspace_ref": "override/ref",
+                    "prepared_marker": "kept",
+                }
+            )
+            prepared_handles.append(dict(handle.metadata))
+            return _Prepared(prepared, handle)
+
+        def export_candidate(self, handle):
+            exported_handles.append(dict(handle.metadata))
+            return {"patch_bytes": self.manager.capture_patch(Path(handle.metadata["workspace_path"]))}
+
+    manager_service = _service(tmp_repo)
+    service = _service(
+        tmp_repo,
+        worker_adapters={"local_worktree": _Adapter(manager_service.workspace_manager)},
+    )
+    service.execute_plan(_plan_file(tmp_repo))
+    workspace = ExecutionStore(service.paths).read_workspace("subtask-readme")
+    (Path(workspace.path) / "README.md").write_text("# changed\n", encoding="utf-8")
+    service.submit_candidate("subtask-readme", summary="Update README heading.")
+
+    assert prepared_handles and exported_handles
+    assert exported_handles[0]["workspace_path"] == workspace.path
+    assert exported_handles[0]["workspace_ref"] == workspace.ref
+    assert exported_handles[0]["prepared_marker"] == "kept"
+
+
+def test_accepted_decision_rejects_stale_completed_review_binding(tmp_repo):
+    paths, service, candidate_id = _ready_candidate(tmp_repo)
+    _packet_ref, packet = service.review_candidate(candidate_id)
+    service.ingest_candidate_review(candidate_id, packet.review_id, findings=[])
+
+    candidate = ExecutionStore(paths).read_candidate(candidate_id)
+    stale_binding = candidate.review_refs[-1].model_copy(update={"test_refs": ["execution/tests/stale.json"]})
+    ExecutionStore(paths).write_candidate(candidate.model_copy(update={"review_refs": [stale_binding]}))
+
+    with pytest.raises(ValueError, match="stale"):
+        service.decide_candidate(
+            candidate_id,
+            decision="accepted",
+            reason="Stale review should not be accepted.",
+        )
+
+
+def test_rejected_decision_allows_blocking_candidate_review(tmp_repo):
+    _paths, service, candidate_id = _ready_candidate(tmp_repo)
+    _packet_ref, packet = service.review_candidate(candidate_id)
+    blocker = Finding(
+        id="finding-blocker",
+        review_id=packet.review_id,
+        source_agent="reviewer-a",
+        category="correctness",
+        severity="high",
+        blocking=True,
+        title="Blocking issue",
+        body="This review has an open blocking finding.",
+    )
+    service.ingest_candidate_review(candidate_id, packet.review_id, findings=[blocker])
+
+    decision = service.decide_candidate(
+        candidate_id,
+        decision="rejected",
+        reason="The blocking review should still allow an explicit rejection.",
+    )
+
+    assert decision.decision == "rejected"
+    assert ExecutionStore(service.paths).read_candidate(candidate_id).status == "rejected"
 
 
 def test_candidate_happy_path_reviews_decides_and_applies(tmp_repo):

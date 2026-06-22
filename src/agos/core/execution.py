@@ -136,6 +136,7 @@ class WorkspaceBinding(BaseModel):
     path: str
     base_ref: str
     base_commit: str
+    worker_handle_metadata: dict[str, str] = Field(default_factory=dict)
     created_at: str = Field(default_factory=utc_now_iso)
 
     @property
