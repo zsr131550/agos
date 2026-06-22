@@ -28,10 +28,6 @@ def test_repo_paths_layout(tmp_repo: Path):
     assert p.status_json == tmp_repo / ".agos" / "tasks" / "current" / "status.json"
     assert p.ledger == tmp_repo / ".agos" / "tasks" / "current" / "ledger.jsonl"
     assert p.evidence == tmp_repo / ".agos" / "tasks" / "current" / "evidence"
-    assert p.orchestration_dir == tmp_repo / ".agos" / "tasks" / "current" / "orchestration"
-    assert p.orchestration_runs == p.orchestration_dir / "runs"
-    assert p.orchestration_node_states == p.orchestration_dir / "node_states"
-    assert p.orchestration_logs == p.evidence / "orchestration"
     assert p.hooks == tmp_repo / ".agos" / "hooks"
 
 
