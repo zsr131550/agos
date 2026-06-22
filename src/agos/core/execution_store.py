@@ -8,6 +8,8 @@ from pydantic import BaseModel
 
 from agos.core.execution import (
     ArbiterDecision,
+    CandidateBundleDecision,
+    CandidateMergePreview,
     CandidatePatch,
     CandidateTestRun,
     ExecutionPlan,
@@ -109,6 +111,28 @@ class ExecutionStore:
         ]
         return [decision for decision in decisions if decision.candidate_id == candidate_id]
 
+    def write_bundle_decision(self, decision: CandidateBundleDecision) -> str:
+        return self._write_model(
+            self.execution_dir / "bundle_decisions" / f"{decision.id}.json",
+            decision,
+            f"execution/bundle_decisions/{decision.id}.json",
+        )
+
+    def read_bundle_decision(self, decision_id: str) -> CandidateBundleDecision:
+        path = self.execution_dir / "bundle_decisions" / f"{decision_id}.json"
+        return CandidateBundleDecision.model_validate_json(path.read_text(encoding="utf-8"))
+
+    def write_merge_preview(self, preview: CandidateMergePreview) -> str:
+        return self._write_model(
+            self.execution_dir / "merge_previews" / f"{preview.id}.json",
+            preview,
+            f"execution/merge_previews/{preview.id}.json",
+        )
+
+    def read_merge_preview(self, preview_id: str) -> CandidateMergePreview:
+        path = self.execution_dir / "merge_previews" / f"{preview_id}.json"
+        return CandidateMergePreview.model_validate_json(path.read_text(encoding="utf-8"))
+
     def write_candidate_patch(self, candidate_id: str, patch_bytes: bytes) -> tuple[str, str]:
         self.patch_dir.mkdir(parents=True, exist_ok=True)
         path = self.patch_dir / f"{candidate_id}.patch"
@@ -125,3 +149,4 @@ class ExecutionStore:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(model.model_dump_json(indent=2), encoding="utf-8")
         return ref
+

@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 import yaml
 
+from agos.adapters.workers import LocalWorktreeWorkerAdapter
 from agos.core.adapter import ExecutorRun
 from agos.core.execution_service import ExecutionService
 from agos.core.execution_store import ExecutionStore
@@ -140,11 +141,15 @@ def _commit(repo: Path, message: str) -> None:
     subprocess.run(["git", "commit", "-q", "-m", message], cwd=repo, check=True, env=env)
 
 
-def _service(tmp_repo: Path) -> ExecutionService:
-    return ExecutionService(
+def _service(tmp_repo: Path, *, worker_adapters=None) -> ExecutionService:
+    service = ExecutionService(
         repo_paths(tmp_repo),
         worktree_root=tmp_repo.parent / ".agos-worktrees" / "agos-01",
+        worker_adapters=worker_adapters,
     )
+    if worker_adapters is None:
+        service.register_worker_adapter(LocalWorktreeWorkerAdapter(service.workspace_manager))
+    return service
 
 
 def _ready_candidate(tmp_repo: Path):
@@ -170,6 +175,31 @@ def test_execute_plan_creates_workspaces_and_ledger_events(tmp_repo):
     assert _ledger_types(paths)[-2:] == ["execution_plan_created", "subtask_workspace_created"]
 
 
+def test_execute_plan_routes_workspace_creation_through_worker_adapter(tmp_repo, monkeypatch):
+    _active_task(tmp_repo)
+    service = _service(tmp_repo)
+    called: list[str] = []
+
+    class _Adapter:
+        name = "local_worktree"
+
+        def __init__(self, manager):
+            self.manager = manager
+
+        def prepare(self, assignment):
+            called.append(assignment.subtask.id)
+            return self.manager.create_workspace(assignment.subtask)
+
+        def export_candidate(self, handle):  # pragma: no cover - not used here
+            raise AssertionError
+
+    service.register_worker_adapter(_Adapter(service.workspace_manager))
+
+    service.execute_plan(_plan_file(tmp_repo))
+
+    assert called == ["subtask-readme"]
+
+
 def test_submit_candidate_captures_scoped_patch_and_hash(tmp_repo):
     paths = _active_task(tmp_repo)
     service = _service(tmp_repo)
@@ -184,6 +214,179 @@ def test_submit_candidate_captures_scoped_patch_and_hash(tmp_repo):
     assert b"# changed" in patch_bytes
     assert candidate.status == "proposed"
     assert _ledger_types(paths)[-1] == "candidate_patch_created"
+
+
+def test_submit_candidate_routes_patch_export_through_worker_adapter(tmp_repo, monkeypatch):
+    paths = _active_task(tmp_repo)
+    service = _service(tmp_repo)
+    service.execute_plan(_plan_file(tmp_repo))
+    workspace = Path(ExecutionStore(paths).read_workspace("subtask-readme").path)
+    (workspace / "README.md").write_text("# changed\n", encoding="utf-8")
+    called: list[str] = []
+
+    class _Adapter:
+        name = "local_worktree"
+
+        def __init__(self, manager):
+            self.manager = manager
+
+        def prepare(self, assignment):  # pragma: no cover - not used here
+            raise AssertionError
+
+        def export_candidate(self, handle):
+            called.append(handle.metadata["workspace_path"])
+            return {"patch_bytes": self.manager.capture_patch(Path(handle.metadata["workspace_path"]))}
+
+    service.register_worker_adapter(_Adapter(service.workspace_manager))
+
+    service.submit_candidate("subtask-readme", summary="Update README heading.")
+
+    assert called == [str(workspace)]
+
+
+def test_submit_candidate_reuses_prepared_worker_handle(tmp_repo):
+    _active_task(tmp_repo)
+    service = _service(tmp_repo)
+    prepared_handles: list[dict[str, str]] = []
+    exported_handles: list[dict[str, str]] = []
+
+    class _Prepared:
+        def __init__(self, binding, handle):
+            self.binding = binding
+            self.handle = handle
+
+    class _Handle:
+        def __init__(self, metadata):
+            self.metadata = metadata
+
+    class _Adapter:
+        name = "local_worktree"
+
+        def __init__(self, manager):
+            self.manager = manager
+
+        def prepare(self, assignment):
+            prepared = self.manager.create_workspace(assignment.subtask)
+            handle = _Handle(
+                {
+                    "workspace_path": prepared.path,
+                    "workspace_ref": prepared.ref,
+                    "prepared_marker": "kept",
+                }
+            )
+            prepared_handles.append(dict(handle.metadata))
+            return _Prepared(prepared, handle)
+
+        def export_candidate(self, handle):
+            exported_handles.append(dict(handle.metadata))
+            return {"patch_bytes": self.manager.capture_patch(Path(handle.metadata["workspace_path"]))}
+
+    service = _service(tmp_repo, worker_adapters={"local_worktree": _Adapter(service.workspace_manager)})
+    service.execute_plan(_plan_file(tmp_repo))
+    workspace = Path(ExecutionStore(service.paths).read_workspace("subtask-readme").path)
+    (workspace / "README.md").write_text("# changed\n", encoding="utf-8")
+
+    service.submit_candidate("subtask-readme", summary="Update README heading.")
+
+    assert prepared_handles and exported_handles
+    assert ExecutionStore(service.paths).read_workspace("subtask-readme").worker_handle_metadata[
+        "prepared_marker"
+    ] == "kept"
+    assert exported_handles[0]["prepared_marker"] == "kept"
+
+
+def test_submit_candidate_keeps_canonical_workspace_identity(tmp_repo):
+    _active_task(tmp_repo)
+    prepared_handles: list[dict[str, str]] = []
+    exported_handles: list[dict[str, str]] = []
+
+    class _Prepared:
+        def __init__(self, binding, handle):
+            self.binding = binding
+            self.handle = handle
+
+    class _Handle:
+        def __init__(self, metadata):
+            self.metadata = metadata
+
+    class _Adapter:
+        name = "local_worktree"
+
+        def __init__(self, manager):
+            self.manager = manager
+
+        def prepare(self, assignment):
+            prepared = self.manager.create_workspace(assignment.subtask)
+            handle = _Handle(
+                {
+                    "workspace_path": "override/path",
+                    "workspace_ref": "override/ref",
+                    "prepared_marker": "kept",
+                }
+            )
+            prepared_handles.append(dict(handle.metadata))
+            return _Prepared(prepared, handle)
+
+        def export_candidate(self, handle):
+            exported_handles.append(dict(handle.metadata))
+            return {"patch_bytes": self.manager.capture_patch(Path(handle.metadata["workspace_path"]))}
+
+    manager_service = _service(tmp_repo)
+    service = _service(
+        tmp_repo,
+        worker_adapters={"local_worktree": _Adapter(manager_service.workspace_manager)},
+    )
+    service.execute_plan(_plan_file(tmp_repo))
+    workspace = ExecutionStore(service.paths).read_workspace("subtask-readme")
+    (Path(workspace.path) / "README.md").write_text("# changed\n", encoding="utf-8")
+    service.submit_candidate("subtask-readme", summary="Update README heading.")
+
+    assert prepared_handles and exported_handles
+    assert exported_handles[0]["workspace_path"] == workspace.path
+    assert exported_handles[0]["workspace_ref"] == workspace.ref
+    assert exported_handles[0]["prepared_marker"] == "kept"
+
+
+def test_accepted_decision_rejects_stale_completed_review_binding(tmp_repo):
+    paths, service, candidate_id = _ready_candidate(tmp_repo)
+    _packet_ref, packet = service.review_candidate(candidate_id)
+    service.ingest_candidate_review(candidate_id, packet.review_id, findings=[])
+
+    candidate = ExecutionStore(paths).read_candidate(candidate_id)
+    stale_binding = candidate.review_refs[-1].model_copy(update={"test_refs": ["execution/tests/stale.json"]})
+    ExecutionStore(paths).write_candidate(candidate.model_copy(update={"review_refs": [stale_binding]}))
+
+    with pytest.raises(ValueError, match="stale"):
+        service.decide_candidate(
+            candidate_id,
+            decision="accepted",
+            reason="Stale review should not be accepted.",
+        )
+
+
+def test_rejected_decision_allows_blocking_candidate_review(tmp_repo):
+    _paths, service, candidate_id = _ready_candidate(tmp_repo)
+    _packet_ref, packet = service.review_candidate(candidate_id)
+    blocker = Finding(
+        id="finding-blocker",
+        review_id=packet.review_id,
+        source_agent="reviewer-a",
+        category="correctness",
+        severity="high",
+        blocking=True,
+        title="Blocking issue",
+        body="This review has an open blocking finding.",
+    )
+    service.ingest_candidate_review(candidate_id, packet.review_id, findings=[blocker])
+
+    decision = service.decide_candidate(
+        candidate_id,
+        decision="rejected",
+        reason="The blocking review should still allow an explicit rejection.",
+    )
+
+    assert decision.decision == "rejected"
+    assert ExecutionStore(service.paths).read_candidate(candidate_id).status == "rejected"
 
 
 def test_candidate_happy_path_reviews_decides_and_applies(tmp_repo):
@@ -212,6 +415,50 @@ def test_candidate_happy_path_reviews_decides_and_applies(tmp_repo):
     assert (tmp_repo / "README.md").read_text(encoding="utf-8") == "# changed\n"
     assert "candidate_review_completed" in _ledger_types(paths)
     assert _ledger_types(paths)[-1] == "candidate_applied"
+
+
+def test_review_candidate_routes_packet_through_review_arbiter(tmp_repo, monkeypatch):
+    paths, service, candidate_id = _ready_candidate(tmp_repo)
+    ordered: list[str] = []
+
+    class _ReviewArbiter:
+        name = "deterministic_review"
+
+        def decide(self, snapshot):
+            ordered.extend(finding.id for finding in snapshot.findings)
+            return tuple(reversed(snapshot.findings))
+
+    monkeypatch.setattr(service, "review_arbiter", _ReviewArbiter())
+
+    packet_ref, packet = service.review_candidate(candidate_id)
+    findings = [
+        Finding(
+            id="finding-a",
+            review_id=packet.review_id,
+            source_agent="reviewer-a",
+            category="test",
+            severity="low",
+            blocking=False,
+            title="First",
+            body="First body",
+        ),
+        Finding(
+            id="finding-b",
+            review_id=packet.review_id,
+            source_agent="reviewer-b",
+            category="test",
+            severity="high",
+            blocking=True,
+            title="Second",
+            body="Second body",
+        ),
+    ]
+    report_ref, report = service.ingest_candidate_review(candidate_id, packet.review_id, findings=findings)
+
+    assert packet_ref.startswith("reviews/")
+    assert report_ref == f"reviews/{packet.review_id}/findings.json"
+    assert ordered == ["finding-a", "finding-b"]
+    assert [finding.id for finding in report.findings] == ["finding-b", "finding-a"]
 
 
 def test_task_level_review_does_not_satisfy_candidate_review_guard(tmp_repo):

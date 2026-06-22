@@ -1,4 +1,4 @@
-"""agos.yaml config model and gate resolution."""
+﻿"""agos.yaml config model and gate resolution."""
 from __future__ import annotations
 
 from pathlib import Path
@@ -39,12 +39,48 @@ class ExecutorConfig(BaseModel):
     agent: str
 
 
+class WorkerConfig(BaseModel):
+    """One configured execution worker adapter."""
+
+    type: str
+    command: str | None = None
+    agent: str | None = None
+    endpoint: str | None = None
+    token: str | None = None
+    timeout_seconds: int = Field(default=30, ge=1)
+    poll_interval_seconds: int = Field(default=1, ge=1)
+    artifact_globs: list[str] = Field(default_factory=list)
+    env: dict[str, str] = Field(default_factory=dict)
+
+
+class ReviewerConfig(BaseModel):
+    """One configured review adapter."""
+
+    type: str
+    role: str
+    required: bool = True
+    command: str | None = None
+
+
+
+class OrchestrationConfig(BaseModel):
+    """Runtime policy for multi-agent orchestration."""
+
+    backend: str = "native_async"
+    max_parallel: int = Field(default=1, ge=1)
+    max_retries: int = Field(default=0, ge=0)
+    worker_timeout_seconds: int | None = Field(default=None, ge=1)
+    retry_backoff_seconds: int = Field(default=0, ge=0)
+
 class AGOSConfig(BaseModel):
     """Top-level `.agos/agos.yaml` structure."""
 
     executor: ExecutorConfig = Field(default_factory=ExecutorConfig)
     default_workflow: str = "feature"
     workflows: dict[str, WorkflowConfig] = Field(default_factory=dict)
+    workers: dict[str, WorkerConfig] = Field(default_factory=dict)
+    reviewers: dict[str, ReviewerConfig] = Field(default_factory=dict)
+    orchestration: OrchestrationConfig = Field(default_factory=OrchestrationConfig)
 
     @classmethod
     def default(
@@ -130,3 +166,5 @@ def resolve_gates(
     if missing:
         raise KeyError(f"override gates not in workflow {workflow!r}: {missing}")
     return [by_id[gate_id].model_copy(deep=True) for gate_id in override]
+
+

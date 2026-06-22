@@ -6,6 +6,7 @@ from pathlib import Path
 
 import typer
 
+from agos.adapters.workers import LocalWorktreeWorkerAdapter
 from agos.core.execution_service import ExecutionService
 from agos.core.execution_store import ExecutionStore
 from agos.core.repo import find_initialized_repo_root, repo_paths
@@ -13,13 +14,15 @@ from agos.core.review import Finding
 
 
 candidate_app = typer.Typer(help="Inspect and manage execution candidates.")
+merge_app = typer.Typer(help="Decide and apply candidate bundles.")
 
 
 @candidate_app.command("list")
 def candidate_list_command() -> None:
     try:
         repo_root = find_initialized_repo_root()
-        store = ExecutionStore(repo_paths(repo_root))
+        paths = repo_paths(repo_root)
+        store = ExecutionStore(paths)
         candidates = store.read_candidates()
     except Exception as exc:
         typer.echo(str(exc), err=True)
@@ -40,7 +43,12 @@ def candidate_submit_command(
 ) -> None:
     try:
         repo_root = find_initialized_repo_root()
-        candidate = ExecutionService(repo_paths(repo_root)).submit_candidate(
+        paths = repo_paths(repo_root)
+        service = ExecutionService(paths)
+        service.register_worker_adapter(
+            LocalWorktreeWorkerAdapter(service.workspace_manager),
+        )
+        candidate = service.submit_candidate(
             subtask_id,
             summary=summary,
         )
@@ -58,7 +66,8 @@ def candidate_test_command(
 ) -> None:
     try:
         repo_root = find_initialized_repo_root()
-        runs = ExecutionService(repo_paths(repo_root)).test_candidate(candidate_id, gate_id=gate)
+        paths = repo_paths(repo_root)
+        runs = ExecutionService(paths).test_candidate(candidate_id, gate_id=gate)
     except Exception as exc:
         typer.echo(str(exc), err=True)
         raise typer.Exit(code=1) from exc
@@ -76,7 +85,8 @@ def candidate_review_command(
 ) -> None:
     try:
         repo_root = find_initialized_repo_root()
-        service = ExecutionService(repo_paths(repo_root))
+        paths = repo_paths(repo_root)
+        service = ExecutionService(paths)
         if packet_only and ingest is not None:
             raise ValueError("--packet-only and --ingest cannot be used together")
         if packet_only:
@@ -111,7 +121,8 @@ def candidate_decide_command(
 ) -> None:
     try:
         repo_root = find_initialized_repo_root()
-        outcome = ExecutionService(repo_paths(repo_root)).decide_candidate(
+        paths = repo_paths(repo_root)
+        outcome = ExecutionService(paths).decide_candidate(
             candidate_id,
             decision=decision.replace("-", "_"),
             reason=reason,
@@ -127,9 +138,49 @@ def candidate_decide_command(
 def candidate_apply_command(candidate_id: str) -> None:
     try:
         repo_root = find_initialized_repo_root()
-        candidate = ExecutionService(repo_paths(repo_root)).apply_candidate(candidate_id)
+        paths = repo_paths(repo_root)
+        candidate = ExecutionService(paths).apply_candidate(candidate_id)
     except Exception as exc:
         typer.echo(str(exc), err=True)
         raise typer.Exit(code=1) from exc
 
     typer.echo(f"{candidate.id} applied")
+
+
+@merge_app.command("decide")
+def candidate_merge_decide_command(
+    candidate_ids: list[str] = typer.Argument(None),
+    ordered: bool = typer.Option(
+        False,
+        "--ordered",
+        help="Treat candidate arguments as an explicit ordered patch stack.",
+    ),
+) -> None:
+    try:
+        repo_root = find_initialized_repo_root()
+        paths = repo_paths(repo_root)
+        decision = ExecutionService(paths).decide_candidate_bundle(
+            candidate_ids or None,
+            dependency_order=candidate_ids if ordered else None,
+        )
+    except Exception as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(code=1) from exc
+
+    typer.echo(f"{decision.id} {decision.strategy} {' '.join(decision.candidate_ids)}")
+
+
+@merge_app.command("apply")
+def candidate_merge_apply_command(bundle_decision_id: str) -> None:
+    try:
+        repo_root = find_initialized_repo_root()
+        paths = repo_paths(repo_root)
+        candidates = ExecutionService(paths).apply_candidate_bundle(bundle_decision_id)
+    except Exception as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(code=1) from exc
+
+    typer.echo("applied " + " ".join(candidate.id for candidate in candidates))
+
+
+candidate_app.add_typer(merge_app, name="merge")

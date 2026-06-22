@@ -394,12 +394,16 @@ is enabled for the workflow.
 class ReviewerAdapter(Protocol):
     name: str
 
-    def review(self, packet: ReviewPacket) -> ReviewOutput:
-        ...
+    def start(self, request: ReviewerStartRequest) -> ReviewerRun: ...
+
+    def poll(self, run_id: str, *, reviewer_id: str) -> ReviewerRunStatus: ...
+
+    def cancel(self, run_id: str) -> ReviewerRunStatus: ...
 ```
 
 The adapter can call Codex review, Claude, Gemini, PR-Agent, a human review
-import, or a local script. The core only sees `ReviewOutput`.
+import, or a local script. The core only sees normalized reviewer lifecycle
+models and `Finding` records.
 
 ### OrchestratorBackend
 
@@ -407,18 +411,22 @@ import, or a local script. The core only sees `ReviewOutput`.
 class OrchestratorBackend(Protocol):
     name: str
 
-    def run_review(self, packet: ReviewPacket, reviewers: list[ReviewerSpec]) -> ReviewRun:
-        ...
+    def start(self, spec: OrchestrationRunSpec) -> OrchestratorRunHandle: ...
 
-    def run_execution_plan(self, plan: ExecutionPlan) -> ExecutionRun:
-        ...
+    def poll(self, handle: OrchestratorRunHandle) -> OrchestratorRunStatus: ...
+
+    def cancel(self, handle: OrchestratorRunHandle) -> OrchestratorRunStatus: ...
+
+    def collect(self, handle: OrchestratorRunHandle) -> dict[str, object]: ...
+
+    def run(self, spec: OrchestrationRunSpec) -> OrchestratorRunHandle: ...
 ```
 
-The first backend is native Python. A later backend can translate the same specs
-into LangGraph nodes.
+The native Python backend is the semantic reference. LangGraph and external HTTP
+backends translate the same normalized specs without becoming required core
+dependencies.
 
 ## Filesystem Layout
-
 Add these directories under the active task:
 
 ```text

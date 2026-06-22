@@ -5,24 +5,42 @@ import subprocess
 import time
 from collections.abc import Iterable
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, Literal, cast
 from uuid import uuid4
 
 import yaml
 
+from agos.core.arbiters import (
+    CandidateDecisionArbiter,
+    CandidateDecisionSnapshot,
+    CandidateMergeArbiter,
+    MergeCandidateSnapshot,
+    ReviewDecisionArbiter,
+    ReviewDecisionSnapshot,
+)
 from agos.core.command import run_command
 from agos.core.config import load_config, resolve_gates
 from agos.core.execution import (
     ArbiterDecision,
+    CandidateBundleDecision,
+    CandidateMergePreview,
     CandidatePatch,
     CandidateTestRun,
     DecisionValue,
     ExecutionPlan,
     ExecutionSubtask,
     ReviewBinding,
+    WorkspaceBinding,
     utc_now_iso,
 )
+from agos.core.execution_orchestration import ExecutionOrchestrator
+from agos.core.execution_runtime import ExecutionRuntime, ExecutionRuntimeSnapshot
 from agos.core.execution_store import ExecutionStore
+from agos.core.execution_worker import (
+    ExecutionWorkerAdapter,
+    WorkerAssignment,
+    WorkerWorkspaceHandle,
+)
 from agos.core.execution_workspace import (
     ExecutionWorkspaceManager,
     candidate_patch_paths,
@@ -40,7 +58,13 @@ from agos.core.task import Task, load_task
 class ExecutionService:
     """Coordinate execution artifacts, review bindings, and guarded apply."""
 
-    def __init__(self, paths: AgosPaths, *, worktree_root: Path | None = None) -> None:
+    def __init__(
+        self,
+        paths: AgosPaths,
+        *,
+        worktree_root: Path | None = None,
+        worker_adapters: dict[str, ExecutionWorkerAdapter] | None = None,
+    ) -> None:
         self.paths = paths
         self.store = ExecutionStore(paths)
         self.workspace_manager = ExecutionWorkspaceManager(
@@ -48,6 +72,39 @@ class ExecutionService:
             task_id=self._task_id_or_placeholder(),
             worktree_root=worktree_root,
         )
+        self.execution_orchestrator = ExecutionOrchestrator(paths)
+        self.review_arbiter = ReviewDecisionArbiter()
+        self.candidate_arbiter = CandidateDecisionArbiter()
+        self.merge_arbiter = CandidateMergeArbiter()
+        self._worker_adapters: dict[str, ExecutionWorkerAdapter] = dict(worker_adapters or {})
+
+    def register_worker_adapter(self, adapter: ExecutionWorkerAdapter) -> None:
+        self._worker_adapters[adapter.name] = adapter
+
+    def worker_adapter_names(self) -> list[str]:
+        return sorted(self._worker_adapters)
+
+    def start_execution_run(
+        self,
+        plan_path: Path,
+        *,
+        run_id: str | None = None,
+    ) -> ExecutionRuntimeSnapshot:
+        plan = self.execute_plan(plan_path)
+        execution_run_id = run_id or _new_id("execution-run")
+        return self._execution_runtime(plan).tick(plan, run_id=execution_run_id)
+
+    def resume_execution_run(self, run_id: str) -> ExecutionRuntimeSnapshot:
+        plan = self.store.read_plan()
+        return self._execution_runtime(plan).tick(plan, run_id=run_id)
+
+    def status_execution_run(self, run_id: str) -> ExecutionRuntimeSnapshot:
+        plan = self.store.read_plan()
+        return self._execution_runtime(plan).status(plan, run_id=run_id)
+
+    def cancel_execution_run(self, run_id: str) -> ExecutionRuntimeSnapshot:
+        plan = self.store.read_plan()
+        return self._execution_runtime(plan).cancel(plan, run_id=run_id)
 
     def execute_plan(self, plan_path: Path) -> ExecutionPlan:
         status, task = self._active_task()
@@ -58,6 +115,7 @@ class ExecutionService:
             raise ValueError(f"execution plan task_id {plan.task_id!r} does not match active task {task.id!r}")
 
         plan_ref = self.store.write_plan(plan)
+        self.execution_orchestrator.build_spec(plan_path)
         self._append_event(
             {
                 "type": "execution_plan_created",
@@ -70,8 +128,12 @@ class ExecutionService:
 
         updated_subtasks: list[ExecutionSubtask] = []
         for subtask in plan.subtasks:
-            workspace = self.workspace_manager.create_workspace(subtask)
-            workspace_ref = self.store.write_workspace(workspace)
+            prepared = self._worker_adapter(subtask.worker.adapter).prepare(WorkerAssignment(subtask=subtask))
+            workspace_binding = _workspace_binding(prepared)
+            workspace_binding = workspace_binding.model_copy(
+                update={"worker_handle_metadata": _worker_handle_metadata(prepared)}
+            )
+            workspace_ref = self.store.write_workspace(workspace_binding)
             updated = subtask.model_copy(
                 update={"status": "workspace_ready", "workspace_ref": workspace_ref}
             )
@@ -83,7 +145,7 @@ class ExecutionService:
                     "task_id": task.id,
                     "subtask_id": subtask.id,
                     "workspace_ref": workspace_ref,
-                    "base_commit": workspace.base_commit,
+                    "base_commit": workspace_binding.base_commit,
                 }
             )
 
@@ -95,7 +157,14 @@ class ExecutionService:
         _status, task = self._active_task()
         subtask = self.store.read_subtask(subtask_id)
         workspace = self.store.read_workspace(subtask_id)
-        patch_bytes = self.workspace_manager.capture_patch(Path(workspace.path))
+        worker = self._worker_adapter(subtask.worker.adapter)
+        export = worker.export_candidate(
+            WorkerWorkspaceHandle(
+                subtask_id=subtask.id,
+                metadata=_canonical_worker_handle_metadata(workspace),
+            )
+        )
+        patch_bytes = export["patch_bytes"]
         self.workspace_manager.validate_patch_scope(patch_bytes, subtask.write_scope)
         candidate_id = _new_id("candidate")
         patch_ref, patch_sha = self.store.write_candidate_patch(candidate_id, patch_bytes)
@@ -211,7 +280,10 @@ class ExecutionService:
             raise ValueError(f"candidate review binding is not started: {review_id}")
 
         try:
-            report_ref, report = ReviewService(self.paths).ingest_findings(review_id, findings)
+            ordered_findings = self.review_arbiter.decide(
+                ReviewDecisionSnapshot(review_id=review_id, findings=tuple(findings))
+            )
+            report_ref, report = ReviewService(self.paths).ingest_findings(review_id, ordered_findings)
         except Exception as exc:
             failed_event = self._append_event(
                 {
@@ -270,29 +342,43 @@ class ExecutionService:
     ) -> ArbiterDecision:
         _status, task = self._active_task()
         candidate = self._candidate_with_valid_patch(candidate_id)
-        if decision == "accepted":
-            self._assert_candidate_tests_passed(candidate, task)
-            review, report = self._latest_completed_review_and_report(candidate)
-            self._assert_review_binding_current(candidate, review, report)
-            evidence_refs = [
-                candidate.patch_ref,
-                *candidate.test_refs,
-                cast(str, review.report_ref),
-            ]
-        else:
-            evidence_refs = [candidate.patch_ref]
+        review_binding = self._latest_completed_review_binding(candidate)
+        review_report_ref = review_binding.report_ref if review_binding is not None else None
+        review_open_blocking_count = 0
+        review_binding_current = False
+        if review_binding is not None:
+            review_binding, review_report = self._latest_completed_review_and_report(candidate)
+            if cast(DecisionValue, decision) == "accepted":
+                self._assert_review_binding_current(candidate, review_binding, review_report)
+            review_binding_current = True
+            review_open_blocking_count = len(review_report.open_blocking_findings())
+        tests_passed = self._candidate_tests_passed(candidate, task)
+        evidence_refs = [candidate.patch_ref]
+        if tests_passed:
+            evidence_refs.extend(candidate.test_refs)
+        if review_binding_current and review_report_ref is not None:
+            evidence_refs.append(cast(str, review_report_ref))
 
-        decision_model = ArbiterDecision(
-            id=_new_id("decision"),
-            candidate_id=candidate.id,
-            decision=cast(DecisionValue, decision),
-            reason=reason,
-            evidence_refs=evidence_refs,
-            decided_by=decided_by,
+        decision_result = self.candidate_arbiter.decide(
+            CandidateDecisionSnapshot(
+                candidate_id=candidate.id,
+                decision=cast(DecisionValue, decision),
+                reason=reason,
+                decided_by=decided_by,
+                evidence_refs=tuple(evidence_refs),
+                tests_passed=tests_passed,
+                review_binding_current=review_binding_current,
+                review_open_blocking_count=review_open_blocking_count,
+                patch_ref=candidate.patch_ref,
+                test_refs=tuple(candidate.test_refs),
+                review_report_ref=review_report_ref,
+            )
         )
+        decision_model = decision_result.decision
         decision_ref = self.store.write_decision(decision_model)
-        status_update = _candidate_status_for_decision(decision)
-        updated = candidate.model_copy(update={"status": status_update, "decision_ref": decision_ref})
+        updated = candidate.model_copy(
+            update={"status": decision_result.candidate_status, "decision_ref": decision_ref}
+        )
         self.store.write_candidate(updated)
         self._append_event(
             {
@@ -328,9 +414,26 @@ class ExecutionService:
         self._assert_candidate_tests_passed(candidate, task)
         review, report = self._latest_completed_review_and_report(candidate)
         self._assert_review_binding_current(candidate, review, report)
-        self._assert_latest_decision_accepted(candidate)
-        self._assert_no_accepted_overlap(candidate)
-        self._assert_no_dirty_overlap(candidate_patch_paths(patch_bytes))
+        merge_decision = self.merge_arbiter.decide(
+            candidate,
+            accepted_candidate_paths={
+                other.id: candidate_patch_paths(self._patch_bytes(other))
+                for other in self.store.read_candidates()
+                if other.id != candidate.id and other.status in {"accepted", "applied"}
+            },
+            dirty_paths=_dirty_paths(self.paths.root),
+            patch_paths=candidate_patch_paths(patch_bytes),
+        )
+        if not merge_decision.allowed:
+            if merge_decision.dirty_paths:
+                raise ValueError(
+                    f"governed repo has dirty files in candidate scope: {', '.join(merge_decision.dirty_paths)}"
+                )
+            if merge_decision.conflict_candidate_ids:
+                raise ValueError(
+                    "candidate conflicts with accepted/applied candidate: "
+                    f"{merge_decision.conflict_candidate_ids[0]}"
+                )
 
         check = run_command(
             ["git", "apply", "--check", "--binary", "-"],
@@ -369,6 +472,314 @@ class ExecutionService:
             }
         )
         return applied
+
+    def decide_candidate_bundle(
+        self,
+        candidate_ids: list[str] | None = None,
+        *,
+        dependency_order: list[str] | None = None,
+    ) -> CandidateBundleDecision:
+        _status, task = self._active_task()
+        candidates = self._bundle_candidates(candidate_ids)
+        snapshots = [self._merge_candidate_snapshot(candidate, task) for candidate in candidates]
+        decision = self.merge_arbiter.decide_bundle(
+            snapshots,
+            dirty_paths=_dirty_paths(self.paths.root),
+            dependency_order=dependency_order or (),
+        )
+        stored = CandidateBundleDecision(
+            id=_new_id("bundle"),
+            strategy=decision.strategy,
+            candidate_ids=list(decision.candidate_ids),
+            reason=decision.reason,
+            evidence_refs=list(decision.evidence_refs),
+            conflict_candidate_ids=list(decision.conflict_candidate_ids),
+        )
+        decision_ref = self.store.write_bundle_decision(stored)
+        self._append_event(
+            {
+                "type": "candidate_bundle_decided",
+                "task_id": task.id,
+                "strategy": stored.strategy,
+                "candidate_ids": stored.candidate_ids,
+                "decision_ref": decision_ref,
+                "evidence_refs": stored.evidence_refs,
+                "conflict_candidate_ids": stored.conflict_candidate_ids,
+            }
+        )
+        return stored
+
+    def apply_candidate_bundle(self, decision_id: str) -> list[CandidatePatch]:
+        _status, task = self._active_task()
+        decision = self.store.read_bundle_decision(decision_id)
+        if decision.strategy == "manual_merge_required":
+            raise ValueError("manual merge required; bundle cannot be applied automatically")
+        candidates = [self._candidate_with_valid_patch(candidate_id) for candidate_id in decision.candidate_ids]
+        if decision.strategy == "single_candidate":
+            applied = [self.apply_candidate(candidates[0].id)]
+        else:
+            patches = [(candidate, self._patch_bytes(candidate)) for candidate in candidates]
+            for candidate in candidates:
+                self._preflight_candidate_for_bundle_apply(candidate, task, candidates)
+            if decision.strategy == "ordered_patch_stack":
+                self._dry_run_candidate_stack(decision, task, patches)
+            applied = [
+                self._apply_candidate_patch_to_repo(task.id, candidate, patch_bytes)
+                for candidate, patch_bytes in patches
+            ]
+        self._append_event(
+            {
+                "type": "candidate_bundle_applied",
+                "task_id": task.id,
+                "bundle_decision_id": decision.id,
+                "candidate_ids": [candidate.id for candidate in applied],
+            }
+        )
+        return applied
+
+    def _bundle_candidates(self, candidate_ids: list[str] | None) -> list[CandidatePatch]:
+        if candidate_ids is None or not candidate_ids:
+            candidates = [
+                candidate
+                for candidate in self.store.read_candidates()
+                if candidate.status == "accepted"
+            ]
+        else:
+            candidates = [self.store.read_candidate(candidate_id) for candidate_id in candidate_ids]
+        if not candidates:
+            raise ValueError("candidate bundle requires at least one candidate")
+        return candidates
+
+    def _merge_candidate_snapshot(
+        self,
+        candidate: CandidatePatch,
+        task: Task,
+    ) -> MergeCandidateSnapshot:
+        patch_bytes = self._patch_bytes(candidate)
+        open_blocking_count = 1
+        try:
+            review, report = self._latest_completed_review_and_report(candidate)
+            self._assert_review_binding_current(candidate, review, report)
+            open_blocking_count = len(report.open_blocking_findings())
+        except ValueError:
+            open_blocking_count = 1
+        return MergeCandidateSnapshot(
+            candidate_id=candidate.id,
+            patch_ref=candidate.patch_ref,
+            patch_sha256=candidate.patch_sha256,
+            touched_paths=tuple(sorted(candidate_patch_paths(patch_bytes))),
+            tests_passed=self._candidate_tests_passed(candidate, task),
+            review_open_blocking_count=open_blocking_count,
+            accepted=candidate.status == "accepted",
+            score=len(candidate.test_refs),
+        )
+
+    def _preflight_candidate_for_bundle_apply(
+        self,
+        candidate: CandidatePatch,
+        task: Task,
+        bundle_candidates: list[CandidatePatch],
+    ) -> None:
+        if candidate.status != "accepted":
+            raise ValueError(f"candidate must be accepted before bundle apply: {candidate.id}")
+        subtask = self.store.read_subtask(candidate.subtask_id)
+        patch_bytes = self._patch_bytes(candidate)
+        self.workspace_manager.validate_patch_scope(patch_bytes, subtask.write_scope)
+        self._assert_candidate_tests_passed(candidate, task)
+        review, report = self._latest_completed_review_and_report(candidate)
+        self._assert_review_binding_current(candidate, review, report)
+        bundle_ids = {item.id for item in bundle_candidates}
+        merge_decision = self.merge_arbiter.decide(
+            candidate,
+            accepted_candidate_paths={
+                other.id: candidate_patch_paths(self._patch_bytes(other))
+                for other in self.store.read_candidates()
+                if other.id != candidate.id
+                and other.id not in bundle_ids
+                and other.status in {"accepted", "applied"}
+            },
+            dirty_paths=_dirty_paths(self.paths.root),
+            patch_paths=candidate_patch_paths(patch_bytes),
+        )
+        if not merge_decision.allowed:
+            if merge_decision.dirty_paths:
+                raise ValueError(
+                    "governed repo has dirty files in candidate scope: "
+                    f"{', '.join(merge_decision.dirty_paths)}"
+                )
+            if merge_decision.conflict_candidate_ids:
+                raise ValueError(
+                    "candidate conflicts with accepted/applied candidate: "
+                    f"{merge_decision.conflict_candidate_ids[0]}"
+                )
+        check = run_command(
+            ["git", "apply", "--check", "--binary", "-"],
+            cwd=self.paths.root,
+            input=patch_bytes,
+            capture_output=True,
+        )
+        if check.returncode != 0:
+            raise ValueError(f"candidate patch does not apply during bundle preflight: {candidate.id}")
+
+    def _apply_candidate_patch_to_repo(
+        self,
+        task_id: str,
+        candidate: CandidatePatch,
+        patch_bytes: bytes,
+    ) -> CandidatePatch:
+        check = run_command(
+            ["git", "apply", "--check", "--binary", "-"],
+            cwd=self.paths.root,
+            input=patch_bytes,
+            capture_output=True,
+        )
+        if check.returncode != 0:
+            evidence_ref = self._write_apply_blocked_evidence(candidate, check)
+            self._append_event(
+                {
+                    "type": "candidate_apply_blocked",
+                    "task_id": task_id,
+                    "candidate_id": candidate.id,
+                    "evidence_ref": evidence_ref,
+                }
+            )
+            raise ValueError(f"candidate patch does not apply: {evidence_ref}")
+
+        run_command(
+            ["git", "apply", "--binary", "-"],
+            cwd=self.paths.root,
+            input=patch_bytes,
+            check=True,
+            capture_output=True,
+        )
+        applied = candidate.model_copy(update={"status": "applied"})
+        self.store.write_candidate(applied)
+        self._append_event(
+            {
+                "type": "candidate_applied",
+                "task_id": task_id,
+                "candidate_id": candidate.id,
+                "patch_ref": candidate.patch_ref,
+                "decision_ref": candidate.decision_ref,
+            }
+        )
+        return applied
+
+    def _dry_run_candidate_stack(
+        self,
+        decision: CandidateBundleDecision,
+        task: Task,
+        patches: list[tuple[CandidatePatch, bytes]],
+    ) -> str:
+        preview_id = _new_id("merge-preview")
+        log_dir = self.paths.evidence / "execution"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        log_name = f"{preview_id}.log"
+        log_path = log_dir / log_name
+        log_ref = f"execution/{log_name}"
+        evidence_refs = [log_ref]
+        conflict_evidence_refs: list[str] = []
+        lines = [
+            "command: ordered_patch_stack dry-run",
+            f"decision_id: {decision.id}",
+            "candidate_ids: " + ", ".join(candidate.id for candidate, _patch in patches),
+        ]
+        workspace: Path | None = None
+        state: Literal["passed", "failed"] = "passed"
+        failure: str | None = None
+        try:
+            workspace = self.workspace_manager._create_verification_workspace(preview_id)
+            lines.append(f"workspace: {workspace}")
+            for candidate, patch_bytes in patches:
+                check = run_command(
+                    ["git", "apply", "--check", "--binary", "-"],
+                    cwd=workspace,
+                    input=patch_bytes,
+                    capture_output=True,
+                )
+                lines.extend(_process_log_lines(f"check {candidate.id}", check))
+                if check.returncode != 0:
+                    state = "failed"
+                    conflict_evidence_refs.append(log_ref)
+                    failure = f"ordered patch stack dry-run failed for {candidate.id}: {log_ref}"
+                    break
+
+                applied = run_command(
+                    ["git", "apply", "--binary", "-"],
+                    cwd=workspace,
+                    input=patch_bytes,
+                    capture_output=True,
+                )
+                lines.extend(_process_log_lines(f"apply {candidate.id}", applied))
+                if applied.returncode != 0:
+                    state = "failed"
+                    conflict_evidence_refs.append(log_ref)
+                    failure = f"ordered patch stack apply failed for {candidate.id}: {log_ref}"
+                    break
+
+            if failure is None:
+                diff_proc = run_command(
+                    ["git", "diff", "--binary", "HEAD"],
+                    cwd=workspace,
+                    check=True,
+                    capture_output=True,
+                )
+                stack_diff = _decode(diff_proc.stdout)
+                for gate_spec in self._active_gates(task):
+                    result = build_gate(gate_spec).evaluate(
+                        GateContext(
+                            repo_root=workspace,
+                            stage="candidate",
+                            diff=stack_diff,
+                            evidence_dir=self.paths.evidence,
+                        )
+                    )
+                    gate_ref = _evidence_ref(self.paths.evidence, result.evidence_path)
+                    if gate_ref:
+                        evidence_refs.append(gate_ref)
+                    lines.append(f"gate {gate_spec.id}: {result.state} {gate_ref}")
+                    if result.state != "pass":
+                        state = "failed"
+                        conflict_evidence_refs.append(gate_ref or log_ref)
+                        failure = f"ordered patch stack gate failed for {gate_spec.id}: {gate_ref or log_ref}"
+                        break
+        except Exception as exc:
+            if failure is None:
+                state = "failed"
+                conflict_evidence_refs.append(log_ref)
+                failure = f"ordered patch stack dry-run errored: {exc}"
+            raise
+        finally:
+            if workspace is not None:
+                self.workspace_manager._remove_worktree(workspace)
+            lines.append(f"state: {state}")
+            if failure is not None:
+                lines.append(f"failure: {failure}")
+            log_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+            preview = CandidateMergePreview(
+                id=preview_id,
+                decision_id=decision.id,
+                strategy=decision.strategy,
+                candidate_ids=[candidate.id for candidate, _patch in patches],
+                state=state,
+                evidence_refs=evidence_refs,
+                conflict_evidence_refs=conflict_evidence_refs,
+            )
+            preview_ref = self.store.write_merge_preview(preview)
+            self._append_event(
+                {
+                    "type": "candidate_merge_preview_completed",
+                    "task_id": task.id,
+                    "bundle_decision_id": decision.id,
+                    "preview_ref": preview_ref,
+                    "state": state,
+                    "evidence_refs": evidence_refs,
+                    "conflict_evidence_refs": conflict_evidence_refs,
+                }
+            )
+        if failure is not None:
+            raise ValueError(failure)
+        return log_ref
 
     def _record_patch_applies(
         self,
@@ -490,6 +901,12 @@ class ExecutionService:
             raise ValueError(f"candidate patch hash mismatch: {candidate.id}")
         return candidate
 
+    def _candidate_tests_passed(self, candidate: CandidatePatch, task: Task) -> bool:
+        runs = self.store.read_test_runs(candidate.id)
+        passed = {run.gate_id for run in runs if run.state == "passed"}
+        required = {"patch_applies", *[gate.id for gate in self._active_gates(task)]}
+        return not (required - passed)
+
     def _patch_bytes(self, candidate: CandidatePatch) -> bytes:
         path = self.store.patch_path(candidate.patch_ref)
         if not path.is_file():
@@ -575,25 +992,6 @@ class ExecutionService:
             f"candidate-bound review completion ledger hash not found: {binding.review_id}"
         )
 
-    def _assert_latest_decision_accepted(self, candidate: CandidatePatch) -> None:
-        decisions = self.store.read_decisions(candidate.id)
-        if not decisions or decisions[-1].decision != "accepted":
-            raise ValueError("latest arbiter decision is not accepted")
-
-    def _assert_no_accepted_overlap(self, candidate: CandidatePatch) -> None:
-        patch_paths = candidate_patch_paths(self._patch_bytes(candidate))
-        for other in self.store.read_candidates():
-            if other.id == candidate.id or other.status not in {"accepted", "applied"}:
-                continue
-            if patch_paths & candidate_patch_paths(self._patch_bytes(other)):
-                raise ValueError(f"candidate conflicts with accepted/applied candidate: {other.id}")
-
-    def _assert_no_dirty_overlap(self, patch_paths: set[str]) -> None:
-        dirty_paths = _dirty_paths(self.paths.root)
-        overlap = sorted(patch_paths & dirty_paths)
-        if overlap:
-            raise ValueError(f"governed repo has dirty files in candidate scope: {', '.join(overlap)}")
-
     def _write_apply_blocked_evidence(
         self,
         candidate: CandidatePatch,
@@ -626,6 +1024,50 @@ class ExecutionService:
         status = load_status(self.paths)
         return status.task_id if status is not None else "unknown-task"
 
+    def _worker_adapter(self, adapter_name: str) -> ExecutionWorkerAdapter:
+        if adapter_name not in self._worker_adapters:
+            raise ValueError(f"unsupported worker adapter: {adapter_name}")
+        return self._worker_adapters[adapter_name]
+
+    def _execution_runtime(self, plan: ExecutionPlan) -> ExecutionRuntime:
+        runtime_config = load_config(self.paths.root).orchestration
+        return ExecutionRuntime(
+            state_dir=self.paths.current_task / "execution" / "runs",
+            worker_adapters=self._worker_adapters,
+            workspace_paths={
+                subtask.id: self.store.read_workspace(subtask.id).path
+                for subtask in plan.subtasks
+                if subtask.workspace_ref is not None
+            },
+            max_retries=runtime_config.max_retries,
+            retry_backoff_seconds=runtime_config.retry_backoff_seconds,
+            worker_timeout_seconds=runtime_config.worker_timeout_seconds,
+        )
+
+
+def _workspace_binding(prepared: object) -> WorkspaceBinding:
+    if isinstance(prepared, WorkspaceBinding):
+        return prepared
+    binding = getattr(prepared, "binding", None)
+    if isinstance(binding, WorkspaceBinding):
+        return binding
+    raise TypeError("worker prepare() must return a WorkspaceBinding or an object with binding")
+
+
+def _worker_handle_metadata(prepared: object) -> dict[str, str]:
+    handle = getattr(prepared, "handle", None)
+    metadata = getattr(handle, "metadata", None)
+    if isinstance(metadata, dict):
+        return {str(key): str(value) for key, value in metadata.items()}
+    return {}
+
+
+def _canonical_worker_handle_metadata(workspace: WorkspaceBinding) -> dict[str, str]:
+    metadata = dict(workspace.worker_handle_metadata)
+    metadata["workspace_path"] = workspace.path
+    metadata["workspace_ref"] = workspace.ref
+    return metadata
+
 
 def _load_active_status(paths: AgosPaths) -> TaskStatus:
     status = load_status(paths)
@@ -636,16 +1078,6 @@ def _load_active_status(paths: AgosPaths) -> TaskStatus:
 
 def _new_id(prefix: str) -> str:
     return f"{prefix}-{uuid4().hex[:12]}"
-
-
-def _candidate_status_for_decision(decision: str) -> str:
-    if decision == "accepted":
-        return "accepted"
-    if decision == "rejected":
-        return "rejected"
-    if decision == "superseded":
-        return "superseded"
-    return "reviewed"
 
 
 def _evidence_ref(evidence_dir: Path, evidence_path: str | None) -> str:
@@ -683,3 +1115,16 @@ def _decode(value: str | bytes | None) -> str:
     if isinstance(value, str):
         return value
     return value.decode("utf-8", errors="replace")
+
+
+def _process_log_lines(label: str, proc: subprocess.CompletedProcess) -> list[str]:
+    return [
+        f"--- {label} ---",
+        f"exit_code: {proc.returncode}",
+        f"--- stdout ---\n{_decode(proc.stdout)}",
+        f"--- stderr ---\n{_decode(proc.stderr)}",
+    ]
+
+
+
+

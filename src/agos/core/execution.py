@@ -24,6 +24,12 @@ CandidateTestState = Literal["running", "passed", "failed"]
 ReviewBindingState = Literal["started", "completed", "failed"]
 DecisionValue = Literal["accepted", "rejected", "superseded", "needs_changes"]
 ApplyStrategy = Literal["direct_patch"]
+MergeStrategy = Literal[
+    "single_candidate",
+    "non_overlapping_bundle",
+    "ordered_patch_stack",
+    "manual_merge_required",
+]
 
 
 def utc_now_iso() -> str:
@@ -136,6 +142,7 @@ class WorkspaceBinding(BaseModel):
     path: str
     base_ref: str
     base_commit: str
+    worker_handle_metadata: dict[str, str] = Field(default_factory=dict)
     created_at: str = Field(default_factory=utc_now_iso)
 
     @property
@@ -221,3 +228,33 @@ class ArbiterDecision(BaseModel):
             if self.conflict_evidence_refs:
                 raise ValueError("accepted direct_patch decisions cannot include conflict evidence")
         return self
+
+
+class CandidateBundleDecision(BaseModel):
+    id: str
+    strategy: MergeStrategy
+    candidate_ids: list[str] = Field(default_factory=list)
+    reason: str
+    evidence_refs: list[str] = Field(default_factory=list)
+    conflict_candidate_ids: list[str] = Field(default_factory=list)
+    created_at: str = Field(default_factory=utc_now_iso)
+
+    @model_validator(mode="after")
+    def _validate_decision(self) -> "CandidateBundleDecision":
+        if not self.reason.strip():
+            raise ValueError("bundle decision reason must be non-empty")
+        if self.strategy != "manual_merge_required" and not self.candidate_ids:
+            raise ValueError("automatic bundle decisions require candidate_ids")
+        return self
+
+
+class CandidateMergePreview(BaseModel):
+    id: str
+    decision_id: str
+    strategy: MergeStrategy
+    candidate_ids: list[str] = Field(default_factory=list)
+    state: Literal["passed", "failed"]
+    evidence_refs: list[str] = Field(default_factory=list)
+    conflict_evidence_refs: list[str] = Field(default_factory=list)
+    created_at: str = Field(default_factory=utc_now_iso)
+
