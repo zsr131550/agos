@@ -1,4 +1,4 @@
-"""Register configured execution worker adapters at the CLI boundary."""
+﻿"""Register configured execution worker adapters at the CLI boundary."""
 from __future__ import annotations
 
 from agos.adapters.workers import (
@@ -21,7 +21,14 @@ def register_configured_worker_adapters(service: ExecutionService) -> None:
             service.register_worker_adapter(LocalWorktreeWorkerAdapter(service.workspace_manager))
         elif worker.type == "codex_cli":
             service.register_worker_adapter(
-                CodexWorkerAdapter(name=name, command=worker.command or "codex")
+                CodexWorkerAdapter(
+                    name=name,
+                    command=worker.command or "codex",
+                    timeout_seconds=worker.timeout_seconds,
+                    poll_interval_seconds=worker.poll_interval_seconds,
+                    artifact_globs=worker.artifact_globs,
+                    env=worker.env,
+                )
             )
         elif worker.type == "multica":
             service.register_worker_adapter(
@@ -29,6 +36,10 @@ def register_configured_worker_adapters(service: ExecutionService) -> None:
                     name=name,
                     multica_bin=worker.command or "multica",
                     agent=worker.agent or config.executor.agent,
+                    timeout_seconds=worker.timeout_seconds,
+                    poll_interval_seconds=worker.poll_interval_seconds,
+                    artifact_globs=worker.artifact_globs,
+                    env=worker.env,
                 )
             )
         elif worker.type == "openhands":
@@ -39,7 +50,12 @@ def register_configured_worker_adapters(service: ExecutionService) -> None:
                     name=name,
                     endpoint=worker.endpoint,
                     token=worker.token,
+                    timeout_seconds=worker.timeout_seconds,
+                    poll_interval_seconds=worker.poll_interval_seconds,
+                    artifact_globs=worker.artifact_globs,
+                    env=worker.env,
                 )
             )
         else:
             raise ValueError(f"unsupported worker adapter type: {worker.type}")
+

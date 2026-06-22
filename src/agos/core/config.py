@@ -1,4 +1,4 @@
-"""agos.yaml config model and gate resolution."""
+﻿"""agos.yaml config model and gate resolution."""
 from __future__ import annotations
 
 from pathlib import Path
@@ -47,6 +47,10 @@ class WorkerConfig(BaseModel):
     agent: str | None = None
     endpoint: str | None = None
     token: str | None = None
+    timeout_seconds: int = Field(default=30, ge=1)
+    poll_interval_seconds: int = Field(default=1, ge=1)
+    artifact_globs: list[str] = Field(default_factory=list)
+    env: dict[str, str] = Field(default_factory=dict)
 
 
 class ReviewerConfig(BaseModel):
@@ -151,3 +155,4 @@ def resolve_gates(
     if missing:
         raise KeyError(f"override gates not in workflow {workflow!r}: {missing}")
     return [by_id[gate_id].model_copy(deep=True) for gate_id in override]
+

@@ -1,4 +1,4 @@
-"""OpenHands HTTP execution worker adapter."""
+﻿"""OpenHands HTTP execution worker adapter."""
 from __future__ import annotations
 
 import json
@@ -31,11 +31,19 @@ class OpenHandsWorkerAdapter:
         token: str | None = None,
         name: str = "openhands",
         timeout: int = 30,
+        timeout_seconds: int | None = None,
+        poll_interval_seconds: int = 1,
+        artifact_globs: tuple[str, ...] | list[str] = (),
+        env: dict[str, str] | None = None,
     ) -> None:
         self.endpoint = endpoint.rstrip("/")
         self.token = token
         self.name = name
-        self.timeout = timeout
+        self.timeout_seconds = timeout if timeout_seconds is None else timeout_seconds
+        self.timeout = self.timeout_seconds
+        self.poll_interval_seconds = poll_interval_seconds
+        self.artifact_globs = tuple(artifact_globs)
+        self.env = dict(env or {})
         self._subtasks_by_run_id: dict[str, str] = {}
 
     def start(self, request: WorkerStartRequest) -> WorkerRun:
@@ -142,3 +150,4 @@ def _metadata(payload: dict[str, object]) -> dict[str, str]:
     if not isinstance(metadata, dict):
         return {}
     return {str(key): str(value) for key, value in metadata.items()}
+

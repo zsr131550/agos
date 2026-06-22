@@ -191,3 +191,104 @@ def test_fake_worker_adapter_lifecycle():
     assert adapter.poll(run.run_id, subtask_id="subtask-01").state == "completed"
     adapter.cancel(run.run_id)
     assert adapter.poll(run.run_id, subtask_id="subtask-01").state == "cancelled"
+
+
+def test_codex_worker_adapter_passes_timeout_and_env(monkeypatch, tmp_path):
+    from agos.adapters.workers.codex_cli import CodexWorkerAdapter
+    import agos.adapters.workers.codex_cli as codex_module
+
+    observed: list[dict[str, object]] = []
+
+    class FakeProc:
+        returncode = 0
+        stdout = '{"run_id": "codex-run-01"}'
+        stderr = ""
+
+    def fake_run(args, **kwargs):
+        del args
+        observed.append(kwargs)
+        return FakeProc()
+
+    monkeypatch.setattr(codex_module, "run_command", fake_run)
+
+    CodexWorkerAdapter(
+        command="codex",
+        timeout_seconds=99,
+        env={"AGOS_WORKER_MODE": "production"},
+    ).start(
+        WorkerStartRequest(
+            run_id="execution-run-01",
+            subtask_id="subtask-01",
+            prompt="Implement README change",
+            workspace_path=str(tmp_path),
+        )
+    )
+
+    assert observed[0]["timeout"] == 99
+    assert observed[0]["env"]["AGOS_WORKER_MODE"] == "production"
+
+
+def test_multica_worker_adapter_passes_timeout_and_env(monkeypatch):
+    from agos.adapters.workers.multica_worker import MulticaWorkerAdapter
+    import agos.adapters.workers.multica_worker as worker_module
+
+    observed: list[dict[str, object]] = []
+
+    class FakeProc:
+        def __init__(self, stdout: str) -> None:
+            self.returncode = 0
+            self.stdout = stdout
+            self.stderr = ""
+
+    def fake_run(args, **kwargs):
+        observed.append(kwargs)
+        if args[1:3] == ["issue", "create"]:
+            return FakeProc('{"identifier": "MUL-1"}')
+        if args[1:3] == ["issue", "runs"]:
+            return FakeProc('{"runs": [{"id": "multica-run-01", "status": "done"}]}')
+        raise AssertionError(args)
+
+    monkeypatch.setattr(worker_module, "run_command", fake_run)
+
+    MulticaWorkerAdapter(
+        multica_bin="multica",
+        agent="Lambda",
+        timeout_seconds=88,
+        env={"AGOS_WORKER_MODE": "production"},
+    ).start(
+        WorkerStartRequest(
+            run_id="execution-run-01",
+            subtask_id="subtask-01",
+            prompt="Do the work",
+            workspace_path="C:/workspace",
+        )
+    )
+
+    assert observed[0]["timeout"] == 88
+    assert observed[0]["env"]["AGOS_WORKER_MODE"] == "production"
+    assert observed[1]["timeout"] == 88
+
+
+def test_openhands_worker_adapter_passes_configured_timeout(monkeypatch, tmp_path):
+    from agos.adapters.workers.openhands import OpenHandsWorkerAdapter
+    import agos.adapters.workers.openhands as openhands_module
+
+    observed: list[int] = []
+
+    def fake_request(method: str, url: str, payload=None, timeout=30, headers=None):
+        del method, url, payload, headers
+        observed.append(timeout)
+        return {"run_id": "openhands-run-01"}
+
+    monkeypatch.setattr(openhands_module, "_json_request", fake_request)
+
+    OpenHandsWorkerAdapter(endpoint="http://openhands.local", timeout=77).start(
+        WorkerStartRequest(
+            run_id="execution-run-01",
+            subtask_id="subtask-01",
+            prompt="Do the work",
+            workspace_path=str(tmp_path),
+        )
+    )
+
+    assert observed == [77]

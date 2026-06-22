@@ -1,7 +1,8 @@
-"""Codex CLI execution worker adapter."""
+﻿"""Codex CLI execution worker adapter."""
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 from agos.core.command import run_command
@@ -26,9 +27,22 @@ STATE_MAP = {
 class CodexWorkerAdapter:
     """Run autonomous work through the `codex` CLI JSON boundary."""
 
-    def __init__(self, *, command: str = "codex", name: str = "codex") -> None:
+    def __init__(
+        self,
+        *,
+        command: str = "codex",
+        name: str = "codex",
+        timeout_seconds: int = 30,
+        poll_interval_seconds: int = 1,
+        artifact_globs: tuple[str, ...] | list[str] = (),
+        env: dict[str, str] | None = None,
+    ) -> None:
         self.command = command
         self.name = name
+        self.timeout_seconds = timeout_seconds
+        self.poll_interval_seconds = poll_interval_seconds
+        self.artifact_globs = tuple(artifact_globs)
+        self.env = dict(env or {})
         self._subtasks_by_run_id: dict[str, str] = {}
 
     def start(self, request: WorkerStartRequest) -> WorkerRun:
@@ -38,6 +52,8 @@ class CodexWorkerAdapter:
             capture_output=True,
             text=True,
             encoding="utf-8",
+            timeout=self.timeout_seconds,
+            env={**os.environ, **self.env},
         )
         _raise_on_failure(proc, "codex exec")
         payload = _load_json(proc.stdout)
@@ -57,6 +73,8 @@ class CodexWorkerAdapter:
             capture_output=True,
             text=True,
             encoding="utf-8",
+            timeout=self.timeout_seconds,
+            env={**os.environ, **self.env},
         )
         _raise_on_failure(proc, "codex status")
         payload = _load_json(proc.stdout)
@@ -69,6 +87,8 @@ class CodexWorkerAdapter:
             capture_output=True,
             text=True,
             encoding="utf-8",
+            timeout=self.timeout_seconds,
+            env={**os.environ, **self.env},
         )
         _raise_on_failure(proc, "codex cancel")
         payload = _load_json(proc.stdout)
@@ -120,3 +140,4 @@ def _metadata(payload: dict[str, object]) -> dict[str, str]:
     if not isinstance(metadata, dict):
         return {}
     return {str(key): str(value) for key, value in metadata.items()}
+

@@ -60,3 +60,37 @@ def test_register_configured_worker_adapters_defaults_to_local_worktree(tmp_repo
     register_configured_worker_adapters(service)
 
     assert service.worker_adapter_names() == ["local_worktree"]
+
+
+def test_worker_registry_passes_runtime_fields(tmp_repo):
+    paths = repo_paths(tmp_repo)
+    paths.agos_dir.mkdir(parents=True, exist_ok=True)
+    paths.agos_yaml.write_text(
+        yaml.safe_dump(
+            {
+                "executor": {"name": "multica", "agent": "Lambda"},
+                "workers": {
+                    "codex-prod": {
+                        "type": "codex_cli",
+                        "command": "codex",
+                        "timeout_seconds": 120,
+                        "poll_interval_seconds": 2,
+                        "artifact_globs": [".agos-worker/*.json"],
+                        "env": {"AGOS_WORKER_MODE": "production"},
+                    },
+                },
+                "workflows": {},
+            },
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+    service = ExecutionService(paths)
+
+    register_configured_worker_adapters(service)
+
+    adapter = service._worker_adapters["codex-prod"]
+    assert adapter.timeout_seconds == 120
+    assert adapter.poll_interval_seconds == 2
+    assert adapter.artifact_globs == (".agos-worker/*.json",)
+    assert adapter.env == {"AGOS_WORKER_MODE": "production"}
