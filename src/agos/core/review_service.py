@@ -72,6 +72,11 @@ class ReviewService:
         )
         return packet_ref, packet
 
+    def start_manual_review_packet(self, *, diff_kind: str) -> tuple[str, ReviewPacket]:
+        """Compatibility helper for orchestration-backed manual review flows."""
+
+        return self.create_packet(diff_kind=diff_kind)
+
     def ingest_findings(
         self,
         review_id: str,
