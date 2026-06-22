@@ -1,4 +1,4 @@
-# AGOS
+﻿# AGOS
 
 Executor-agnostic governance layer for AI coding agents. *Agent writes. AGOS verifies. CI enforces.*
 
@@ -52,6 +52,31 @@ backends:
 normalized run for a remote orchestrator, and `langgraph` can compile the same
 DAG when the optional LangGraph dependency is installed.
 
+### External Orchestrator Backend
+
+AGOS sends a versioned orchestration payload to a remote backend with an
+idempotency key equal to the AGOS run id:
+
+```json
+{
+  "schema_version": "agos.orchestration.v1",
+  "idempotency_key": "execution-run-01",
+  "spec": {
+    "run_id": "execution-run-01",
+    "task_id": "agos-01",
+    "backend": "external",
+    "nodes": []
+  }
+}
+```
+
+Required remote endpoints:
+
+- `POST /runs`
+- `GET /runs/{run_id}`
+- `POST /runs/{run_id}/cancel`
+- `GET /runs/{run_id}/artifacts`
+
 - The agent runs in multica's isolated workspace (`~/multica_workspaces/<per-task>/`), not in your repo.
 - `agos checkpoint` streams the agent's reported activity into an evidence ledger and records a governed-repo anchor (HEAD + status) at capture time. It does not claim the agent edited your working tree.
 - `agos ci --local` gates a human developer's commit/push only (advisory and bypassable with `--no-verify`). The agent's own commits never pass through these hooks. Agent output is gated server-side at the merge gate, which lands in v0.2.
@@ -61,3 +86,4 @@ DAG when the optional LangGraph dependency is installed.
 ## Trust model (v0.1 limitation)
 
 The ledger hash chain is tamper-evident, not tamper-proof. It detects accidental edits and naive agents that edit a record without recomputing its hash. A determined agent that rewrites the whole ledger and recomputes every hash is not defended against in v0.1; a real out-of-band trust anchor lands in v0.2.
+

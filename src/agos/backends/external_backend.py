@@ -1,9 +1,10 @@
-"""External orchestration backend shim."""
+﻿"""External orchestration backend shim."""
 from __future__ import annotations
 
 import json
 from copy import deepcopy
 from dataclasses import dataclass
+from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 from agos.core.orchestration.models import (
@@ -48,7 +49,7 @@ class ExternalBackend:
             response = self._request_json(
                 "POST",
                 f"{self.endpoint}/runs",
-                payload=spec.model_dump(mode="json"),
+                payload=_remote_payload(spec),
                 timeout=self.timeout,
                 headers=self._headers(),
             )
@@ -159,6 +160,16 @@ class ExternalBackend:
         }
 
 
+
+
+def _remote_payload(spec: OrchestrationRunSpec) -> dict[str, object]:
+    serialized = spec.model_dump(mode="json")
+    return {
+        **serialized,
+        "schema_version": "agos.orchestration.v1",
+        "idempotency_key": spec.run_id,
+        "spec": serialized,
+    }
 def _node_by_id(spec: OrchestrationRunSpec, node_id: str) -> NodeSpec:
     for node in spec.nodes:
         if node.id == node_id:
@@ -192,8 +203,19 @@ def _json_request(
         method=method,
         headers={"Content-Type": "application/json", **(headers or {})},
     )
-    with urlopen(request, timeout=timeout) as response:
-        data = response.read().decode("utf-8")
+    try:
+        with urlopen(request, timeout=timeout) as response:
+            data = response.read().decode("utf-8")
+    except HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace").strip()
+        message = f"HTTP {exc.code} {exc.reason}"
+        if detail:
+            message = f"{message}: {detail}"
+        raise RuntimeError(f"external orchestrator {method} {url} failed: {message}") from exc
+    except TimeoutError as exc:
+        raise RuntimeError(f"external orchestrator {method} {url} failed: timeout") from exc
+    except URLError as exc:
+        raise RuntimeError(f"external orchestrator {method} {url} failed: {exc.reason}") from exc
     if not data.strip():
         return {}
     loaded = json.loads(data)
@@ -244,3 +266,4 @@ def _string_dict(value: object) -> dict[str, str]:
     if not isinstance(value, dict):
         return {}
     return {str(key): str(item) for key, item in value.items()}
+

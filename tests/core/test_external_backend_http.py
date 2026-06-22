@@ -1,4 +1,7 @@
-from __future__ import annotations
+﻿from __future__ import annotations
+
+import io
+from urllib.error import HTTPError
 
 import pytest
 
@@ -45,6 +48,9 @@ def test_external_backend_submits_polls_cancels_and_collects():
     assert cancelled.state == "cancelled"
     assert calls[0][0] == "POST"
     assert calls[0][1] == "http://orchestrator.local/runs"
+    assert calls[0][2]["schema_version"] == "agos.orchestration.v1"
+    assert calls[0][2]["idempotency_key"] == "external-run-01"
+    assert calls[0][2]["spec"]["run_id"] == "external-run-01"
 
 
 def test_external_backend_rejects_unknown_remote_state():
@@ -67,3 +73,23 @@ def _spec() -> OrchestrationRunSpec:
         task_id="agos-01",
         nodes=[NodeSpec(id="worker-01", kind="worker", backend="external")],
     )
+
+
+
+def test_external_json_request_wraps_http_errors(monkeypatch):
+    import agos.backends.external_backend as module
+
+    def fail(request, timeout=30):
+        del request, timeout
+        raise HTTPError(
+            "http://orchestrator.local/runs",
+            503,
+            "Service Unavailable",
+            hdrs=None,
+            fp=io.BytesIO(b"temporarily down"),
+        )
+
+    monkeypatch.setattr(module, "urlopen", fail)
+
+    with pytest.raises(RuntimeError, match="HTTP 503 Service Unavailable: temporarily down"):
+        module._json_request("POST", "http://orchestrator.local/runs", payload={})
