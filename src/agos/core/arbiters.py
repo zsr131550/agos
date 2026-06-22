@@ -1,4 +1,4 @@
-"""Deterministic review arbitration helpers."""
+﻿"""Deterministic review arbitration helpers."""
 from __future__ import annotations
 
 from collections.abc import Iterable
@@ -83,6 +83,27 @@ class CandidateMergeDecision:
     dirty_paths: tuple[str, ...] = ()
 
 
+@dataclass(frozen=True)
+class MergeCandidateSnapshot:
+    candidate_id: str
+    patch_ref: str
+    patch_sha256: str
+    touched_paths: tuple[str, ...]
+    tests_passed: bool
+    review_open_blocking_count: int
+    accepted: bool
+    score: int = 0
+
+
+@dataclass(frozen=True)
+class CandidateBundleMergeDecision:
+    strategy: str
+    candidate_ids: tuple[str, ...]
+    reason: str
+    evidence_refs: tuple[str, ...] = ()
+    conflict_candidate_ids: tuple[str, ...] = ()
+
+
 class CandidateMergeArbiter:
     """Detect basic apply-time merge conflicts."""
 
@@ -109,6 +130,74 @@ class CandidateMergeArbiter:
             allowed=not dirty and not conflicts,
             conflict_candidate_ids=tuple(conflicts),
             dirty_paths=tuple(dirty),
+        )
+
+    def decide_bundle(
+        self,
+        candidates: list[MergeCandidateSnapshot],
+        *,
+        dirty_paths: Iterable[str],
+    ) -> CandidateBundleMergeDecision:
+        eligible = [
+            candidate
+            for candidate in candidates
+            if candidate.accepted
+            and candidate.tests_passed
+            and candidate.review_open_blocking_count == 0
+        ]
+        if not eligible:
+            return CandidateBundleMergeDecision(
+                strategy="manual_merge_required",
+                candidate_ids=(),
+                reason="No eligible accepted candidates with passing tests and clean reviews.",
+            )
+
+        dirty = {_normalize_path(path) for path in dirty_paths}
+        dirty_conflicts = [
+            candidate.candidate_id
+            for candidate in eligible
+            if dirty & {_normalize_path(path) for path in candidate.touched_paths}
+        ]
+        if dirty_conflicts:
+            return CandidateBundleMergeDecision(
+                strategy="manual_merge_required",
+                candidate_ids=tuple(candidate.candidate_id for candidate in eligible),
+                reason="Dirty governed repo paths overlap candidate patches.",
+                conflict_candidate_ids=tuple(dirty_conflicts),
+            )
+
+        touched_by: dict[str, str] = {}
+        conflicts: set[str] = set()
+        for candidate in eligible:
+            for path in candidate.touched_paths:
+                normalized = _normalize_path(path)
+                if normalized in touched_by:
+                    conflicts.update({touched_by[normalized], candidate.candidate_id})
+                touched_by[normalized] = candidate.candidate_id
+
+        if conflicts:
+            return CandidateBundleMergeDecision(
+                strategy="manual_merge_required",
+                candidate_ids=tuple(candidate.candidate_id for candidate in eligible),
+                reason="Candidate patches overlap and require manual merge.",
+                conflict_candidate_ids=tuple(sorted(conflicts)),
+            )
+
+        ordered_candidates = sorted(eligible, key=lambda item: (-item.score, item.candidate_id))
+        ordered_ids = tuple(candidate.candidate_id for candidate in ordered_candidates)
+        evidence_refs = tuple(candidate.patch_ref for candidate in ordered_candidates)
+        if len(ordered_ids) == 1:
+            return CandidateBundleMergeDecision(
+                strategy="single_candidate",
+                candidate_ids=ordered_ids,
+                reason="Exactly one eligible accepted candidate.",
+                evidence_refs=evidence_refs,
+            )
+        return CandidateBundleMergeDecision(
+            strategy="non_overlapping_bundle",
+            candidate_ids=ordered_ids,
+            reason="Eligible candidates touch disjoint paths and can be applied as a bundle.",
+            evidence_refs=evidence_refs,
         )
 
 
@@ -148,3 +237,5 @@ def _new_id(prefix: str) -> str:
 
 def _normalize_path(value: str) -> str:
     return value.replace("\\", "/").strip("/")
+
+

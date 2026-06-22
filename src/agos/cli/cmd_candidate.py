@@ -1,4 +1,4 @@
-"""`agos candidate` commands."""
+﻿"""`agos candidate` commands."""
 from __future__ import annotations
 
 import json
@@ -14,6 +14,7 @@ from agos.core.review import Finding
 
 
 candidate_app = typer.Typer(help="Inspect and manage execution candidates.")
+merge_app = typer.Typer(help="Decide and apply candidate bundles.")
 
 
 @candidate_app.command("list")
@@ -144,3 +145,32 @@ def candidate_apply_command(candidate_id: str) -> None:
         raise typer.Exit(code=1) from exc
 
     typer.echo(f"{candidate.id} applied")
+
+
+@merge_app.command("decide")
+def candidate_merge_decide_command(candidate_ids: list[str] = typer.Argument(None)) -> None:
+    try:
+        repo_root = find_initialized_repo_root()
+        paths = repo_paths(repo_root)
+        decision = ExecutionService(paths).decide_candidate_bundle(candidate_ids or None)
+    except Exception as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(code=1) from exc
+
+    typer.echo(f"{decision.id} {decision.strategy} {' '.join(decision.candidate_ids)}")
+
+
+@merge_app.command("apply")
+def candidate_merge_apply_command(bundle_decision_id: str) -> None:
+    try:
+        repo_root = find_initialized_repo_root()
+        paths = repo_paths(repo_root)
+        candidates = ExecutionService(paths).apply_candidate_bundle(bundle_decision_id)
+    except Exception as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(code=1) from exc
+
+    typer.echo("applied " + " ".join(candidate.id for candidate in candidates))
+
+
+candidate_app.add_typer(merge_app, name="merge")

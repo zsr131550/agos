@@ -1,4 +1,4 @@
-"""Execution orchestration service for isolated candidate patches."""
+﻿"""Execution orchestration service for isolated candidate patches."""
 from __future__ import annotations
 
 import subprocess
@@ -14,6 +14,7 @@ from agos.core.arbiters import (
     CandidateDecisionArbiter,
     CandidateDecisionSnapshot,
     CandidateMergeArbiter,
+    MergeCandidateSnapshot,
     ReviewDecisionArbiter,
     ReviewDecisionSnapshot,
 )
@@ -21,6 +22,7 @@ from agos.core.command import run_command
 from agos.core.config import load_config, resolve_gates
 from agos.core.execution import (
     ArbiterDecision,
+    CandidateBundleDecision,
     CandidatePatch,
     CandidateTestRun,
     DecisionValue,
@@ -470,6 +472,141 @@ class ExecutionService:
         )
         return applied
 
+    def decide_candidate_bundle(
+        self,
+        candidate_ids: list[str] | None = None,
+    ) -> CandidateBundleDecision:
+        _status, task = self._active_task()
+        candidates = self._bundle_candidates(candidate_ids)
+        snapshots = [self._merge_candidate_snapshot(candidate, task) for candidate in candidates]
+        decision = self.merge_arbiter.decide_bundle(
+            snapshots,
+            dirty_paths=_dirty_paths(self.paths.root),
+        )
+        stored = CandidateBundleDecision(
+            id=_new_id("bundle"),
+            strategy=decision.strategy,
+            candidate_ids=list(decision.candidate_ids),
+            reason=decision.reason,
+            evidence_refs=list(decision.evidence_refs),
+            conflict_candidate_ids=list(decision.conflict_candidate_ids),
+        )
+        decision_ref = self.store.write_bundle_decision(stored)
+        self._append_event(
+            {
+                "type": "candidate_bundle_decided",
+                "task_id": task.id,
+                "strategy": stored.strategy,
+                "candidate_ids": stored.candidate_ids,
+                "decision_ref": decision_ref,
+                "evidence_refs": stored.evidence_refs,
+                "conflict_candidate_ids": stored.conflict_candidate_ids,
+            }
+        )
+        return stored
+
+    def apply_candidate_bundle(self, decision_id: str) -> list[CandidatePatch]:
+        _status, task = self._active_task()
+        decision = self.store.read_bundle_decision(decision_id)
+        if decision.strategy == "manual_merge_required":
+            raise ValueError("manual merge required; bundle cannot be applied automatically")
+        candidates = [self._candidate_with_valid_patch(candidate_id) for candidate_id in decision.candidate_ids]
+        for candidate in candidates:
+            self._preflight_candidate_for_bundle_apply(candidate, task, candidates)
+        applied = [self.apply_candidate(candidate.id) for candidate in candidates]
+        self._append_event(
+            {
+                "type": "candidate_bundle_applied",
+                "task_id": task.id,
+                "bundle_decision_id": decision.id,
+                "candidate_ids": [candidate.id for candidate in applied],
+            }
+        )
+        return applied
+
+    def _bundle_candidates(self, candidate_ids: list[str] | None) -> list[CandidatePatch]:
+        if candidate_ids is None or not candidate_ids:
+            candidates = [
+                candidate
+                for candidate in self.store.read_candidates()
+                if candidate.status == "accepted"
+            ]
+        else:
+            candidates = [self.store.read_candidate(candidate_id) for candidate_id in candidate_ids]
+        if not candidates:
+            raise ValueError("candidate bundle requires at least one candidate")
+        return candidates
+
+    def _merge_candidate_snapshot(
+        self,
+        candidate: CandidatePatch,
+        task: Task,
+    ) -> MergeCandidateSnapshot:
+        patch_bytes = self._patch_bytes(candidate)
+        open_blocking_count = 1
+        try:
+            review, report = self._latest_completed_review_and_report(candidate)
+            self._assert_review_binding_current(candidate, review, report)
+            open_blocking_count = len(report.open_blocking_findings())
+        except ValueError:
+            open_blocking_count = 1
+        return MergeCandidateSnapshot(
+            candidate_id=candidate.id,
+            patch_ref=candidate.patch_ref,
+            patch_sha256=candidate.patch_sha256,
+            touched_paths=tuple(sorted(candidate_patch_paths(patch_bytes))),
+            tests_passed=self._candidate_tests_passed(candidate, task),
+            review_open_blocking_count=open_blocking_count,
+            accepted=candidate.status == "accepted",
+            score=len(candidate.test_refs),
+        )
+
+    def _preflight_candidate_for_bundle_apply(
+        self,
+        candidate: CandidatePatch,
+        task: Task,
+        bundle_candidates: list[CandidatePatch],
+    ) -> None:
+        if candidate.status != "accepted":
+            raise ValueError(f"candidate must be accepted before bundle apply: {candidate.id}")
+        subtask = self.store.read_subtask(candidate.subtask_id)
+        patch_bytes = self._patch_bytes(candidate)
+        self.workspace_manager.validate_patch_scope(patch_bytes, subtask.write_scope)
+        self._assert_candidate_tests_passed(candidate, task)
+        review, report = self._latest_completed_review_and_report(candidate)
+        self._assert_review_binding_current(candidate, review, report)
+        bundle_ids = {item.id for item in bundle_candidates}
+        merge_decision = self.merge_arbiter.decide(
+            candidate,
+            accepted_candidate_paths={
+                other.id: candidate_patch_paths(self._patch_bytes(other))
+                for other in self.store.read_candidates()
+                if other.id != candidate.id
+                and other.id not in bundle_ids
+                and other.status in {"accepted", "applied"}
+            },
+            dirty_paths=_dirty_paths(self.paths.root),
+            patch_paths=candidate_patch_paths(patch_bytes),
+        )
+        if not merge_decision.allowed:
+            if merge_decision.dirty_paths:
+                raise ValueError(
+                    "governed repo has dirty files in candidate scope: "
+                    f"{', '.join(merge_decision.dirty_paths)}"
+                )
+            if merge_decision.conflict_candidate_ids:
+                raise ValueError(
+                    "candidate conflicts with accepted/applied candidate: "
+                    f"{merge_decision.conflict_candidate_ids[0]}"
+                )
+        check = run_command(
+            ["git", "apply", "--check", "--binary", "-"],
+            cwd=self.paths.root,
+            input=patch_bytes,
+            capture_output=True,
+        )
+        if check.returncode != 0:
+            raise ValueError(f"candidate patch does not apply during bundle preflight: {candidate.id}")
     def _record_patch_applies(
         self,
         task_id: str,
@@ -800,3 +937,6 @@ def _decode(value: str | bytes | None) -> str:
     if isinstance(value, str):
         return value
     return value.decode("utf-8", errors="replace")
+
+
+
