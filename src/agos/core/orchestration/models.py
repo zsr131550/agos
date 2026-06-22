@@ -75,4 +75,25 @@ class OrchestrationRunSpec(BaseModel):
                     raise ValueError(f"unknown dependency {dependency!r} for node {node.id!r}")
                 if dependency == node.id:
                     raise ValueError(f"node {node.id!r} cannot depend on itself")
+        self._validate_dag()
         return self
+
+    def _validate_dag(self) -> None:
+        by_id = {node.id: node for node in self.nodes}
+        visiting: set[str] = set()
+        visited: set[str] = set()
+
+        def visit(node_id: str) -> None:
+            if node_id in visited:
+                return
+            if node_id in visiting:
+                raise ValueError(f"dependency cycle detected at node {node_id!r}")
+
+            visiting.add(node_id)
+            for dependency_id in by_id[node_id].depends_on:
+                visit(dependency_id)
+            visiting.remove(node_id)
+            visited.add(node_id)
+
+        for node in self.nodes:
+            visit(node.id)

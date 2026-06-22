@@ -25,16 +25,16 @@ class OrchestrationRegistry:
     arbiter_backends: dict[str, ArbiterBackend] = field(default_factory=dict)
 
     def register_orchestration(self, backend: OrchestrationBackend) -> None:
-        self.orchestration_backends[backend.name] = backend
+        self._register(backend, self.orchestration_backends, "orchestration backend")
 
     def register_worker(self, backend: WorkerBackend) -> None:
-        self.worker_backends[backend.name] = backend
+        self._register(backend, self.worker_backends, "worker backend")
 
     def register_reviewer(self, backend: ReviewerBackend) -> None:
-        self.reviewer_backends[backend.name] = backend
+        self._register(backend, self.reviewer_backends, "reviewer backend")
 
     def register_arbiter(self, backend: ArbiterBackend) -> None:
-        self.arbiter_backends[backend.name] = backend
+        self._register(backend, self.arbiter_backends, "arbiter backend")
 
     def resolve_orchestration(self, name: str) -> OrchestrationBackend:
         return self._resolve(name, self.orchestration_backends, "orchestration backend")
@@ -53,3 +53,9 @@ class OrchestrationRegistry:
             return registry[name]
         except KeyError as exc:
             raise RegistryResolutionError(f"missing {kind}: {name}") from exc
+
+    def _register(self, backend: object, registry: dict[str, object], kind: str) -> None:
+        name = getattr(backend, "name")
+        if name in registry:
+            raise RegistryResolutionError(f"duplicate {kind}: {name}")
+        registry[name] = backend
