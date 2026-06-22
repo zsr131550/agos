@@ -65,3 +65,31 @@ def _candidate(
         accepted=True,
         score=score,
     )
+
+
+def test_merge_arbiter_selects_ordered_patch_stack_for_serial_candidates():
+    decision = CandidateMergeArbiter().decide_bundle(
+        [
+            _candidate("candidate-a", ("README.md",), score=2),
+            _candidate("candidate-b", ("README.md",), score=1),
+        ],
+        dirty_paths=(),
+        dependency_order=("candidate-a", "candidate-b"),
+    )
+
+    assert decision.strategy == "ordered_patch_stack"
+    assert decision.candidate_ids == ("candidate-a", "candidate-b")
+
+
+def test_merge_arbiter_rejects_partial_dependency_order_for_overlapping_candidates():
+    decision = CandidateMergeArbiter().decide_bundle(
+        [
+            _candidate("candidate-a", ("README.md",), score=2),
+            _candidate("candidate-b", ("README.md",), score=1),
+        ],
+        dirty_paths=(),
+        dependency_order=("candidate-a",),
+    )
+
+    assert decision.strategy == "manual_merge_required"
+    assert decision.conflict_candidate_ids == ("candidate-a", "candidate-b")

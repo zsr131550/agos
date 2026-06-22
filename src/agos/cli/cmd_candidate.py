@@ -1,4 +1,4 @@
-﻿"""`agos candidate` commands."""
+"""`agos candidate` commands."""
 from __future__ import annotations
 
 import json
@@ -148,11 +148,21 @@ def candidate_apply_command(candidate_id: str) -> None:
 
 
 @merge_app.command("decide")
-def candidate_merge_decide_command(candidate_ids: list[str] = typer.Argument(None)) -> None:
+def candidate_merge_decide_command(
+    candidate_ids: list[str] = typer.Argument(None),
+    ordered: bool = typer.Option(
+        False,
+        "--ordered",
+        help="Treat candidate arguments as an explicit ordered patch stack.",
+    ),
+) -> None:
     try:
         repo_root = find_initialized_repo_root()
         paths = repo_paths(repo_root)
-        decision = ExecutionService(paths).decide_candidate_bundle(candidate_ids or None)
+        decision = ExecutionService(paths).decide_candidate_bundle(
+            candidate_ids or None,
+            dependency_order=candidate_ids if ordered else None,
+        )
     except Exception as exc:
         typer.echo(str(exc), err=True)
         raise typer.Exit(code=1) from exc

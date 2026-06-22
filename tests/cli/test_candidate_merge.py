@@ -1,6 +1,7 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import json
+import subprocess
 from pathlib import Path
 
 import yaml
@@ -158,3 +159,66 @@ def _plan_file(tmp_repo: Path) -> Path:
     )
     return path
 
+
+
+def test_candidate_merge_apply_ordered_patch_stack(monkeypatch, tmp_repo):
+    paths = _active_task(tmp_repo)
+    monkeypatch.chdir(tmp_repo)
+    (tmp_repo / "README.md").write_text(
+        "# t\nalpha\none\ntwo\nthree\nfour\nbeta\n",
+        encoding="utf-8",
+    )
+    subprocess.run(["git", "add", "README.md"], cwd=tmp_repo, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "expand readme"], cwd=tmp_repo, check=True)
+
+    plan = tmp_repo / "execution-plan-overlap.yaml"
+    plan.write_text(
+        yaml.safe_dump(
+            {
+                "id": "execution-plan-overlap",
+                "task_id": "agos-01",
+                "subtasks": [
+                    {
+                        "id": "subtask-readme-a",
+                        "title": "Update README A",
+                        "write_scope": ["README.md"],
+                        "worker": {"adapter": "local_worktree", "role": "worker_agent"},
+                    },
+                    {
+                        "id": "subtask-readme-b",
+                        "title": "Update README B",
+                        "depends_on": ["subtask-readme-a"],
+                        "write_scope": ["README.md"],
+                        "worker": {"adapter": "local_worktree", "role": "worker_agent"},
+                    },
+                ],
+            },
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+    assert runner.invoke(app, ["execute-plan", "--plan", str(plan)]).exit_code == 0
+
+    store = ExecutionStore(paths)
+    first_workspace = Path(store.read_workspace("subtask-readme-a").path)
+    second_workspace = Path(store.read_workspace("subtask-readme-b").path)
+    (first_workspace / "README.md").write_text("# t\nfirst\none\ntwo\nthree\nfour\nbeta\n", encoding="utf-8")
+    (second_workspace / "README.md").write_text("# t\nalpha\none\ntwo\nthree\nfour\nsecond\n", encoding="utf-8")
+
+    first = _accepted_candidate("subtask-readme-a", "Update README first", store)
+    second = _accepted_candidate("subtask-readme-b", "Update README second", store)
+
+    decide = runner.invoke(app, ["candidate", "merge", "decide", "--ordered", first, second])
+
+    assert decide.exit_code == 0
+    assert "ordered_patch_stack" in decide.stdout
+    bundle_id = decide.stdout.split()[0]
+
+    apply = runner.invoke(app, ["candidate", "merge", "apply", bundle_id])
+
+    assert apply.exit_code == 0
+    readme = (tmp_repo / "README.md").read_text(encoding="utf-8")
+    assert "first" in readme
+    assert "second" in readme
+    assert store.read_candidate(first).status == "applied"
+    assert store.read_candidate(second).status == "applied"

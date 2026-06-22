@@ -1,4 +1,4 @@
-﻿"""Execution orchestration models for isolated candidate patches."""
+"""Execution orchestration models for isolated candidate patches."""
 from __future__ import annotations
 
 from datetime import UTC, datetime
@@ -246,4 +246,15 @@ class CandidateBundleDecision(BaseModel):
         if self.strategy != "manual_merge_required" and not self.candidate_ids:
             raise ValueError("automatic bundle decisions require candidate_ids")
         return self
+
+
+class CandidateMergePreview(BaseModel):
+    id: str
+    decision_id: str
+    strategy: MergeStrategy
+    candidate_ids: list[str] = Field(default_factory=list)
+    state: Literal["passed", "failed"]
+    evidence_refs: list[str] = Field(default_factory=list)
+    conflict_evidence_refs: list[str] = Field(default_factory=list)
+    created_at: str = Field(default_factory=utc_now_iso)
 

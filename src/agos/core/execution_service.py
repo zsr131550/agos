@@ -1,11 +1,11 @@
-﻿"""Execution orchestration service for isolated candidate patches."""
+"""Execution orchestration service for isolated candidate patches."""
 from __future__ import annotations
 
 import subprocess
 import time
 from collections.abc import Iterable
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, Literal, cast
 from uuid import uuid4
 
 import yaml
@@ -23,6 +23,7 @@ from agos.core.config import load_config, resolve_gates
 from agos.core.execution import (
     ArbiterDecision,
     CandidateBundleDecision,
+    CandidateMergePreview,
     CandidatePatch,
     CandidateTestRun,
     DecisionValue,
@@ -475,6 +476,8 @@ class ExecutionService:
     def decide_candidate_bundle(
         self,
         candidate_ids: list[str] | None = None,
+        *,
+        dependency_order: list[str] | None = None,
     ) -> CandidateBundleDecision:
         _status, task = self._active_task()
         candidates = self._bundle_candidates(candidate_ids)
@@ -482,6 +485,7 @@ class ExecutionService:
         decision = self.merge_arbiter.decide_bundle(
             snapshots,
             dirty_paths=_dirty_paths(self.paths.root),
+            dependency_order=dependency_order or (),
         )
         stored = CandidateBundleDecision(
             id=_new_id("bundle"),
@@ -511,9 +515,18 @@ class ExecutionService:
         if decision.strategy == "manual_merge_required":
             raise ValueError("manual merge required; bundle cannot be applied automatically")
         candidates = [self._candidate_with_valid_patch(candidate_id) for candidate_id in decision.candidate_ids]
-        for candidate in candidates:
-            self._preflight_candidate_for_bundle_apply(candidate, task, candidates)
-        applied = [self.apply_candidate(candidate.id) for candidate in candidates]
+        if decision.strategy == "single_candidate":
+            applied = [self.apply_candidate(candidates[0].id)]
+        else:
+            patches = [(candidate, self._patch_bytes(candidate)) for candidate in candidates]
+            for candidate in candidates:
+                self._preflight_candidate_for_bundle_apply(candidate, task, candidates)
+            if decision.strategy == "ordered_patch_stack":
+                self._dry_run_candidate_stack(decision, task, patches)
+            applied = [
+                self._apply_candidate_patch_to_repo(task.id, candidate, patch_bytes)
+                for candidate, patch_bytes in patches
+            ]
         self._append_event(
             {
                 "type": "candidate_bundle_applied",
@@ -607,6 +620,167 @@ class ExecutionService:
         )
         if check.returncode != 0:
             raise ValueError(f"candidate patch does not apply during bundle preflight: {candidate.id}")
+
+    def _apply_candidate_patch_to_repo(
+        self,
+        task_id: str,
+        candidate: CandidatePatch,
+        patch_bytes: bytes,
+    ) -> CandidatePatch:
+        check = run_command(
+            ["git", "apply", "--check", "--binary", "-"],
+            cwd=self.paths.root,
+            input=patch_bytes,
+            capture_output=True,
+        )
+        if check.returncode != 0:
+            evidence_ref = self._write_apply_blocked_evidence(candidate, check)
+            self._append_event(
+                {
+                    "type": "candidate_apply_blocked",
+                    "task_id": task_id,
+                    "candidate_id": candidate.id,
+                    "evidence_ref": evidence_ref,
+                }
+            )
+            raise ValueError(f"candidate patch does not apply: {evidence_ref}")
+
+        run_command(
+            ["git", "apply", "--binary", "-"],
+            cwd=self.paths.root,
+            input=patch_bytes,
+            check=True,
+            capture_output=True,
+        )
+        applied = candidate.model_copy(update={"status": "applied"})
+        self.store.write_candidate(applied)
+        self._append_event(
+            {
+                "type": "candidate_applied",
+                "task_id": task_id,
+                "candidate_id": candidate.id,
+                "patch_ref": candidate.patch_ref,
+                "decision_ref": candidate.decision_ref,
+            }
+        )
+        return applied
+
+    def _dry_run_candidate_stack(
+        self,
+        decision: CandidateBundleDecision,
+        task: Task,
+        patches: list[tuple[CandidatePatch, bytes]],
+    ) -> str:
+        preview_id = _new_id("merge-preview")
+        log_dir = self.paths.evidence / "execution"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        log_name = f"{preview_id}.log"
+        log_path = log_dir / log_name
+        log_ref = f"execution/{log_name}"
+        evidence_refs = [log_ref]
+        conflict_evidence_refs: list[str] = []
+        lines = [
+            "command: ordered_patch_stack dry-run",
+            f"decision_id: {decision.id}",
+            "candidate_ids: " + ", ".join(candidate.id for candidate, _patch in patches),
+        ]
+        workspace: Path | None = None
+        state: Literal["passed", "failed"] = "passed"
+        failure: str | None = None
+        try:
+            workspace = self.workspace_manager._create_verification_workspace(preview_id)
+            lines.append(f"workspace: {workspace}")
+            for candidate, patch_bytes in patches:
+                check = run_command(
+                    ["git", "apply", "--check", "--binary", "-"],
+                    cwd=workspace,
+                    input=patch_bytes,
+                    capture_output=True,
+                )
+                lines.extend(_process_log_lines(f"check {candidate.id}", check))
+                if check.returncode != 0:
+                    state = "failed"
+                    conflict_evidence_refs.append(log_ref)
+                    failure = f"ordered patch stack dry-run failed for {candidate.id}: {log_ref}"
+                    break
+
+                applied = run_command(
+                    ["git", "apply", "--binary", "-"],
+                    cwd=workspace,
+                    input=patch_bytes,
+                    capture_output=True,
+                )
+                lines.extend(_process_log_lines(f"apply {candidate.id}", applied))
+                if applied.returncode != 0:
+                    state = "failed"
+                    conflict_evidence_refs.append(log_ref)
+                    failure = f"ordered patch stack apply failed for {candidate.id}: {log_ref}"
+                    break
+
+            if failure is None:
+                diff_proc = run_command(
+                    ["git", "diff", "--binary", "HEAD"],
+                    cwd=workspace,
+                    check=True,
+                    capture_output=True,
+                )
+                stack_diff = _decode(diff_proc.stdout)
+                for gate_spec in self._active_gates(task):
+                    result = build_gate(gate_spec).evaluate(
+                        GateContext(
+                            repo_root=workspace,
+                            stage="candidate",
+                            diff=stack_diff,
+                            evidence_dir=self.paths.evidence,
+                        )
+                    )
+                    gate_ref = _evidence_ref(self.paths.evidence, result.evidence_path)
+                    if gate_ref:
+                        evidence_refs.append(gate_ref)
+                    lines.append(f"gate {gate_spec.id}: {result.state} {gate_ref}")
+                    if result.state != "pass":
+                        state = "failed"
+                        conflict_evidence_refs.append(gate_ref or log_ref)
+                        failure = f"ordered patch stack gate failed for {gate_spec.id}: {gate_ref or log_ref}"
+                        break
+        except Exception as exc:
+            if failure is None:
+                state = "failed"
+                conflict_evidence_refs.append(log_ref)
+                failure = f"ordered patch stack dry-run errored: {exc}"
+            raise
+        finally:
+            if workspace is not None:
+                self.workspace_manager._remove_worktree(workspace)
+            lines.append(f"state: {state}")
+            if failure is not None:
+                lines.append(f"failure: {failure}")
+            log_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+            preview = CandidateMergePreview(
+                id=preview_id,
+                decision_id=decision.id,
+                strategy=decision.strategy,
+                candidate_ids=[candidate.id for candidate, _patch in patches],
+                state=state,
+                evidence_refs=evidence_refs,
+                conflict_evidence_refs=conflict_evidence_refs,
+            )
+            preview_ref = self.store.write_merge_preview(preview)
+            self._append_event(
+                {
+                    "type": "candidate_merge_preview_completed",
+                    "task_id": task.id,
+                    "bundle_decision_id": decision.id,
+                    "preview_ref": preview_ref,
+                    "state": state,
+                    "evidence_refs": evidence_refs,
+                    "conflict_evidence_refs": conflict_evidence_refs,
+                }
+            )
+        if failure is not None:
+            raise ValueError(failure)
+        return log_ref
+
     def _record_patch_applies(
         self,
         task_id: str,
@@ -941,6 +1115,15 @@ def _decode(value: str | bytes | None) -> str:
     if isinstance(value, str):
         return value
     return value.decode("utf-8", errors="replace")
+
+
+def _process_log_lines(label: str, proc: subprocess.CompletedProcess) -> list[str]:
+    return [
+        f"--- {label} ---",
+        f"exit_code: {proc.returncode}",
+        f"--- stdout ---\n{_decode(proc.stdout)}",
+        f"--- stderr ---\n{_decode(proc.stderr)}",
+    ]
 
 
 

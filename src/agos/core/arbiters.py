@@ -1,4 +1,4 @@
-﻿"""Deterministic review arbitration helpers."""
+"""Deterministic review arbitration helpers."""
 from __future__ import annotations
 
 from collections.abc import Iterable
@@ -137,6 +137,7 @@ class CandidateMergeArbiter:
         candidates: list[MergeCandidateSnapshot],
         *,
         dirty_paths: Iterable[str],
+        dependency_order: Iterable[str] = (),
     ) -> CandidateBundleMergeDecision:
         eligible = [
             candidate
@@ -175,12 +176,28 @@ class CandidateMergeArbiter:
                     conflicts.update({touched_by[normalized], candidate.candidate_id})
                 touched_by[normalized] = candidate.candidate_id
 
+        eligible_by_id = {candidate.candidate_id: candidate for candidate in eligible}
+        dependency_ids = tuple(candidate_id for candidate_id in dependency_order if candidate_id in eligible_by_id)
         if conflicts:
+            conflict_ids = tuple(sorted(conflicts))
+            if set(conflict_ids).issubset(set(dependency_ids)):
+                remaining = tuple(
+                    candidate.candidate_id
+                    for candidate in sorted(eligible, key=lambda item: (-item.score, item.candidate_id))
+                    if candidate.candidate_id not in dependency_ids
+                )
+                ordered_ids = dependency_ids + remaining
+                return CandidateBundleMergeDecision(
+                    strategy="ordered_patch_stack",
+                    candidate_ids=ordered_ids,
+                    reason="Eligible overlapping candidates have an explicit dependency order and require stack dry-run.",
+                    evidence_refs=tuple(eligible_by_id[candidate_id].patch_ref for candidate_id in ordered_ids),
+                )
             return CandidateBundleMergeDecision(
                 strategy="manual_merge_required",
                 candidate_ids=tuple(candidate.candidate_id for candidate in eligible),
                 reason="Candidate patches overlap and require manual merge.",
-                conflict_candidate_ids=tuple(sorted(conflicts)),
+                conflict_candidate_ids=conflict_ids,
             )
 
         ordered_candidates = sorted(eligible, key=lambda item: (-item.score, item.candidate_id))
@@ -199,7 +216,6 @@ class CandidateMergeArbiter:
             reason="Eligible candidates touch disjoint paths and can be applied as a bundle.",
             evidence_refs=evidence_refs,
         )
-
 
 @dataclass(frozen=True)
 class ReviewDecisionSnapshot:
@@ -237,5 +253,3 @@ def _new_id(prefix: str) -> str:
 
 def _normalize_path(value: str) -> str:
     return value.replace("\\", "/").strip("/")
-
-
