@@ -39,12 +39,23 @@ class ExecutorConfig(BaseModel):
     agent: str
 
 
+class WorkerConfig(BaseModel):
+    """One configured execution worker adapter."""
+
+    type: str
+    command: str | None = None
+    agent: str | None = None
+    endpoint: str | None = None
+    token: str | None = None
+
+
 class AGOSConfig(BaseModel):
     """Top-level `.agos/agos.yaml` structure."""
 
     executor: ExecutorConfig = Field(default_factory=ExecutorConfig)
     default_workflow: str = "feature"
     workflows: dict[str, WorkflowConfig] = Field(default_factory=dict)
+    workers: dict[str, WorkerConfig] = Field(default_factory=dict)
 
     @classmethod
     def default(

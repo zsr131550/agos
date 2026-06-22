@@ -77,6 +77,9 @@ class ExecutionService:
     def register_worker_adapter(self, adapter: ExecutionWorkerAdapter) -> None:
         self._worker_adapters[adapter.name] = adapter
 
+    def worker_adapter_names(self) -> list[str]:
+        return sorted(self._worker_adapters)
+
     def execute_plan(self, plan_path: Path) -> ExecutionPlan:
         status, task = self._active_task()
         del status
