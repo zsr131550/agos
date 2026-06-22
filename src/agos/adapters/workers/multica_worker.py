@@ -1,9 +1,10 @@
-﻿"""Multica CLI execution worker adapter."""
+"""Multica CLI execution worker adapter."""
 from __future__ import annotations
 
 import json
 import os
 
+from agos.adapters.workers.artifacts import collect_artifact_refs
 from agos.core.command import run_command
 from agos.core.execution_worker import WorkerRun, WorkerRunStatus, WorkerStartRequest
 
@@ -46,6 +47,7 @@ class MulticaWorkerAdapter:
         self.env = dict(env or {})
         self._issue_by_run_id: dict[str, str] = {}
         self._subtask_by_run_id: dict[str, str] = {}
+        self._workspaces_by_run_id: dict[str, str] = {}
 
     def start(self, request: WorkerStartRequest) -> WorkerRun:
         issue_proc = run_command(
@@ -82,6 +84,7 @@ class MulticaWorkerAdapter:
         run_id = str(first.get("id") or request.run_id)
         self._issue_by_run_id[run_id] = issue_id
         self._subtask_by_run_id[run_id] = request.subtask_id
+        self._workspaces_by_run_id[run_id] = request.workspace_path
         return WorkerRun(
             backend=self.name,
             run_id=run_id,
@@ -101,6 +104,10 @@ class MulticaWorkerAdapter:
             subtask_id=subtask_id,
             state=_state(current.get("status") if current else None, default="running"),
             detail=str(current.get("status")) if current and current.get("status") is not None else None,
+            output_refs=collect_artifact_refs(
+                self._workspaces_by_run_id.get(run_id),
+                self.artifact_globs,
+            ),
         )
 
     def cancel(self, run_id: str) -> WorkerRunStatus:

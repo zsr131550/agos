@@ -1,9 +1,10 @@
-﻿"""OpenHands HTTP execution worker adapter."""
+"""OpenHands HTTP execution worker adapter."""
 from __future__ import annotations
 
 import json
 from urllib.request import Request, urlopen
 
+from agos.adapters.workers.artifacts import collect_artifact_refs, merge_output_refs
 from agos.core.execution_worker import WorkerRun, WorkerRunStatus, WorkerStartRequest
 
 
@@ -45,6 +46,7 @@ class OpenHandsWorkerAdapter:
         self.artifact_globs = tuple(artifact_globs)
         self.env = dict(env or {})
         self._subtasks_by_run_id: dict[str, str] = {}
+        self._workspaces_by_run_id: dict[str, str] = {}
 
     def start(self, request: WorkerStartRequest) -> WorkerRun:
         payload = _json_request(
@@ -62,6 +64,7 @@ class OpenHandsWorkerAdapter:
         )
         run_id = str(payload.get("run_id") or payload.get("id") or request.run_id)
         self._subtasks_by_run_id[run_id] = request.subtask_id
+        self._workspaces_by_run_id[run_id] = request.workspace_path
         return WorkerRun(
             backend=self.name,
             run_id=run_id,
@@ -78,7 +81,13 @@ class OpenHandsWorkerAdapter:
             headers=self._headers(),
         )
         self._subtasks_by_run_id[run_id] = subtask_id
-        return _status(self.name, run_id, subtask_id, payload)
+        return _status(
+            self.name,
+            run_id,
+            subtask_id,
+            payload,
+            collect_artifact_refs(self._workspaces_by_run_id.get(run_id), self.artifact_globs),
+        )
 
     def cancel(self, run_id: str) -> WorkerRunStatus:
         payload = _json_request(
@@ -90,7 +99,13 @@ class OpenHandsWorkerAdapter:
         subtask_id = self._subtasks_by_run_id.get(run_id, str(payload.get("subtask_id", "unknown")))
         if "state" not in payload:
             payload["state"] = "cancelled"
-        return _status(self.name, run_id, subtask_id, payload)
+        return _status(
+            self.name,
+            run_id,
+            subtask_id,
+            payload,
+            collect_artifact_refs(self._workspaces_by_run_id.get(run_id), self.artifact_globs),
+        )
 
     def _headers(self) -> dict[str, str]:
         if not self.token:
@@ -131,6 +146,7 @@ def _status(
     run_id: str,
     subtask_id: str,
     payload: dict[str, object],
+    artifact_refs: list[str] | None = None,
 ) -> WorkerRunStatus:
     output_refs = payload.get("output_refs", [])
     if not isinstance(output_refs, list):
@@ -141,7 +157,7 @@ def _status(
         subtask_id=subtask_id,
         state=_state(payload.get("state"), default="running"),
         detail=str(payload["detail"]) if payload.get("detail") is not None else None,
-        output_refs=[str(ref) for ref in output_refs],
+        output_refs=merge_output_refs([str(ref) for ref in output_refs], artifact_refs or []),
     )
 
 

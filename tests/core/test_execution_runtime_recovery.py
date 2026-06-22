@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import json
 
@@ -78,6 +78,47 @@ def test_runtime_status_persists_snapshot_without_duplicate_start(tmp_path):
     assert snapshot.running_subtasks == ("subtask-a",)
     assert json.loads(status_path.read_text(encoding="utf-8"))["running_subtasks"] == ["subtask-a"]
 
+
+def test_runtime_retry_backoff_delays_restart(tmp_path):
+    worker = FlakyWorker()
+    runtime = ExecutionRuntime(
+        state_dir=tmp_path,
+        worker_adapters={"flaky": worker},
+        max_retries=1,
+        retry_backoff_seconds=60,
+    )
+
+    runtime.tick(_plan(), run_id="run-01")
+    failed = runtime.tick(_plan(), run_id="run-01")
+    delayed = runtime.tick(_plan(), run_id="run-01")
+
+    attempt = json.loads((tmp_path / "run-01" / "attempts" / "subtask-a.json").read_text())
+    assert failed.failed_subtasks == ("subtask-a",)
+    assert delayed.failed_subtasks == ("subtask-a",)
+    assert attempt["retry_after"] is not None
+    assert worker.starts == 1
+
+
+def test_runtime_times_out_running_attempt(tmp_path):
+    worker = FlakyWorker()
+    runtime = ExecutionRuntime(
+        state_dir=tmp_path,
+        worker_adapters={"flaky": worker},
+        worker_timeout_seconds=1,
+    )
+
+    runtime.tick(_plan(), run_id="run-01")
+    attempt_path = tmp_path / "run-01" / "attempts" / "subtask-a.json"
+    attempt = json.loads(attempt_path.read_text(encoding="utf-8"))
+    attempt["started_at"] = "2000-01-01T00:00:00Z"
+    attempt_path.write_text(json.dumps(attempt), encoding="utf-8")
+
+    timed_out = runtime.tick(_plan(), run_id="run-01")
+    updated = json.loads(attempt_path.read_text(encoding="utf-8"))
+
+    assert timed_out.failed_subtasks == ("subtask-a",)
+    assert updated["terminal_reason"] == "worker timed out after 1 seconds"
+    assert worker.polls == 0
 
 def _plan() -> ExecutionPlan:
     return ExecutionPlan(

@@ -1,8 +1,9 @@
-﻿"""Runtime scheduler for execution-plan worker attempts."""
+"""Runtime scheduler for execution-plan worker attempts."""
 from __future__ import annotations
 
 import json
 from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from pydantic import BaseModel, Field
@@ -59,13 +60,14 @@ class ExecutionRuntime:
         self.worker_timeout_seconds = worker_timeout_seconds
 
     def tick(self, plan: ExecutionPlan, *, run_id: str) -> ExecutionRuntimeSnapshot:
+        now = _utc_now()
         attempts = self._load_attempts(plan, run_id)
         retryable_failed = {
             subtask_id
             for subtask_id, attempt in attempts.items()
-            if _can_retry(attempt, self.max_retries)
+            if _can_retry(attempt, self.max_retries, now)
         }
-        attempts = self._poll_running(plan, run_id, attempts)
+        attempts = self._poll_running(plan, run_id, attempts, now=now)
         capacity = max(0, plan.max_parallel - _count_state(attempts, "running"))
 
         for subtask in _ready_subtasks(plan, attempts, retryable_failed=retryable_failed)[:capacity]:
@@ -110,10 +112,26 @@ class ExecutionRuntime:
         plan: ExecutionPlan,
         run_id: str,
         attempts: dict[str, WorkerAttempt],
+        *,
+        now: datetime,
     ) -> dict[str, WorkerAttempt]:
         for subtask in plan.subtasks:
             attempt = attempts.get(subtask.id)
             if attempt is None or attempt.state != "running":
+                continue
+            if _is_timed_out(attempt, self.worker_timeout_seconds, now):
+                detail = f"worker timed out after {self.worker_timeout_seconds} seconds"
+                updated = attempt.model_copy(
+                    update={
+                        "state": "failed",
+                        "detail": detail,
+                        "terminal_reason": detail,
+                        "retry_after": _retry_after(attempt, self.max_retries, self.retry_backoff_seconds, now),
+                        "updated_at": _isoformat(now),
+                    }
+                )
+                attempts[subtask.id] = updated
+                self._write_attempt(run_id, updated)
                 continue
             adapter = self.worker_adapters[attempt.adapter]
             status = adapter.poll(attempt.worker_run_id, subtask_id=subtask.id)
@@ -122,8 +140,11 @@ class ExecutionRuntime:
                     "state": status.state,
                     "detail": status.detail,
                     "output_refs": status.output_refs,
+                    "retry_after": _retry_after(attempt, self.max_retries, self.retry_backoff_seconds, now)
+                    if status.state == "failed"
+                    else None,
                     "terminal_reason": status.detail if status.state == "failed" else None,
-                    "updated_at": utc_now_iso(),
+                    "updated_at": _isoformat(now),
                 }
             )
             attempts[subtask.id] = updated
@@ -159,6 +180,7 @@ class ExecutionRuntime:
                 state=state,
                 attempts=attempts,
                 detail=str(exc),
+                retry_after=_retry_after_for_attempts(attempts, self.max_retries, self.retry_backoff_seconds, _utc_now()),
                 terminal_reason=str(exc),
             )
         return WorkerAttempt(
@@ -256,5 +278,54 @@ def _count_state(attempts: dict[str, WorkerAttempt], state: str) -> int:
     return sum(1 for attempt in attempts.values() if attempt.state == state)
 
 
-def _can_retry(attempt: WorkerAttempt, max_retries: int) -> bool:
-    return attempt.state == "failed" and attempt.attempts <= max_retries
+def _can_retry(attempt: WorkerAttempt, max_retries: int, now: datetime) -> bool:
+    if attempt.state != "failed" or attempt.attempts > max_retries:
+        return False
+    if attempt.retry_after is None:
+        return True
+    return _parse_isoformat(attempt.retry_after) <= now
+
+
+def _retry_after(
+    attempt: WorkerAttempt,
+    max_retries: int,
+    retry_backoff_seconds: int,
+    now: datetime,
+) -> str | None:
+    return _retry_after_for_attempts(attempt.attempts, max_retries, retry_backoff_seconds, now)
+
+
+def _retry_after_for_attempts(
+    attempts: int,
+    max_retries: int,
+    retry_backoff_seconds: int,
+    now: datetime,
+) -> str | None:
+    if attempts > max_retries:
+        return None
+    return _isoformat(now + timedelta(seconds=retry_backoff_seconds))
+
+
+def _is_timed_out(
+    attempt: WorkerAttempt,
+    worker_timeout_seconds: int | None,
+    now: datetime,
+) -> bool:
+    if worker_timeout_seconds is None:
+        return False
+    return now - _parse_isoformat(attempt.started_at) >= timedelta(seconds=worker_timeout_seconds)
+
+
+def _utc_now() -> datetime:
+    return datetime.now(UTC).replace(microsecond=0)
+
+
+def _isoformat(value: datetime) -> str:
+    return value.astimezone(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def _parse_isoformat(value: str) -> datetime:
+    parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC)

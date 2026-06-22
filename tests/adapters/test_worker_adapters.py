@@ -292,3 +292,119 @@ def test_openhands_worker_adapter_passes_configured_timeout(monkeypatch, tmp_pat
     )
 
     assert observed == [77]
+
+
+def test_codex_worker_adapter_collects_configured_artifacts(monkeypatch, tmp_path):
+    from agos.adapters.workers.codex_cli import CodexWorkerAdapter
+    import agos.adapters.workers.codex_cli as codex_module
+
+    artifact_dir = tmp_path / ".agos-worker"
+    artifact_dir.mkdir()
+    (artifact_dir / "result.json").write_text("{}", encoding="utf-8")
+
+    class FakeProc:
+        returncode = 0
+        stderr = ""
+
+        def __init__(self, stdout: str) -> None:
+            self.stdout = stdout
+
+    def fake_run(args, **kwargs):
+        del kwargs
+        if args[1] == "exec":
+            return FakeProc('{"run_id": "codex-run-01"}')
+        if args[1] == "status":
+            return FakeProc('{"state": "completed"}')
+        raise AssertionError(args)
+
+    monkeypatch.setattr(codex_module, "run_command", fake_run)
+    adapter = CodexWorkerAdapter(command="codex", artifact_globs=[".agos-worker/*.json"])
+
+    run = adapter.start(
+        WorkerStartRequest(
+            run_id="execution-run-01",
+            subtask_id="subtask-01",
+            prompt="Do the work",
+            workspace_path=str(tmp_path),
+        )
+    )
+    status = adapter.poll(run.run_id, subtask_id=run.subtask_id)
+
+    assert status.output_refs == [".agos-worker/result.json"]
+
+
+def test_multica_worker_adapter_collects_configured_artifacts(monkeypatch, tmp_path):
+    from agos.adapters.workers.multica_worker import MulticaWorkerAdapter
+    import agos.adapters.workers.multica_worker as worker_module
+
+    artifact_dir = tmp_path / ".agos-worker"
+    artifact_dir.mkdir()
+    (artifact_dir / "result.json").write_text("{}", encoding="utf-8")
+
+    class FakeProc:
+        def __init__(self, stdout: str) -> None:
+            self.returncode = 0
+            self.stdout = stdout
+            self.stderr = ""
+
+    def fake_run(args, **kwargs):
+        del kwargs
+        if args[1:3] == ["issue", "create"]:
+            return FakeProc('{"identifier": "MUL-1"}')
+        if args[1:3] == ["issue", "runs"]:
+            return FakeProc('{"runs": [{"id": "multica-run-01", "status": "done"}]}')
+        raise AssertionError(args)
+
+    monkeypatch.setattr(worker_module, "run_command", fake_run)
+    adapter = MulticaWorkerAdapter(
+        multica_bin="multica",
+        agent="Lambda",
+        artifact_globs=[".agos-worker/*.json"],
+    )
+
+    run = adapter.start(
+        WorkerStartRequest(
+            run_id="execution-run-01",
+            subtask_id="subtask-01",
+            prompt="Do the work",
+            workspace_path=str(tmp_path),
+        )
+    )
+    status = adapter.poll(run.run_id, subtask_id=run.subtask_id)
+
+    assert status.output_refs == [".agos-worker/result.json"]
+
+
+def test_openhands_worker_adapter_collects_configured_artifacts(monkeypatch, tmp_path):
+    from agos.adapters.workers.openhands import OpenHandsWorkerAdapter
+    import agos.adapters.workers.openhands as openhands_module
+
+    artifact_dir = tmp_path / ".agos-worker"
+    artifact_dir.mkdir()
+    (artifact_dir / "result.json").write_text("{}", encoding="utf-8")
+
+    def fake_request(method: str, url: str, payload=None, timeout=30, headers=None):
+        del payload, timeout, headers
+        if method == "POST" and url.endswith("/runs"):
+            return {"run_id": "openhands-run-01"}
+        if method == "GET" and url.endswith("/runs/openhands-run-01"):
+            return {"state": "completed"}
+        raise HTTPError(url, 404, "not found", hdrs=None, fp=None)
+
+    monkeypatch.setattr(openhands_module, "_json_request", fake_request)
+    adapter = OpenHandsWorkerAdapter(
+        endpoint="http://openhands.local",
+        artifact_globs=[".agos-worker/*.json"],
+    )
+
+    run = adapter.start(
+        WorkerStartRequest(
+            run_id="execution-run-01",
+            subtask_id="subtask-01",
+            prompt="Do the work",
+            workspace_path=str(tmp_path),
+        )
+    )
+    status = adapter.poll(run.run_id, subtask_id=run.subtask_id)
+
+    assert status.output_refs == [".agos-worker/result.json"]
