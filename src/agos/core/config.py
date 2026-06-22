@@ -49,6 +49,15 @@ class WorkerConfig(BaseModel):
     token: str | None = None
 
 
+class ReviewerConfig(BaseModel):
+    """One configured review adapter."""
+
+    type: str
+    role: str
+    required: bool = True
+    command: str | None = None
+
+
 class AGOSConfig(BaseModel):
     """Top-level `.agos/agos.yaml` structure."""
 
@@ -56,6 +65,7 @@ class AGOSConfig(BaseModel):
     default_workflow: str = "feature"
     workflows: dict[str, WorkflowConfig] = Field(default_factory=dict)
     workers: dict[str, WorkerConfig] = Field(default_factory=dict)
+    reviewers: dict[str, ReviewerConfig] = Field(default_factory=dict)
 
     @classmethod
     def default(
