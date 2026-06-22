@@ -31,6 +31,7 @@ from agos.core.execution import (
     utc_now_iso,
 )
 from agos.core.execution_orchestration import ExecutionOrchestrator
+from agos.core.execution_runtime import ExecutionRuntime, ExecutionRuntimeSnapshot
 from agos.core.execution_store import ExecutionStore
 from agos.core.execution_worker import (
     ExecutionWorkerAdapter,
@@ -79,6 +80,28 @@ class ExecutionService:
 
     def worker_adapter_names(self) -> list[str]:
         return sorted(self._worker_adapters)
+
+    def start_execution_run(
+        self,
+        plan_path: Path,
+        *,
+        run_id: str | None = None,
+    ) -> ExecutionRuntimeSnapshot:
+        plan = self.execute_plan(plan_path)
+        execution_run_id = run_id or _new_id("execution-run")
+        return self._execution_runtime(plan).tick(plan, run_id=execution_run_id)
+
+    def resume_execution_run(self, run_id: str) -> ExecutionRuntimeSnapshot:
+        plan = self.store.read_plan()
+        return self._execution_runtime(plan).tick(plan, run_id=run_id)
+
+    def status_execution_run(self, run_id: str) -> ExecutionRuntimeSnapshot:
+        plan = self.store.read_plan()
+        return self._execution_runtime(plan).status(plan, run_id=run_id)
+
+    def cancel_execution_run(self, run_id: str) -> ExecutionRuntimeSnapshot:
+        plan = self.store.read_plan()
+        return self._execution_runtime(plan).cancel(plan, run_id=run_id)
 
     def execute_plan(self, plan_path: Path) -> ExecutionPlan:
         status, task = self._active_task()
@@ -694,6 +717,17 @@ class ExecutionService:
         if adapter_name not in self._worker_adapters:
             raise ValueError(f"unsupported worker adapter: {adapter_name}")
         return self._worker_adapters[adapter_name]
+
+    def _execution_runtime(self, plan: ExecutionPlan) -> ExecutionRuntime:
+        return ExecutionRuntime(
+            state_dir=self.paths.current_task / "execution" / "runs",
+            worker_adapters=self._worker_adapters,
+            workspace_paths={
+                subtask.id: self.store.read_workspace(subtask.id).path
+                for subtask in plan.subtasks
+                if subtask.workspace_ref is not None
+            },
+        )
 
 
 def _workspace_binding(prepared: object) -> WorkspaceBinding:

@@ -135,6 +135,10 @@ def test_save_node_state_persists_json_payload(tmp_path):
         "node_id": "manual-review",
         "state": "waiting",
         "attempts": 1,
+        "backend": None,
+        "job_id": None,
+        "started_at": None,
+        "updated_at": None,
         "output_refs": {"raw": "reviews/review-01/raw/manual.json"},
         "error": None,
     }

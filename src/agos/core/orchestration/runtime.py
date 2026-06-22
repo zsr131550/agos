@@ -12,6 +12,10 @@ class PersistedNodeState(BaseModel):
     node_id: str
     state: str
     attempts: int = 0
+    backend: str | None = None
+    job_id: str | None = None
+    started_at: str | None = None
+    updated_at: str | None = None
     output_refs: dict[str, str] = Field(default_factory=dict)
     error: str | None = None
 
