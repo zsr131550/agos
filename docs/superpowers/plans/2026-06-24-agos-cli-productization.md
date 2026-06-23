@@ -33,36 +33,36 @@
 
 ## Task 1: Config CLI
 
-- [ ] Write failing tests for `agos config show --json`, `agos config validate`, and invalid config handling.
-- [ ] Implement `cmd_config.py` using `find_initialized_repo_root()` and `AGOSConfig.load()`.
-- [ ] Register `config_app` in `main.py`.
-- [ ] Run `python -m pytest tests/cli/test_config.py -q`.
+- [x] Write failing tests for `agos config show --json`, `agos config validate`, and invalid config handling.
+- [x] Implement `cmd_config.py` using `find_initialized_repo_root()` and `AGOSConfig.load()`.
+- [x] Register `config_app` in `main.py`.
+- [x] Run `python -m pytest tests/cli/test_config.py -q`.
 
 ## Task 2: Status CLI
 
-- [ ] Write failing tests for `agos status --json` in initialized and uninitialized git repos.
-- [ ] Implement `cmd_status.py` using `find_repo_root()`, `repo_paths()`, and `load_status()`.
-- [ ] Register `status_command` in `main.py`.
-- [ ] Run `python -m pytest tests/cli/test_status_command.py -q`.
+- [x] Write failing tests for `agos status --json` in initialized and uninitialized git repos.
+- [x] Implement `cmd_status.py` using `find_repo_root()`, `repo_paths()`, and `load_status()`.
+- [x] Register `status_command` in `main.py`.
+- [x] Run `python -m pytest tests/cli/test_status_command.py -q`.
 
 ## Task 3: Doctor CLI
 
-- [ ] Write failing tests for `agos doctor --json` healthy config and invalid config failures.
-- [ ] Implement `cmd_doctor.py` with deterministic check payloads and nonzero exit when required checks fail.
-- [ ] Register `doctor_command` in `main.py`.
-- [ ] Run `python -m pytest tests/cli/test_doctor.py -q`.
+- [x] Write failing tests for `agos doctor --json` healthy config and invalid config failures.
+- [x] Implement `cmd_doctor.py` with deterministic check payloads and nonzero exit when required checks fail.
+- [x] Register `doctor_command` in `main.py`.
+- [x] Run `python -m pytest tests/cli/test_doctor.py -q`.
 
 ## Task 4: Run Alias
 
-- [ ] Add a failing test proving `agos run status <run-id> --json` returns the same runtime snapshot shape as `agos execute-plan status`.
-- [ ] Register `execute_plan_app` a second time under `run` while preserving `execute-plan`.
-- [ ] Run `python -m pytest tests/cli/test_execute_plan_runtime.py -q`.
+- [x] Add a failing test proving `agos run status <run-id> --json` returns the same runtime snapshot shape as `agos execute-plan status`.
+- [x] Register product-facing `run_app` with `start/status/resume/cancel` while preserving `execute-plan`.
+- [x] Run `python -m pytest tests/cli/test_execute_plan_runtime.py -q`.
 
 ## Task 5: Documentation And Verification
 
-- [ ] Update `README.md` with `agos doctor`, `agos config`, `agos status`, and `agos run`.
-- [ ] Run `python -m pytest tests/cli/test_config.py tests/cli/test_status_command.py tests/cli/test_doctor.py tests/cli/test_execute_plan_runtime.py -q`.
-- [ ] Run full verification:
+- [x] Update `README.md` with `agos doctor`, `agos config`, `agos status`, and `agos run`.
+- [x] Run `python -m pytest tests/cli/test_config.py tests/cli/test_status_command.py tests/cli/test_doctor.py tests/cli/test_execute_plan_runtime.py -q`.
+- [x] Run full verification:
   - `python -m pytest -q`
   - `python -m pytest --cov=agos --cov-report=term-missing -q`
   - `python -m ruff check src tests`
