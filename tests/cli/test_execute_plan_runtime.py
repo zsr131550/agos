@@ -153,6 +153,33 @@ def test_run_start_alias_starts_execution_runtime(monkeypatch, tmp_repo):
     assert payload["completed_subtasks"] == ["subtask-readme"]
 
 
+def test_run_alias_callback_executes_plan(monkeypatch, tmp_repo):
+    _active_task(tmp_repo)
+    monkeypatch.chdir(tmp_repo)
+
+    result = runner.invoke(app, ["run", "--plan", str(_plan_file(tmp_repo))])
+
+    assert result.exit_code == 0, result.stderr
+    assert result.stdout.strip() == "execution-plan-01"
+
+
+def test_run_alias_resume_and_cancel_execution_runtime(monkeypatch, tmp_repo):
+    _active_task(tmp_repo)
+    monkeypatch.chdir(tmp_repo)
+
+    started = runner.invoke(app, ["run", "start", "--plan", str(_plan_file(tmp_repo)), "--json"])
+    assert started.exit_code == 0, started.stderr
+    run_id = json.loads(started.stdout)["run_id"]
+
+    resumed = runner.invoke(app, ["run", "resume", run_id, "--json"])
+    cancelled = runner.invoke(app, ["run", "cancel", run_id, "--json"])
+
+    assert resumed.exit_code == 0, resumed.stderr
+    assert cancelled.exit_code == 0, cancelled.stderr
+    assert json.loads(resumed.stdout)["run_id"] == run_id
+    assert json.loads(cancelled.stdout)["run_id"] == run_id
+
+
 def _active_task(tmp_repo: Path, *, orchestration: dict[str, object] | None = None):
     paths = repo_paths(tmp_repo)
     paths.agos_dir.mkdir(parents=True, exist_ok=True)
