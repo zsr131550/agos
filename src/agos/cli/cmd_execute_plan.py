@@ -17,6 +17,10 @@ execute_plan_app = typer.Typer(
     help="Create workspaces and run execution-plan workers.",
     invoke_without_command=True,
 )
+run_app = typer.Typer(
+    help="Run and inspect execution-plan workers.",
+    invoke_without_command=True,
+)
 
 
 @execute_plan_app.callback(invoke_without_command=True)
@@ -139,3 +143,11 @@ def _snapshot_json(snapshot: ExecutionRuntimeSnapshot) -> str:
 
 def _join(values: tuple[str, ...]) -> str:
     return ", ".join(values) if values else "-"
+
+
+run_app.callback(invoke_without_command=True)(execute_plan_command)
+run_app.command("start")(execute_plan_run_command)
+run_app.command("run")(execute_plan_run_command)
+run_app.command("resume")(execute_plan_resume_command)
+run_app.command("status")(execute_plan_status_command)
+run_app.command("cancel")(execute_plan_cancel_command)

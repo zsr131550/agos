@@ -10,15 +10,23 @@ v0.1 ships the local advisory gate + hash-chained ledger + evidence plumbing. Se
 pip install -e ".[dev]"
 ```
 
-## Commands (v0.3 execution)
+## Commands (current CLI)
 
 ```
 agos init [--executor multica] [--agent "Lambda"]
+agos doctor [--json]
+agos config show [--json]
+agos config validate [--json]
+agos status [--json]
 agos start --title "..." [--intent "..."] [--workflow feature] [--gate tests_pass,...]
 agos checkpoint [--follow] [--once]
 agos review --packet-only
 agos review --ingest findings.json --review-id review-...
-agos execute-plan --plan execution-plan.yaml
+agos run --plan execution-plan.yaml
+agos run start --plan execution-plan.yaml [--json]
+agos run status <run-id> [--json]
+agos run resume <run-id> [--json]
+agos run cancel <run-id> [--json]
 agos candidate list
 agos candidate submit <subtask-id> [--summary "..."]
 agos candidate test <candidate-id> [--gate tests_pass]
@@ -31,6 +39,39 @@ agos closeout
 agos ci --local --stage <pre-commit|pre-push>
 agos task status
 agos task clear --force
+agos worker doctor [--worker <name>] [--json]
+```
+
+`agos execute-plan ...` remains available as the compatibility name for `agos run ...`.
+`agos run run ...` is also accepted as a compatibility alias for `agos run start ...`.
+
+## Quickstart Loops
+
+Check a repository before doing work:
+
+```bash
+agos doctor
+agos config validate
+agos status
+```
+
+Run the local governance loop:
+
+```bash
+agos init --agent "Lambda"
+agos start --title "Implement feature"
+agos checkpoint --once
+agos ci --local --stage pre-commit
+agos closeout
+```
+
+Run the multi-agent execution loop:
+
+```bash
+agos run start --plan execution-plan.yaml --json
+agos run status <run-id> --json
+agos candidate list
+agos candidate merge preview
 ```
 
 ## The v0.1 loop
@@ -91,10 +132,10 @@ orchestration:
 Runtime commands can be read by humans or tools:
 
 ```bash
-agos execute-plan run --plan plan.json --json
-agos execute-plan status <run-id> --json
-agos execute-plan resume <run-id> --json
-agos execute-plan cancel <run-id> --json
+agos run start --plan plan.json --json
+agos run status <run-id> --json
+agos run resume <run-id> --json
+agos run cancel <run-id> --json
 ```
 
 ### Merge Strategies

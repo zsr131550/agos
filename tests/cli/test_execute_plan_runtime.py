@@ -140,6 +140,19 @@ def test_run_alias_reads_execution_runtime_status(monkeypatch, tmp_repo):
     assert payload["completed_subtasks"] == ["subtask-readme"]
 
 
+def test_run_start_alias_starts_execution_runtime(monkeypatch, tmp_repo):
+    _active_task(tmp_repo)
+    monkeypatch.chdir(tmp_repo)
+
+    result = runner.invoke(app, ["run", "start", "--plan", str(_plan_file(tmp_repo)), "--json"])
+
+    assert result.exit_code == 0, result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["run_id"].startswith("execution-run-")
+    assert payload["backend"] == "native_async"
+    assert payload["completed_subtasks"] == ["subtask-readme"]
+
+
 def _active_task(tmp_repo: Path, *, orchestration: dict[str, object] | None = None):
     paths = repo_paths(tmp_repo)
     paths.agos_dir.mkdir(parents=True, exist_ok=True)
