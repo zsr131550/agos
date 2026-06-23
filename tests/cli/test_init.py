@@ -78,6 +78,46 @@ def test_discover_local_agents_includes_multica_codex_and_claude(monkeypatch):
     assert candidates[2].worker_config == {"type": "claude_code", "command": "claude.cmd"}
 
 
+def test_plan_workers_for_goal_uses_local_executor_json_plan(monkeypatch):
+    import agos.cli.cmd_init as cmd_init
+
+    codex = cmd_init.LocalAgentCandidate(
+        key="codex:codex",
+        provider="codex",
+        name="codex",
+        display_name="codex:codex",
+        executor_name="codex_cli",
+        executor_agent="codex",
+        command="codex.cmd",
+        worker_name="codex",
+        worker_config={"type": "codex_cli", "command": "codex.cmd"},
+    )
+    claude = cmd_init.LocalAgentCandidate(
+        key="claude:claude",
+        provider="claude",
+        name="claude",
+        display_name="claude:claude",
+        executor_name="claude_code",
+        executor_agent="claude",
+        command="claude.cmd",
+        worker_name="claude",
+        worker_config={"type": "claude_code", "command": "claude.cmd"},
+    )
+
+    def fake_run_command(args, **kwargs):
+        assert args[:3] == ["codex.cmd", "exec", "--json"]
+        assert "Build interactive init" in args[3]
+        assert "claude:claude" in args[3]
+        assert kwargs["timeout"] == 60
+        return _Proc(stdout='{"workers": ["claude:claude"]}')
+
+    monkeypatch.setattr(cmd_init, "run_command", fake_run_command)
+
+    planned = cmd_init.plan_workers_for_goal(codex, "Build interactive init", [codex, claude])
+
+    assert planned == [claude]
+
+
 def test_discover_multica_agents_rejects_invalid_json(monkeypatch):
     import agos.cli.cmd_init as cmd_init
 
@@ -146,7 +186,9 @@ def test_init_lists_discovered_agents_and_requires_explicit_choice(monkeypatch, 
     assert not (tmp_repo / ".agos" / "agos.yaml").exists()
 
 
-def test_init_interactively_selects_executor_and_workers(monkeypatch, tmp_repo):
+def test_init_interactively_prompts_title_plans_workers_and_auto_starts(monkeypatch, tmp_repo):
+    import agos.cli.cmd_init as cmd_init
+
     monkeypatch.chdir(tmp_repo)
     monkeypatch.setattr("agos.cli.cmd_init.validate_executor_environment", lambda _executor: [])
     monkeypatch.setattr("agos.cli.cmd_init.discover_multica_agents", lambda: ["Lambda"])
@@ -154,8 +196,29 @@ def test_init_interactively_selects_executor_and_workers(monkeypatch, tmp_repo):
         "agos.cli.cmd_init._resolve_cli_command",
         lambda command: {"codex": "codex.cmd", "claude": "claude.cmd"}.get(command),
     )
+    monkeypatch.setattr(
+        "agos.cli.executor_registry.CodexCliExecutorAdapter.start",
+        lambda self, task: type("Run", (), {"adapter": "codex_cli", "run_id": "codex-run-1", "issue_id": None})(),
+    )
+    monkeypatch.setattr("agos.cli.cmd_init.run_init_health_checks", lambda _config, _repo_root: [], raising=False)
 
-    result = runner.invoke(app, ["init"], input="2\n2,3\n")
+    def planner(
+        selected_agent: cmd_init.LocalAgentCandidate,
+        title: str,
+        candidates: list[cmd_init.LocalAgentCandidate],
+    ) -> list[cmd_init.LocalAgentCandidate]:
+        assert selected_agent.key == "codex:codex"
+        assert title == "Build interactive init"
+        assert [candidate.key for candidate in candidates] == [
+            "multica:Lambda",
+            "codex:codex",
+            "claude:claude",
+        ]
+        return [candidates[1], candidates[2]]
+
+    monkeypatch.setattr("agos.cli.cmd_init.plan_workers_for_goal", planner, raising=False)
+
+    result = runner.invoke(app, ["init"], input="2\nBuild interactive init\n")
 
     assert result.exit_code == 0, result.stderr
     config = yaml.safe_load((tmp_repo / ".agos" / "agos.yaml").read_text(encoding="utf-8"))
@@ -164,6 +227,44 @@ def test_init_interactively_selects_executor_and_workers(monkeypatch, tmp_repo):
         "codex": {"type": "codex_cli", "command": "codex.cmd"},
         "claude": {"type": "claude_code", "command": "claude.cmd"},
     }
+    task = yaml.safe_load((tmp_repo / ".agos" / "tasks" / "current" / "task.yaml").read_text(encoding="utf-8"))
+    assert task["title"] == "Build interactive init"
+    assert task["intent"] == ""
+    assert task["executor"] == {"adapter": "codex_cli", "agent": "codex"}
+    status = json.loads((tmp_repo / ".agos" / "tasks" / "current" / "status.json").read_text(encoding="utf-8"))
+    assert status["executor_run"]["run_id"] == "codex-run-1"
+
+
+def test_init_auto_run_stops_when_health_check_fails(monkeypatch, tmp_repo):
+    monkeypatch.chdir(tmp_repo)
+    monkeypatch.setattr("agos.cli.cmd_init.validate_executor_environment", lambda _executor: [])
+    monkeypatch.setattr("agos.cli.cmd_init.discover_multica_agents", lambda: ["Lambda"])
+    monkeypatch.setattr(
+        "agos.cli.cmd_init._resolve_cli_command",
+        lambda command: {"codex": "codex.cmd"}.get(command),
+    )
+    monkeypatch.setattr(
+        "agos.cli.cmd_init.plan_workers_for_goal",
+        lambda _selected, _title, candidates: [candidate for candidate in candidates if candidate.key == "codex:codex"],
+        raising=False,
+    )
+    monkeypatch.setattr(
+        "agos.cli.cmd_init.run_init_health_checks",
+        lambda _config, _repo_root: ["worker codex is not ready: command_available failed"],
+        raising=False,
+    )
+    monkeypatch.setattr(
+        "agos.cli.executor_registry.CodexCliExecutorAdapter.start",
+        lambda self, task: (_ for _ in ()).throw(AssertionError("auto start should not run")),
+    )
+
+    result = runner.invoke(app, ["init"], input="2\nBuild interactive init\n")
+
+    assert result.exit_code == 1
+    assert "Health check failed" in result.stderr
+    assert "worker codex is not ready" in result.stderr
+    assert (tmp_repo / ".agos" / "agos.yaml").exists()
+    assert not (tmp_repo / ".agos" / "tasks" / "current" / "task.yaml").exists()
 
 
 def test_init_fails_when_agent_discovery_returns_no_candidates(monkeypatch, tmp_repo):

@@ -12,10 +12,12 @@ from pathlib import Path
 import typer
 
 from agos.adapters.multica import resolve_multica_bin
+from agos.cli.worker_registry import register_configured_worker_adapters
 from agos.core.command import run_command
 from agos.core.config import AGOSConfig, ExecutorConfig, WorkerConfig
+from agos.core.execution_service import ExecutionService
 from agos.core.ledger import append_repo_record
-from agos.core.repo import agos_dir, config_path, find_repo_root, repo_ledger_path
+from agos.core.repo import agos_dir, config_path, find_repo_root, repo_ledger_path, repo_paths
 
 
 class InitAgentResolutionError(Exception):
@@ -196,21 +198,160 @@ def resolve_init_agent(agent: str | None) -> LocalAgentCandidate:
     )
 
 
-def _select_interactive_agents(
+def _select_interactive_executor(
     candidates: list[LocalAgentCandidate],
-) -> tuple[LocalAgentCandidate, list[LocalAgentCandidate]]:
+) -> LocalAgentCandidate:
     typer.echo("Available local agents:")
     for index, candidate in enumerate(candidates, start=1):
         typer.echo(f"{index}. {candidate.key}")
 
     selected_index = _prompt_index("Select main executor", candidates, default=1)
-    executor = candidates[selected_index - 1]
-    worker_indexes = _prompt_indexes(
-        "Select workers (comma-separated, empty for selected executor)",
-        candidates,
-        default=[selected_index],
+    return candidates[selected_index - 1]
+
+
+def _prompt_task_title() -> str:
+    title = str(typer.prompt("Task title")).strip()
+    if not title:
+        raise InitAgentResolutionError("task title must be non-empty")
+    return title
+
+
+def plan_workers_for_goal(
+    selected_agent: LocalAgentCandidate,
+    title: str,
+    candidates: list[LocalAgentCandidate],
+) -> list[LocalAgentCandidate]:
+    """Ask the selected executor for a worker plan, with a deterministic fallback."""
+
+    by_key = {candidate.key: candidate for candidate in candidates}
+    planned_keys = _executor_worker_plan_keys(selected_agent, title, candidates)
+    planned = [by_key[key] for key in planned_keys if key in by_key]
+    if planned:
+        return _dedupe_worker_candidates(planned)
+    return _dedupe_worker_candidates([selected_agent, *candidates])
+
+
+def _executor_worker_plan_keys(
+    selected_agent: LocalAgentCandidate,
+    title: str,
+    candidates: list[LocalAgentCandidate],
+) -> list[str]:
+    args = _executor_planner_args(selected_agent, _worker_plan_prompt(title, candidates))
+    if args is None:
+        return []
+    try:
+        proc = run_command(
+            args,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            check=False,
+            timeout=60,
+            stdin=subprocess.DEVNULL,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return []
+    if proc.returncode != 0:
+        return []
+    return _extract_worker_plan_keys(proc.stdout)
+
+
+def _executor_planner_args(
+    selected_agent: LocalAgentCandidate,
+    prompt: str,
+) -> list[str] | None:
+    command = selected_agent.command
+    if selected_agent.executor_name == "codex_cli":
+        return [command or "codex", "exec", "--json", prompt]
+    if selected_agent.executor_name == "claude_code":
+        return [command or "claude", "-p", "--output-format", "json", prompt]
+    return None
+
+
+def _worker_plan_prompt(title: str, candidates: list[LocalAgentCandidate]) -> str:
+    worker_lines = "\n".join(
+        f"- {candidate.key}: executor={candidate.executor_name}, worker={candidate.worker_name}"
+        for candidate in candidates
     )
-    return executor, [candidates[index - 1] for index in worker_indexes]
+    return (
+        "You are the AGOS main executor. Analyze the task title and choose the workers "
+        "AGOS should configure before the task starts.\n\n"
+        f"Task title: {title}\n\n"
+        f"Available workers:\n{worker_lines}\n\n"
+        'Return JSON only, exactly like: {"workers":["codex:codex"]}. '
+        "Use only keys from the available workers list."
+    )
+
+
+def _extract_worker_plan_keys(stdout: str) -> list[str]:
+    direct = _worker_keys_from_json_text(stdout)
+    if direct:
+        return direct
+
+    for line in reversed(stdout.splitlines()):
+        keys = _worker_keys_from_json_text(line)
+        if keys:
+            return keys
+    return []
+
+
+def _worker_keys_from_json_text(text: str) -> list[str]:
+    text = text.strip()
+    if not text:
+        return []
+    payload = _load_json_object(text)
+    if payload is None:
+        json_text = _json_object_slice(text)
+        if json_text is None:
+            return []
+        payload = _load_json_object(json_text)
+    return _worker_keys_from_payload(payload)
+
+
+def _load_json_object(text: str) -> object | None:
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        return None
+
+
+def _json_object_slice(text: str) -> str | None:
+    start = text.find("{")
+    end = text.rfind("}")
+    if start == -1 or end == -1 or end <= start:
+        return None
+    return text[start : end + 1]
+
+
+def _worker_keys_from_payload(payload: object | None) -> list[str]:
+    if not isinstance(payload, dict):
+        return []
+    workers = payload.get("workers")
+    if isinstance(workers, list):
+        return [str(worker) for worker in workers if isinstance(worker, str) and worker.strip()]
+
+    for field in ("result", "content", "message", "text"):
+        value = payload.get(field)
+        if isinstance(value, str):
+            keys = _worker_keys_from_json_text(value)
+            if keys:
+                return keys
+
+    item = payload.get("item")
+    if isinstance(item, dict):
+        return _worker_keys_from_payload(item)
+    return []
+
+
+def _dedupe_worker_candidates(candidates: list[LocalAgentCandidate]) -> list[LocalAgentCandidate]:
+    planned: list[LocalAgentCandidate] = []
+    seen: set[str] = set()
+    for candidate in candidates:
+        if candidate.worker_name in seen:
+            continue
+        planned.append(candidate)
+        seen.add(candidate.worker_name)
+    return planned
 
 
 def _prompt_index(prompt: str, candidates: list[LocalAgentCandidate], *, default: int) -> int:
@@ -284,6 +425,34 @@ def validate_executor_environment(executor: ExecutorConfig) -> list[str]:
     return [f"Unsupported executor '{executor.name}'"]
 
 
+def run_init_health_checks(config: AGOSConfig, repo_root: Path) -> list[str]:
+    """Return blocking health failures before interactive init auto-runs the task."""
+
+    failures = list(validate_executor_environment(config.executor))
+    service = ExecutionService(repo_paths(repo_root))
+    register_configured_worker_adapters(service)
+    for name, adapter in sorted(service.worker_adapters().items()):
+        try:
+            health = adapter.health()
+        except Exception as exc:
+            failures.append(f"worker {name} is not ready: health_check failed: {exc}")
+            continue
+        for check in health.checks:
+            if check.state == "failed":
+                detail = f": {check.detail}" if check.detail else ""
+                failures.append(
+                    f"worker {health.name} is not ready: {check.name} failed{detail}"
+                )
+    return failures
+
+
+def _abort_for_health_failures(failures: list[str]) -> None:
+    typer.echo("Health check failed:", err=True)
+    for failure in failures:
+        typer.echo(f"- {failure}", err=True)
+    raise typer.Exit(code=1)
+
+
 def _render_template(template_name: str, *, stage: str, legacy_hook: str) -> str:
     template = resources.files("agos.hooks.templates").joinpath(template_name).read_text(encoding="utf-8")
     return template.replace("__STAGE__", stage).replace("__LEGACY_HOOK__", legacy_hook)
@@ -318,6 +487,7 @@ def init_command(
     if executor is not None and executor not in supported_executors:
         raise typer.BadParameter("Executor must be one of: multica, codex_cli, claude_code.")
 
+    auto_run_title: str | None = None
     try:
         candidates = discover_local_agents()
         if executor is not None:
@@ -330,7 +500,11 @@ def init_command(
                     "Install or enable Multica, Codex CLI, or Claude Code, then re-run:\n"
                     '  agos init --agent "<agent-name>"'
                 )
-            selected_agent, selected_workers = _select_interactive_agents(candidates)
+            selected_agent = _select_interactive_executor(candidates)
+            auto_run_title = _prompt_task_title()
+            selected_workers = plan_workers_for_goal(selected_agent, auto_run_title, candidates)
+            if not selected_workers:
+                selected_workers = [selected_agent]
         else:
             selected_agent = resolve_init_agent(agent)
             if executor is not None and selected_agent.executor_name != executor:
@@ -373,8 +547,20 @@ def init_command(
         hooks=["pre-commit", "pre-push"],
     )
 
-    for warning in validate_executor_environment(config.executor):
-        typer.echo(f"Warning: {warning}", err=True)
-
     typer.echo(f"Initialized AGOS in {agos_root}")
+    if auto_run_title is None:
+        for warning in validate_executor_environment(config.executor):
+            typer.echo(f"Warning: {warning}", err=True)
+        return
+
+    typer.echo("Running health checks...")
+    health_failures = run_init_health_checks(config, repo_root)
+    if health_failures:
+        _abort_for_health_failures(health_failures)
+
+    typer.echo("Health checks passed")
+    typer.echo("Starting AGOS task...")
+    from agos.cli.cmd_start import start_command
+
+    start_command(title=auto_run_title, intent=None, workflow=None, gate=None)
 
