@@ -108,6 +108,9 @@ class ExecutionService:
     def worker_adapters(self) -> dict[str, ExecutionWorkerAdapter]:
         return dict(self._worker_adapters)
 
+    def orchestration_backend_names(self) -> list[str]:
+        return sorted(self._orchestration_backends)
+
     def start_execution_run(
         self,
         plan_path: Path,

@@ -123,6 +123,23 @@ def test_execute_plan_run_uses_configured_external_orchestration_backend(monkeyp
     }
 
 
+def test_run_alias_reads_execution_runtime_status(monkeypatch, tmp_repo):
+    _active_task(tmp_repo)
+    monkeypatch.chdir(tmp_repo)
+
+    started = runner.invoke(app, ["execute-plan", "run", "--plan", str(_plan_file(tmp_repo))])
+    assert started.exit_code == 0, started.stderr
+    run_id = started.stdout.split()[0]
+
+    result = runner.invoke(app, ["run", "status", run_id, "--json"])
+
+    assert result.exit_code == 0, result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["run_id"] == run_id
+    assert payload["backend"] == "native_async"
+    assert payload["completed_subtasks"] == ["subtask-readme"]
+
+
 def _active_task(tmp_repo: Path, *, orchestration: dict[str, object] | None = None):
     paths = repo_paths(tmp_repo)
     paths.agos_dir.mkdir(parents=True, exist_ok=True)
