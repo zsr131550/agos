@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from agos.core.execution import ExecutionPlan, ExecutionSubtask, ExecutionWorker
 from agos.core.execution_runtime import ExecutionRuntime
-from agos.core.execution_worker import WorkerRun, WorkerRunStatus
+from agos.core.execution_worker import WorkerHealth, WorkerHealthCheck, WorkerRun, WorkerRunStatus
 
 
 class CompletingWorker:
@@ -10,6 +10,13 @@ class CompletingWorker:
 
     def __init__(self) -> None:
         self.started: list[str] = []
+
+    def health(self):
+        return WorkerHealth(
+            name=self.name,
+            adapter="fake",
+            checks=[WorkerHealthCheck(name="fake_worker", state="passed", detail="ready")],
+        )
 
     def start(self, request):
         self.started.append(request.subtask_id)
@@ -57,6 +64,28 @@ def test_execution_runtime_resume_polls_running_attempt_and_starts_dependent_sub
     assert snapshot.completed_subtasks == ("a",)
     assert snapshot.running_subtasks == ("b",)
     assert worker.started == ["a", "b"]
+
+
+def test_execution_runtime_fails_unready_worker_without_starting(tmp_path):
+    class UnreadyWorker(CompletingWorker):
+        def health(self):
+            return WorkerHealth(
+                name=self.name,
+                adapter="fake",
+                checks=[WorkerHealthCheck(name="fake_worker", state="failed", detail="offline")],
+            )
+
+    worker = UnreadyWorker()
+    runtime = ExecutionRuntime(state_dir=tmp_path, worker_adapters={"fake": worker})
+
+    snapshot = runtime.tick(_plan(), run_id="execution-run-01")
+
+    attempt_path = tmp_path / "execution-run-01" / "attempts" / "a.json"
+    detail = attempt_path.read_text(encoding="utf-8")
+    assert snapshot.failed_subtasks == ("a",)
+    assert worker.started == []
+    assert "fake_worker" in detail
+    assert "offline" in detail
 
 
 def test_execution_runtime_cancel_stops_running_attempts(tmp_path):

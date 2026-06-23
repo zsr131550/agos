@@ -8,6 +8,8 @@ from typer.testing import CliRunner
 
 from agos.cli.main import app
 from agos.core.adapter import ExecutorRun
+from agos.core.orchestration.models import OrchestratorRunHandle, OrchestratorRunStatus
+from agos.core.execution_worker import WorkerHealth, WorkerHealthCheck
 from agos.core.ledger import Ledger
 from agos.core.repo import repo_paths
 from agos.core.status import TaskStatus, save_status
@@ -39,9 +41,61 @@ def test_execute_plan_runtime_run_status_resume_and_cancel(monkeypatch, tmp_repo
     assert run_id in cancel.stdout
 
 
+def test_execute_plan_run_reports_unready_worker_before_start(monkeypatch, tmp_repo):
+    _active_task(tmp_repo)
+    monkeypatch.chdir(tmp_repo)
+
+    def fake_health(self):
+        return WorkerHealth(
+            name=self.name,
+            adapter="local_worktree",
+            checks=[WorkerHealthCheck(name="local_workspace", state="failed", detail="disk full")],
+        )
+
+    monkeypatch.setattr("agos.adapters.workers.local_worktree.LocalWorktreeWorkerAdapter.health", fake_health)
+
+    result = runner.invoke(app, ["execute-plan", "run", "--plan", str(_plan_file(tmp_repo))])
+
+    assert result.exit_code == 1
+    assert "local_worktree" in result.stderr
+    assert "disk full" in result.stderr
+
+
 def test_execute_plan_run_uses_configured_external_orchestration_backend(monkeypatch, tmp_repo):
     _active_task(tmp_repo, orchestration={"backend": "external"})
     monkeypatch.chdir(tmp_repo)
+    import agos.cli.orchestration_registry as registry
+
+    class _CliExternalBackend:
+        name = "external"
+        states: dict[str, str] = {}
+
+        def __init__(self, **_kwargs) -> None:
+            pass
+
+        def run(self, spec):
+            self.states[spec.run_id] = "queued"
+            return OrchestratorRunHandle(backend=self.name, run_id=spec.run_id)
+
+        def poll(self, handle):
+            return OrchestratorRunStatus(
+                backend=self.name,
+                run_id=handle.run_id,
+                state=self.states[handle.run_id],
+            )
+
+        def cancel(self, handle):
+            self.states[handle.run_id] = "cancelled"
+            return OrchestratorRunStatus(
+                backend=self.name,
+                run_id=handle.run_id,
+                state="cancelled",
+            )
+
+        def collect(self, handle):  # pragma: no cover - protocol compatibility
+            return {}
+
+    monkeypatch.setattr(registry, "ExternalBackend", _CliExternalBackend)
 
     started = runner.invoke(
         app,

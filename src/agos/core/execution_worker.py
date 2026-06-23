@@ -59,6 +59,33 @@ class WorkerHealth(BaseModel):
         return self.state == "healthy"
 
 
+class WorkerReadinessError(RuntimeError):
+    """Raised when a worker adapter is not ready to start real work."""
+
+
+def ensure_worker_ready(adapter: "ExecutionWorkerAdapter") -> WorkerHealth:
+    """Return adapter health or raise a clear readiness error."""
+
+    try:
+        health = adapter.health()
+    except Exception as exc:
+        name = getattr(adapter, "name", "unknown")
+        raise WorkerReadinessError(
+            f"worker {name!r} is not ready: health_check failed: {exc}"
+        ) from exc
+
+    failed = [check for check in health.checks if check.state == "failed"]
+    if failed:
+        details = "; ".join(_failed_check_detail(check) for check in failed)
+        raise WorkerReadinessError(f"worker {health.name!r} is not ready: {details}")
+    return health
+
+
+def _failed_check_detail(check: WorkerHealthCheck) -> str:
+    detail = f": {check.detail}" if check.detail else ""
+    return f"{check.name} failed{detail}"
+
+
 class WorkerRun(BaseModel):
     backend: str
     run_id: str

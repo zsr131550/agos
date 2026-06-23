@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from agos.core.execution_worker import ExecutionWorkerAdapter, WorkerStartRequest
+from agos.core.execution_worker import ExecutionWorkerAdapter, WorkerStartRequest, ensure_worker_ready
 from agos.core.orchestration.models import AgentJobHandle, NodeRunStatus, NodeSpec, OrchestrationRunSpec
 from agos.core.review import ReviewPacket
 from agos.core.review_adapter import ReviewerAdapter, ReviewerStartRequest
@@ -17,6 +17,7 @@ class WorkerNodeBackend:
         self.name = adapter.name
 
     def start(self, run: OrchestrationRunSpec, node: NodeSpec) -> AgentJobHandle:
+        ensure_worker_ready(self.adapter)
         subtask_id = node.metadata.get("subtask_id", node.id)
         worker_run_id = f"{run.run_id}:{node.id}"
         worker_run = self.adapter.start(

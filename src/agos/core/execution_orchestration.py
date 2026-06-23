@@ -25,7 +25,14 @@ class ExecutionOrchestrator:
     def __init__(self, paths: AgosPaths) -> None:
         self.paths = paths
 
-    def build_spec(self, plan_path: Path) -> OrchestrationRunSpec:
+    def build_spec(
+        self,
+        plan_path: Path,
+        *,
+        run_id: str | None = None,
+        backend: str = "native_async",
+        save: bool = True,
+    ) -> OrchestrationRunSpec:
         payload = yaml.safe_load(plan_path.read_text(encoding="utf-8")) or {}
         plan = ExecutionPlan.model_validate(payload)
         task = load_task(self.paths.task_yaml)
@@ -36,7 +43,7 @@ class ExecutionOrchestrator:
             NodeSpec(
                 id="validate_plan",
                 kind="validate_plan",
-                backend="native_async",
+                backend=backend,
                 inputs={"plan_path": str(plan_path)},
                 policy={},
             )
@@ -52,7 +59,7 @@ class ExecutionOrchestrator:
                 NodeSpec(
                     id=prepare_id,
                     kind="prepare_workspace",
-                    backend="native_async",
+                    backend=backend,
                     adapter=subtask.worker.adapter,
                     depends_on=("validate_plan", *dependency_nodes),
                     inputs={"subtask_id": subtask.id},
@@ -63,7 +70,7 @@ class ExecutionOrchestrator:
                 NodeSpec(
                     id=worker_id,
                     kind="worker_submit",
-                    backend="native_async",
+                    backend=backend,
                     adapter=subtask.worker.adapter,
                     depends_on=(prepare_id, *dependency_nodes),
                     inputs={"subtask_id": subtask.id},
@@ -77,7 +84,7 @@ class ExecutionOrchestrator:
                 NodeSpec(
                     id=review_id,
                     kind="candidate_review_subgraph",
-                    backend="native_async",
+                    backend=backend,
                     depends_on=(worker_id,),
                     inputs={"subtask_id": subtask.id},
                     policy={},
@@ -85,10 +92,10 @@ class ExecutionOrchestrator:
             )
 
         spec = OrchestrationRunSpec(
-            run_id=_new_run_id(),
+            run_id=run_id or _new_run_id(),
             task_id=plan.task_id,
             kind="execution_run",
-            backend="native_async",
+            backend=backend,
             entry_nodes=("validate_plan",),
             nodes=tuple(nodes),
             limits={"max_parallel": plan.max_parallel},
@@ -98,7 +105,8 @@ class ExecutionOrchestrator:
                 "requires_candidate_review": str(plan.requires_candidate_review).lower(),
             },
         )
-        self._save_spec(spec)
+        if save:
+            self._save_spec(spec)
         return spec
 
     def _save_spec(self, spec: OrchestrationRunSpec) -> None:

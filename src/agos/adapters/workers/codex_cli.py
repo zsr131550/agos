@@ -1,12 +1,16 @@
 """Codex CLI execution worker adapter."""
 from __future__ import annotations
 
-import json
-import os
 import shutil
 from pathlib import Path
 
 from agos.adapters.workers.artifacts import collect_artifact_refs, merge_output_refs
+from agos.adapters.workers.transport import (
+    load_json_object,
+    metadata_from_payload,
+    output_refs_from_payload,
+    run_worker_command,
+)
 from agos.core.command import run_command
 from agos.core.execution_worker import (
     WorkerHealth,
@@ -75,17 +79,15 @@ class CodexWorkerAdapter:
         )
 
     def start(self, request: WorkerStartRequest) -> WorkerRun:
-        proc = run_command(
+        proc = run_worker_command(
             [self.command, "exec", "--json", request.prompt],
+            action="codex exec",
             cwd=Path(request.workspace_path),
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            timeout=self.timeout_seconds,
-            env={**os.environ, **self.env},
+            timeout_seconds=self.timeout_seconds,
+            env=self.env,
+            runner=run_command,
         )
-        _raise_on_failure(proc, "codex exec")
-        payload = _load_json(proc.stdout)
+        payload = load_json_object(proc.stdout, action="codex exec")
         run_id = str(payload.get("run_id") or payload.get("id") or request.run_id)
         self._subtasks_by_run_id[run_id] = request.subtask_id
         self._workspaces_by_run_id[run_id] = request.workspace_path
@@ -94,20 +96,18 @@ class CodexWorkerAdapter:
             run_id=run_id,
             subtask_id=request.subtask_id,
             state=_state(payload.get("state"), default="running"),
-            metadata=_metadata(payload),
+            metadata=metadata_from_payload(payload),
         )
 
     def poll(self, run_id: str, *, subtask_id: str) -> WorkerRunStatus:
-        proc = run_command(
+        proc = run_worker_command(
             [self.command, "status", run_id, "--json"],
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            timeout=self.timeout_seconds,
-            env={**os.environ, **self.env},
+            action="codex status",
+            timeout_seconds=self.timeout_seconds,
+            env=self.env,
+            runner=run_command,
         )
-        _raise_on_failure(proc, "codex status")
-        payload = _load_json(proc.stdout)
+        payload = load_json_object(proc.stdout, action="codex status")
         self._subtasks_by_run_id[run_id] = subtask_id
         return _status(
             self.name,
@@ -118,16 +118,14 @@ class CodexWorkerAdapter:
         )
 
     def cancel(self, run_id: str) -> WorkerRunStatus:
-        proc = run_command(
+        proc = run_worker_command(
             [self.command, "cancel", run_id, "--json"],
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            timeout=self.timeout_seconds,
-            env={**os.environ, **self.env},
+            action="codex cancel",
+            timeout_seconds=self.timeout_seconds,
+            env=self.env,
+            runner=run_command,
         )
-        _raise_on_failure(proc, "codex cancel")
-        payload = _load_json(proc.stdout)
+        payload = load_json_object(proc.stdout, action="codex cancel")
         subtask_id = self._subtasks_by_run_id.get(run_id, str(payload.get("subtask_id", "unknown")))
         if "state" not in payload:
             payload["state"] = "cancelled"
@@ -138,20 +136,6 @@ class CodexWorkerAdapter:
             payload,
             collect_artifact_refs(self._workspaces_by_run_id.get(run_id), self.artifact_globs),
         )
-
-
-def _load_json(stdout: str) -> dict[str, object]:
-    if not stdout.strip():
-        return {}
-    payload = json.loads(stdout)
-    if not isinstance(payload, dict):
-        raise RuntimeError("codex CLI returned non-object JSON")
-    return payload
-
-
-def _raise_on_failure(proc, action: str) -> None:
-    if proc.returncode != 0:
-        raise RuntimeError(f"{action} failed with exit {proc.returncode}: {proc.stderr.strip()}")
 
 
 def _state(value: object, *, default: str) -> str:
@@ -165,22 +149,12 @@ def _status(
     payload: dict[str, object],
     artifact_refs: list[str] | None = None,
 ) -> WorkerRunStatus:
-    output_refs = payload.get("output_refs", [])
-    if not isinstance(output_refs, list):
-        output_refs = []
     return WorkerRunStatus(
         backend=backend,
         run_id=run_id,
         subtask_id=subtask_id,
         state=_state(payload.get("state"), default="running"),
         detail=str(payload["detail"]) if payload.get("detail") is not None else None,
-        output_refs=merge_output_refs([str(ref) for ref in output_refs], artifact_refs or []),
+        output_refs=merge_output_refs(output_refs_from_payload(payload), artifact_refs or []),
     )
-
-
-def _metadata(payload: dict[str, object]) -> dict[str, str]:
-    metadata = payload.get("metadata", {})
-    if not isinstance(metadata, dict):
-        return {}
-    return {str(key): str(value) for key, value in metadata.items()}
 

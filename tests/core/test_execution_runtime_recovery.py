@@ -4,7 +4,7 @@ import json
 
 from agos.core.execution import ExecutionPlan, ExecutionSubtask, ExecutionWorker
 from agos.core.execution_runtime import ExecutionRuntime
-from agos.core.execution_worker import WorkerRun, WorkerRunStatus
+from agos.core.execution_worker import WorkerHealth, WorkerHealthCheck, WorkerRun, WorkerRunStatus
 
 
 class FlakyWorker:
@@ -13,6 +13,13 @@ class FlakyWorker:
     def __init__(self) -> None:
         self.starts = 0
         self.polls = 0
+
+    def health(self):
+        return WorkerHealth(
+            name=self.name,
+            adapter="flaky",
+            checks=[WorkerHealthCheck(name="flaky_worker", state="passed", detail="ready")],
+        )
 
     def start(self, request):
         self.starts += 1

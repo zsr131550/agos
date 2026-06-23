@@ -1,10 +1,14 @@
 """OpenHands HTTP execution worker adapter."""
 from __future__ import annotations
 
-import json
-from urllib.request import Request, urlopen
+from urllib.request import urlopen
 
 from agos.adapters.workers.artifacts import collect_artifact_refs, merge_output_refs
+from agos.adapters.workers.transport import (
+    json_http_request,
+    metadata_from_payload,
+    output_refs_from_payload,
+)
 from agos.core.execution_worker import (
     WorkerHealth,
     WorkerHealthCheck,
@@ -91,6 +95,7 @@ class OpenHandsWorkerAdapter:
                 "prompt": request.prompt,
                 "workspace_path": request.workspace_path,
                 "metadata": request.metadata,
+                "env": dict(self.env),
             },
             timeout=self.timeout,
             headers=self._headers(),
@@ -103,7 +108,7 @@ class OpenHandsWorkerAdapter:
             run_id=run_id,
             subtask_id=request.subtask_id,
             state=_state(payload.get("state"), default="running"),
-            metadata=_metadata(payload),
+            metadata=metadata_from_payload(payload),
         )
 
     def poll(self, run_id: str, *, subtask_id: str) -> WorkerRunStatus:
@@ -153,21 +158,15 @@ def _json_request(
     timeout: int = 30,
     headers: dict[str, str] | None = None,
 ) -> dict[str, object]:
-    body = None if payload is None else json.dumps(payload).encode("utf-8")
-    request = Request(
+    return json_http_request(
+        "OpenHands",
+        method,
         url,
-        data=body,
-        method=method,
-        headers={"Content-Type": "application/json", **(headers or {})},
+        payload=payload,
+        timeout=timeout,
+        headers=headers,
+        opener=urlopen,
     )
-    with urlopen(request, timeout=timeout) as response:
-        data = response.read().decode("utf-8")
-    if not data.strip():
-        return {}
-    loaded = json.loads(data)
-    if not isinstance(loaded, dict):
-        raise RuntimeError("OpenHands endpoint returned non-object JSON")
-    return loaded
 
 
 def _state(value: object, *, default: str) -> str:
@@ -181,22 +180,12 @@ def _status(
     payload: dict[str, object],
     artifact_refs: list[str] | None = None,
 ) -> WorkerRunStatus:
-    output_refs = payload.get("output_refs", [])
-    if not isinstance(output_refs, list):
-        output_refs = []
     return WorkerRunStatus(
         backend=backend,
         run_id=run_id,
         subtask_id=subtask_id,
         state=_state(payload.get("state"), default="running"),
         detail=str(payload["detail"]) if payload.get("detail") is not None else None,
-        output_refs=merge_output_refs([str(ref) for ref in output_refs], artifact_refs or []),
+        output_refs=merge_output_refs(output_refs_from_payload(payload), artifact_refs or []),
     )
-
-
-def _metadata(payload: dict[str, object]) -> dict[str, str]:
-    metadata = payload.get("metadata", {})
-    if not isinstance(metadata, dict):
-        return {}
-    return {str(key): str(value) for key, value in metadata.items()}
 

@@ -5,7 +5,6 @@ import json
 import subprocess
 import time
 from collections.abc import Iterable
-from dataclasses import replace
 from pathlib import Path
 from typing import Any, Literal, cast
 from uuid import uuid4
@@ -42,6 +41,7 @@ from agos.core.execution_worker import (
     ExecutionWorkerAdapter,
     WorkerAssignment,
     WorkerWorkspaceHandle,
+    ensure_worker_ready,
 )
 from agos.core.execution_workspace import (
     ExecutionWorkspaceManager,
@@ -108,16 +108,23 @@ class ExecutionService:
         *,
         run_id: str | None = None,
     ) -> ExecutionRuntimeSnapshot:
-        plan = self.execute_plan(plan_path)
-        execution_run_id = run_id or _new_id("execution-run")
         backend_name = load_config(self.paths.root).orchestration.backend
+        plan = self.execute_plan(plan_path, build_orchestration_spec=False)
+        execution_run_id = run_id or _new_id("execution-run")
         if backend_name != "native_async":
             spec = self._execution_spec_for_backend(plan_path, backend_name, run_id=execution_run_id)
             backend = self._orchestration_backend(backend_name)
             handle = backend.run(spec)
+            initial = ExecutionRuntimeSnapshot(
+                run_id=handle.run_id,
+                backend=handle.backend,
+                state="queued",
+            )
+            self._write_run_snapshot(initial)
             snapshot = _snapshot_from_orchestrator_status(backend.poll(handle))
             self._write_run_snapshot(snapshot)
             return snapshot
+        self._ensure_plan_worker_readiness(plan)
         return self._execution_runtime(plan).tick(plan, run_id=execution_run_id)
 
     def resume_execution_run(self, run_id: str) -> ExecutionRuntimeSnapshot:
@@ -141,7 +148,12 @@ class ExecutionService:
         plan = self.store.read_plan()
         return self._execution_runtime(plan).cancel(plan, run_id=run_id)
 
-    def execute_plan(self, plan_path: Path) -> ExecutionPlan:
+    def execute_plan(
+        self,
+        plan_path: Path,
+        *,
+        build_orchestration_spec: bool = True,
+    ) -> ExecutionPlan:
         status, task = self._active_task()
         del status
         payload = yaml.safe_load(plan_path.read_text(encoding="utf-8")) or {}
@@ -150,7 +162,8 @@ class ExecutionService:
             raise ValueError(f"execution plan task_id {plan.task_id!r} does not match active task {task.id!r}")
 
         plan_ref = self.store.write_plan(plan)
-        self.execution_orchestrator.build_spec(plan_path)
+        if build_orchestration_spec:
+            self.execution_orchestrator.build_spec(plan_path)
         self._append_event(
             {
                 "type": "execution_plan_created",
@@ -1069,6 +1082,15 @@ class ExecutionService:
             raise ValueError(f"unsupported orchestration backend: {backend_name}")
         return self._orchestration_backends[backend_name]
 
+    def _ensure_plan_worker_readiness(self, plan: ExecutionPlan) -> None:
+        checked: set[str] = set()
+        for subtask in plan.subtasks:
+            adapter_name = subtask.worker.adapter
+            if adapter_name in checked:
+                continue
+            ensure_worker_ready(self._worker_adapter(adapter_name))
+            checked.add(adapter_name)
+
     def _execution_spec_for_backend(
         self,
         plan_path: Path,
@@ -1076,31 +1098,20 @@ class ExecutionService:
         *,
         run_id: str,
     ) -> OrchestrationRunSpec:
-        spec = self.execution_orchestrator.build_spec(plan_path)
-        nodes = tuple(node.model_copy(update={"backend": backend_name}) for node in spec.nodes)
-        configured = spec.model_copy(
-            update={
-                "run_id": run_id,
-                "backend": backend_name,
-                "nodes": nodes,
-            }
+        return self.execution_orchestrator.build_spec(
+            plan_path,
+            run_id=run_id,
+            backend=backend_name,
         )
-        path = self.paths.orchestration_runs / f"{configured.run_id}.json"
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(configured.model_dump_json(indent=2), encoding="utf-8")
-        return configured
 
     def _poll_orchestration_snapshot(
         self,
         snapshot: ExecutionRuntimeSnapshot,
     ) -> ExecutionRuntimeSnapshot:
         handle = OrchestratorRunHandle(backend=snapshot.backend, run_id=snapshot.run_id)
-        try:
-            updated = _snapshot_from_orchestrator_status(
-                self._orchestration_backend(snapshot.backend).poll(handle)
-            )
-        except ValueError:
-            return snapshot
+        updated = _snapshot_from_orchestrator_status(
+            self._orchestration_backend(snapshot.backend).poll(handle)
+        )
         self._write_run_snapshot(updated)
         return updated
 
@@ -1109,12 +1120,9 @@ class ExecutionService:
         snapshot: ExecutionRuntimeSnapshot,
     ) -> ExecutionRuntimeSnapshot:
         handle = OrchestratorRunHandle(backend=snapshot.backend, run_id=snapshot.run_id)
-        try:
-            updated = _snapshot_from_orchestrator_status(
-                self._orchestration_backend(snapshot.backend).cancel(handle)
-            )
-        except ValueError:
-            updated = replace(snapshot, state="cancelled")
+        updated = _snapshot_from_orchestrator_status(
+            self._orchestration_backend(snapshot.backend).cancel(handle)
+        )
         self._write_run_snapshot(updated)
         return updated
 

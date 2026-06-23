@@ -13,7 +13,9 @@ from agos.adapters.workers import LocalWorktreeWorkerAdapter
 from agos.core.adapter import ExecutorRun
 from agos.core.execution_service import ExecutionService
 from agos.core.execution_store import ExecutionStore
+from agos.core.execution_worker import WorkerHealth, WorkerHealthCheck
 from agos.core.ledger import Ledger
+from agos.core.orchestration.models import OrchestratorRunHandle, OrchestratorRunStatus
 from agos.core.repo import repo_paths
 from agos.core.review import Finding, FindingResolution
 from agos.core.review_service import ReviewService
@@ -21,7 +23,12 @@ from agos.core.status import TaskStatus, save_status
 from agos.core.task import ExecutorBinding, Task, save_task
 
 
-def _active_task(tmp_repo: Path, *, gates: list[str] | None = None):
+def _active_task(
+    tmp_repo: Path,
+    *,
+    gates: list[str] | None = None,
+    orchestration: dict[str, object] | None = None,
+):
     paths = repo_paths(tmp_repo)
     paths.agos_dir.mkdir(parents=True, exist_ok=True)
     paths.agos_yaml.write_text(
@@ -29,6 +36,7 @@ def _active_task(tmp_repo: Path, *, gates: list[str] | None = None):
             {
                 "executor": {"name": "multica", "agent": "Lambda"},
                 "default_workflow": "feature",
+                "orchestration": orchestration or {"backend": "native_async"},
                 "workflows": {
                     "feature": {
                         "gates": [
@@ -141,15 +149,62 @@ def _commit(repo: Path, message: str) -> None:
     subprocess.run(["git", "commit", "-q", "-m", message], cwd=repo, check=True, env=env)
 
 
-def _service(tmp_repo: Path, *, worker_adapters=None) -> ExecutionService:
+def _service(tmp_repo: Path, *, worker_adapters=None, orchestration_backends=None) -> ExecutionService:
     service = ExecutionService(
         repo_paths(tmp_repo),
         worktree_root=tmp_repo.parent / ".agos-worktrees" / "agos-01",
         worker_adapters=worker_adapters,
+        orchestration_backends=orchestration_backends,
     )
     if worker_adapters is None:
         service.register_worker_adapter(LocalWorktreeWorkerAdapter(service.workspace_manager))
     return service
+
+
+class _FlakyPollBackend:
+    name = "flaky"
+
+    def __init__(self) -> None:
+        self.specs = []
+
+    def run(self, spec):
+        self.specs.append(spec)
+        return OrchestratorRunHandle(backend=self.name, run_id=spec.run_id)
+
+    def poll(self, handle):
+        raise ValueError(f"remote run not ready: {handle.run_id}")
+
+    def cancel(self, handle):  # pragma: no cover - not used in this test
+        raise AssertionError
+
+    def collect(self, handle):  # pragma: no cover - protocol compatibility
+        raise AssertionError
+
+
+class _PollThenLoseBackend:
+    name = "unstable"
+
+    def __init__(self) -> None:
+        self.polls = 0
+
+    def run(self, spec):
+        return OrchestratorRunHandle(backend=self.name, run_id=spec.run_id)
+
+    def poll(self, handle):
+        self.polls += 1
+        if self.polls == 1:
+            return OrchestratorRunStatus(
+                backend=self.name,
+                run_id=handle.run_id,
+                state="queued",
+            )
+        raise ValueError(f"lost remote run: {handle.run_id}")
+
+    def cancel(self, handle):
+        raise ValueError(f"lost remote run: {handle.run_id}")
+
+    def collect(self, handle):  # pragma: no cover - protocol compatibility
+        raise AssertionError
 
 
 def _ready_candidate(tmp_repo: Path):
@@ -173,6 +228,82 @@ def test_execute_plan_creates_workspaces_and_ledger_events(tmp_repo):
     assert plan.subtasks[0].status == "workspace_ready"
     assert Path(workspace.path).resolve().is_relative_to((tmp_repo.parent / ".agos-worktrees").resolve())
     assert _ledger_types(paths)[-2:] == ["execution_plan_created", "subtask_workspace_created"]
+
+
+def test_start_execution_run_preflights_native_worker_readiness(tmp_repo):
+    _active_task(tmp_repo)
+    service = _service(tmp_repo)
+    start_calls: list[str] = []
+
+    class _Adapter:
+        name = "local_worktree"
+
+        def __init__(self, manager):
+            self.manager = manager
+
+        def prepare(self, assignment):
+            return self.manager.create_workspace(assignment.subtask)
+
+        def health(self):
+            return WorkerHealth(
+                name=self.name,
+                adapter="local_worktree",
+                checks=[WorkerHealthCheck(name="local_workspace", state="failed", detail="disk full")],
+            )
+
+        def start(self, request):  # pragma: no cover - should not be called
+            start_calls.append(request.subtask_id)
+            raise AssertionError("start should not be reached")
+
+        def export_candidate(self, handle):  # pragma: no cover - not used here
+            raise AssertionError
+
+    service.register_worker_adapter(_Adapter(service.workspace_manager))
+
+    with pytest.raises(Exception, match="disk full"):
+        service.start_execution_run(_plan_file(tmp_repo), run_id="execution-run-unready")
+
+    assert start_calls == []
+
+
+def test_orchestration_backend_start_persists_snapshot_before_first_poll_failure(tmp_repo):
+    paths = _active_task(tmp_repo, orchestration={"backend": "flaky"})
+    backend = _FlakyPollBackend()
+    service = _service(tmp_repo, orchestration_backends={backend.name: backend})
+
+    with pytest.raises(ValueError, match="remote run not ready"):
+        service.start_execution_run(_plan_file(tmp_repo), run_id="execution-run-flaky")
+
+    status_path = paths.current_task / "execution" / "runs" / "execution-run-flaky" / "status.json"
+    payload = json.loads(status_path.read_text(encoding="utf-8"))
+    assert payload["backend"] == "flaky"
+    assert payload["state"] == "queued"
+
+
+def test_orchestration_backend_errors_are_not_reported_as_stale_or_cancelled(tmp_repo):
+    _active_task(tmp_repo, orchestration={"backend": "unstable"})
+    backend = _PollThenLoseBackend()
+    service = _service(tmp_repo, orchestration_backends={backend.name: backend})
+    service.start_execution_run(_plan_file(tmp_repo), run_id="execution-run-unstable")
+
+    with pytest.raises(ValueError, match="lost remote run"):
+        service.status_execution_run("execution-run-unstable")
+    with pytest.raises(ValueError, match="lost remote run"):
+        service.cancel_execution_run("execution-run-unstable")
+
+
+def test_non_native_execution_run_writes_only_the_selected_backend_spec(tmp_repo):
+    paths = _active_task(tmp_repo, orchestration={"backend": "unstable"})
+    backend = _PollThenLoseBackend()
+    service = _service(tmp_repo, orchestration_backends={backend.name: backend})
+
+    service.start_execution_run(_plan_file(tmp_repo), run_id="execution-run-unstable")
+
+    spec_paths = sorted(paths.orchestration_runs.glob("*.json"))
+    assert [path.name for path in spec_paths] == ["execution-run-unstable.json"]
+    payload = json.loads(spec_paths[0].read_text(encoding="utf-8"))
+    assert payload["backend"] == "unstable"
+    assert {node["backend"] for node in payload["nodes"]} == {"unstable"}
 
 
 def test_execute_plan_routes_workspace_creation_through_worker_adapter(tmp_repo, monkeypatch):

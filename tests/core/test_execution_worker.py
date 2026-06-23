@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 from agos.core.execution_worker import (
+    WorkerReadinessError,
     WorkerHealth,
     WorkerHealthCheck,
     WorkerRun,
     WorkerRunStatus,
     WorkerStartRequest,
+    ensure_worker_ready,
 )
 
 
@@ -73,3 +75,48 @@ def test_worker_health_models_report_aggregate_state():
     assert health.is_healthy
     assert unhealthy.state == "unhealthy"
     assert not unhealthy.is_healthy
+
+
+def test_ensure_worker_ready_allows_passed_and_warning_checks():
+    class _Worker:
+        name = "codex-prod"
+
+        def health(self):
+            return WorkerHealth(
+                name=self.name,
+                adapter="codex_cli",
+                checks=[
+                    WorkerHealthCheck(name="command_available", state="passed", detail="codex"),
+                    WorkerHealthCheck(name="artifact_contract", state="warning", detail="no globs"),
+                ],
+            )
+
+    health = ensure_worker_ready(_Worker())
+
+    assert health.name == "codex-prod"
+
+
+def test_ensure_worker_ready_raises_clear_error_for_failed_checks():
+    class _Worker:
+        name = "multica-prod"
+
+        def health(self):
+            return WorkerHealth(
+                name=self.name,
+                adapter="multica",
+                checks=[
+                    WorkerHealthCheck(name="daemon_status", state="failed", detail="daemon down"),
+                    WorkerHealthCheck(name="workspace_list", state="passed", detail="ok"),
+                ],
+            )
+
+    try:
+        ensure_worker_ready(_Worker())
+    except WorkerReadinessError as exc:
+        message = str(exc)
+    else:  # pragma: no cover - assertion guard
+        raise AssertionError("expected readiness failure")
+
+    assert "multica-prod" in message
+    assert "daemon_status" in message
+    assert "daemon down" in message

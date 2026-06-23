@@ -1,10 +1,16 @@
 """Multica CLI execution worker adapter."""
 from __future__ import annotations
 
-import json
 import os
 
-from agos.adapters.workers.artifacts import collect_artifact_refs
+from agos.adapters.workers.artifacts import collect_artifact_refs, merge_output_refs
+from agos.adapters.workers.transport import (
+    load_json_object,
+    load_json_object_or_list,
+    output_refs_from_payload,
+    process_detail,
+    run_worker_command,
+)
 from agos.core.command import run_command
 from agos.core.execution_worker import (
     WorkerHealth,
@@ -74,7 +80,7 @@ class MulticaWorkerAdapter:
         )
 
     def start(self, request: WorkerStartRequest) -> WorkerRun:
-        issue_proc = run_command(
+        issue_proc = run_worker_command(
             [
                 self.multica_bin,
                 "issue",
@@ -89,14 +95,12 @@ class MulticaWorkerAdapter:
                 "--output",
                 "json",
             ],
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            timeout=self.timeout_seconds,
-            env={**os.environ, **self.env},
+            action="multica issue create",
+            timeout_seconds=self.timeout_seconds,
+            env=self.env,
+            runner=run_command,
         )
-        _raise_on_failure(issue_proc, "multica issue create")
-        issue = _load_json(issue_proc.stdout)
+        issue = load_json_object(issue_proc.stdout, action="multica issue create")
         issue_id = str(issue.get("identifier") or issue.get("id") or "")
         if not issue_id:
             raise RuntimeError("multica issue create did not return an issue identifier")
@@ -122,40 +126,42 @@ class MulticaWorkerAdapter:
         runs = self._issue_runs(issue_id)
         current = _matching_run(runs, run_id)
         self._subtask_by_run_id[run_id] = subtask_id
+        local_refs = collect_artifact_refs(
+            self._workspaces_by_run_id.get(run_id),
+            self.artifact_globs,
+        )
         return WorkerRunStatus(
             backend=self.name,
             run_id=run_id,
             subtask_id=subtask_id,
             state=_state(current.get("status") if current else None, default="running"),
             detail=str(current.get("status")) if current and current.get("status") is not None else None,
-            output_refs=collect_artifact_refs(
-                self._workspaces_by_run_id.get(run_id),
-                self.artifact_globs,
-            ),
+            output_refs=merge_output_refs(output_refs_from_payload(current), local_refs),
         )
 
     def cancel(self, run_id: str) -> WorkerRunStatus:
-        proc = run_command(
+        proc = run_worker_command(
             [self.multica_bin, "issue", "cancel", run_id, "--output", "json"],
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            timeout=self.timeout_seconds,
-            env={**os.environ, **self.env},
+            action="multica issue cancel",
+            timeout_seconds=self.timeout_seconds,
+            env=self.env,
+            runner=run_command,
         )
-        if proc.returncode != 0:
-            return WorkerRunStatus(
-                backend=self.name,
-                run_id=run_id,
-                subtask_id=self._subtask_by_run_id.get(run_id, "unknown"),
-                state="failed",
-                detail=proc.stderr.strip(),
-            )
+        payload = load_json_object(proc.stdout, action="multica issue cancel")
+        if "state" not in payload:
+            payload["state"] = "cancelled"
+        subtask_id = self._subtask_by_run_id.get(run_id, str(payload.get("subtask_id", "unknown")))
+        local_refs = collect_artifact_refs(
+            self._workspaces_by_run_id.get(run_id),
+            self.artifact_globs,
+        )
         return WorkerRunStatus(
             backend=self.name,
             run_id=run_id,
-            subtask_id=self._subtask_by_run_id.get(run_id, "unknown"),
-            state="cancelled",
+            subtask_id=subtask_id,
+            state=_state(payload.get("state"), default="cancelled"),
+            detail=str(payload["detail"]) if payload.get("detail") is not None else None,
+            output_refs=merge_output_refs(output_refs_from_payload(payload), local_refs),
         )
 
     def _health_command(self, name: str, args: list[str]) -> WorkerHealthCheck:
@@ -171,8 +177,8 @@ class MulticaWorkerAdapter:
         except Exception as exc:
             return WorkerHealthCheck(name=name, state="failed", detail=str(exc))
         if proc.returncode != 0:
-            return WorkerHealthCheck(name=name, state="failed", detail=_proc_detail(proc))
-        return WorkerHealthCheck(name=name, state="passed", detail=_proc_detail(proc) or "ok")
+            return WorkerHealthCheck(name=name, state="failed", detail=process_detail(proc))
+        return WorkerHealthCheck(name=name, state="passed", detail=process_detail(proc) or "ok")
 
     def _workspace_list_health(self) -> WorkerHealthCheck:
         try:
@@ -187,55 +193,28 @@ class MulticaWorkerAdapter:
         except Exception as exc:
             return WorkerHealthCheck(name="workspace_list", state="failed", detail=str(exc))
         if proc.returncode != 0:
-            return WorkerHealthCheck(name="workspace_list", state="failed", detail=_proc_detail(proc))
+            return WorkerHealthCheck(name="workspace_list", state="failed", detail=process_detail(proc))
         try:
-            _load_json_or_list(proc.stdout or "")
+            load_json_object_or_list(proc.stdout or "", action="multica workspace list")
         except Exception as exc:
             return WorkerHealthCheck(name="workspace_list", state="failed", detail=str(exc))
-        return WorkerHealthCheck(name="workspace_list", state="passed", detail=_proc_detail(proc) or "ok")
+        return WorkerHealthCheck(name="workspace_list", state="passed", detail=process_detail(proc) or "ok")
 
     def _issue_runs(self, issue_id: str) -> list[dict[str, object]]:
-        proc = run_command(
+        proc = run_worker_command(
             [self.multica_bin, "issue", "runs", issue_id, "--output", "json"],
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            timeout=self.timeout_seconds,
-            env={**os.environ, **self.env},
+            action="multica issue runs",
+            timeout_seconds=self.timeout_seconds,
+            env=self.env,
+            runner=run_command,
         )
-        _raise_on_failure(proc, "multica issue runs")
-        payload = _load_json_or_list(proc.stdout)
+        payload = load_json_object_or_list(proc.stdout, action="multica issue runs")
         if isinstance(payload, list):
             return [item for item in payload if isinstance(item, dict)]
         runs = payload.get("runs", [])
         if not isinstance(runs, list):
             return []
         return [item for item in runs if isinstance(item, dict)]
-
-
-def _load_json(stdout: str) -> dict[str, object]:
-    payload = _load_json_or_list(stdout)
-    if not isinstance(payload, dict):
-        raise RuntimeError("multica CLI returned non-object JSON")
-    return payload
-
-
-def _load_json_or_list(stdout: str) -> dict[str, object] | list[object]:
-    if not stdout.strip():
-        return {}
-    payload = json.loads(stdout)
-    if isinstance(payload, dict | list):
-        return payload
-    raise RuntimeError("multica CLI returned unsupported JSON")
-
-
-def _raise_on_failure(proc, action: str) -> None:
-    if proc.returncode != 0:
-        raise RuntimeError(f"{action} failed with exit {proc.returncode}: {proc.stderr.strip()}")
-
-
-def _proc_detail(proc) -> str:
-    return (proc.stderr or proc.stdout or "").strip()
 
 
 def _state(value: object, *, default: str) -> str:

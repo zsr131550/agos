@@ -13,6 +13,7 @@ from agos.core.execution_worker import (
     ExecutionWorkerAdapter,
     WorkerRunState,
     WorkerStartRequest,
+    ensure_worker_ready,
 )
 
 
@@ -167,6 +168,7 @@ class ExecutionRuntime:
         attempts = (previous.attempts if previous else 0) + 1
         prompt = "\n\n".join(part for part in [subtask.title, subtask.intent] if part)
         try:
+            ensure_worker_ready(adapter)
             worker_run = adapter.start(
                 WorkerStartRequest(
                     run_id=f"{run_id}:{subtask.id}:{attempts}",

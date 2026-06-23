@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import subprocess
+from io import BytesIO
 from pathlib import Path
-from urllib.error import HTTPError
+from urllib.error import HTTPError, URLError
 
 from agos.core.execution_worker import WorkerStartRequest, WorkerWorkspaceHandle
 
@@ -524,3 +526,255 @@ def test_openhands_worker_health_reports_endpoint_failure(monkeypatch):
     assert health.checks[0].name == "endpoint_health"
     assert health.checks[0].state == "failed"
     assert "connection refused" in health.checks[0].detail
+
+
+def test_codex_worker_process_error_includes_stdout_fallback(monkeypatch, tmp_path):
+    from agos.adapters.workers.codex_cli import CodexWorkerAdapter
+    import agos.adapters.workers.codex_cli as codex_module
+
+    class FakeProc:
+        returncode = 2
+        stdout = "stdout failure"
+        stderr = ""
+
+    monkeypatch.setattr(codex_module, "run_command", lambda *_args, **_kwargs: FakeProc())
+
+    try:
+        CodexWorkerAdapter(command="codex").start(
+            WorkerStartRequest(
+                run_id="execution-run-01",
+                subtask_id="subtask-01",
+                prompt="Do the work",
+                workspace_path=str(tmp_path),
+            )
+        )
+    except RuntimeError as exc:
+        message = str(exc)
+    else:  # pragma: no cover - assertion guard
+        raise AssertionError("expected process failure")
+
+    assert "codex exec" in message
+    assert "exit 2" in message
+    assert "stdout failure" in message
+
+
+def test_codex_worker_process_timeout_has_action_and_timeout(monkeypatch, tmp_path):
+    from agos.adapters.workers.codex_cli import CodexWorkerAdapter
+    import agos.adapters.workers.codex_cli as codex_module
+
+    def fake_run(*_args, **_kwargs):
+        raise subprocess.TimeoutExpired(["codex", "exec"], timeout=9)
+
+    monkeypatch.setattr(codex_module, "run_command", fake_run)
+
+    try:
+        CodexWorkerAdapter(command="codex", timeout_seconds=9).start(
+            WorkerStartRequest(
+                run_id="execution-run-01",
+                subtask_id="subtask-01",
+                prompt="Do the work",
+                workspace_path=str(tmp_path),
+            )
+        )
+    except RuntimeError as exc:
+        message = str(exc)
+    else:  # pragma: no cover - assertion guard
+        raise AssertionError("expected timeout failure")
+
+    assert "codex exec" in message
+    assert "timed out after 9 seconds" in message
+
+
+def test_multica_worker_invalid_json_names_action(monkeypatch):
+    from agos.adapters.workers.multica_worker import MulticaWorkerAdapter
+    import agos.adapters.workers.multica_worker as worker_module
+
+    class FakeProc:
+        returncode = 0
+        stdout = "{not-json"
+        stderr = ""
+
+    monkeypatch.setattr(worker_module, "run_command", lambda *_args, **_kwargs: FakeProc())
+
+    try:
+        MulticaWorkerAdapter(multica_bin="multica", agent="Lambda").start(
+            WorkerStartRequest(
+                run_id="execution-run-01",
+                subtask_id="subtask-01",
+                prompt="Do the work",
+                workspace_path="C:/workspace",
+            )
+        )
+    except RuntimeError as exc:
+        message = str(exc)
+    else:  # pragma: no cover - assertion guard
+        raise AssertionError("expected JSON failure")
+
+    assert "multica issue create" in message
+    assert "invalid JSON" in message
+
+
+def test_multica_worker_poll_merges_remote_and_local_output_refs(monkeypatch, tmp_path):
+    from agos.adapters.workers.multica_worker import MulticaWorkerAdapter
+    import agos.adapters.workers.multica_worker as worker_module
+
+    artifact_dir = tmp_path / ".agos-worker"
+    artifact_dir.mkdir()
+    (artifact_dir / "result.json").write_text("{}", encoding="utf-8")
+
+    class FakeProc:
+        returncode = 0
+        stderr = ""
+
+        def __init__(self, stdout: str) -> None:
+            self.stdout = stdout
+
+    def fake_run(args, **kwargs):
+        del kwargs
+        if args[1:3] == ["issue", "create"]:
+            return FakeProc('{"identifier": "MUL-1"}')
+        if args[1:3] == ["issue", "runs"]:
+            return FakeProc(
+                '{"runs": [{"id": "multica-run-01", "status": "done", '
+                '"output_refs": ["remote/result.json"]}]}'
+            )
+        raise AssertionError(args)
+
+    monkeypatch.setattr(worker_module, "run_command", fake_run)
+    adapter = MulticaWorkerAdapter(
+        multica_bin="multica",
+        agent="Lambda",
+        artifact_globs=[".agos-worker/*.json"],
+    )
+    run = adapter.start(
+        WorkerStartRequest(
+            run_id="execution-run-01",
+            subtask_id="subtask-01",
+            prompt="Do the work",
+            workspace_path=str(tmp_path),
+        )
+    )
+
+    status = adapter.poll(run.run_id, subtask_id=run.subtask_id)
+
+    assert status.output_refs == ["remote/result.json", ".agos-worker/result.json"]
+
+
+def test_multica_worker_cancel_collects_artifacts(monkeypatch, tmp_path):
+    from agos.adapters.workers.multica_worker import MulticaWorkerAdapter
+    import agos.adapters.workers.multica_worker as worker_module
+
+    artifact_dir = tmp_path / ".agos-worker"
+    artifact_dir.mkdir()
+    (artifact_dir / "cancel.json").write_text("{}", encoding="utf-8")
+
+    class FakeProc:
+        returncode = 0
+        stdout = '{"state": "cancelled", "output_refs": ["remote/cancel.json"]}'
+        stderr = ""
+
+    monkeypatch.setattr(worker_module, "run_command", lambda *_args, **_kwargs: FakeProc())
+    adapter = MulticaWorkerAdapter(
+        multica_bin="multica",
+        agent="Lambda",
+        artifact_globs=[".agos-worker/*.json"],
+    )
+    adapter._subtask_by_run_id["multica-run-01"] = "subtask-01"
+    adapter._workspaces_by_run_id["multica-run-01"] = str(tmp_path)
+
+    status = adapter.cancel("multica-run-01")
+
+    assert status.state == "cancelled"
+    assert status.output_refs == ["remote/cancel.json", ".agos-worker/cancel.json"]
+
+
+def test_openhands_json_request_wraps_http_errors(monkeypatch):
+    import agos.adapters.workers.openhands as openhands_module
+
+    def fake_urlopen(_request, timeout=30):
+        del timeout
+        raise HTTPError(
+            "http://openhands.local/runs",
+            503,
+            "Service Unavailable",
+            hdrs=None,
+            fp=BytesIO(b"backend down"),
+        )
+
+    monkeypatch.setattr(openhands_module, "urlopen", fake_urlopen)
+
+    try:
+        openhands_module._json_request("POST", "http://openhands.local/runs", timeout=12)
+    except RuntimeError as exc:
+        message = str(exc)
+    else:  # pragma: no cover - assertion guard
+        raise AssertionError("expected HTTP failure")
+
+    assert "OpenHands POST http://openhands.local/runs failed" in message
+    assert "HTTP 503 Service Unavailable" in message
+    assert "backend down" in message
+
+
+def test_openhands_json_request_wraps_url_and_json_errors(monkeypatch):
+    import agos.adapters.workers.openhands as openhands_module
+
+    def fake_urlopen_url_error(_request, timeout=30):
+        del timeout
+        raise URLError("connection refused")
+
+    monkeypatch.setattr(openhands_module, "urlopen", fake_urlopen_url_error)
+    try:
+        openhands_module._json_request("GET", "http://openhands.local/health")
+    except RuntimeError as exc:
+        url_message = str(exc)
+    else:  # pragma: no cover - assertion guard
+        raise AssertionError("expected URL failure")
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self):
+            return b"{not-json"
+
+    monkeypatch.setattr(openhands_module, "urlopen", lambda *_args, **_kwargs: FakeResponse())
+    try:
+        openhands_module._json_request("GET", "http://openhands.local/health")
+    except RuntimeError as exc:
+        json_message = str(exc)
+    else:  # pragma: no cover - assertion guard
+        raise AssertionError("expected JSON failure")
+
+    assert "connection refused" in url_message
+    assert "invalid JSON" in json_message
+
+
+def test_openhands_worker_start_sends_configured_env(monkeypatch, tmp_path):
+    from agos.adapters.workers.openhands import OpenHandsWorkerAdapter
+    import agos.adapters.workers.openhands as openhands_module
+
+    payloads: list[dict[str, object]] = []
+
+    def fake_request(method: str, url: str, payload=None, timeout=30, headers=None):
+        del method, url, timeout, headers
+        payloads.append(payload)
+        return {"run_id": "openhands-run-01"}
+
+    monkeypatch.setattr(openhands_module, "_json_request", fake_request)
+
+    OpenHandsWorkerAdapter(
+        endpoint="http://openhands.local",
+        env={"AGOS_WORKER_MODE": "production"},
+    ).start(
+        WorkerStartRequest(
+            run_id="execution-run-01",
+            subtask_id="subtask-01",
+            prompt="Do the work",
+            workspace_path=str(tmp_path),
+        )
+    )
+
+    assert payloads[0]["env"] == {"AGOS_WORKER_MODE": "production"}
