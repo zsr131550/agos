@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from agos.adapters.workers import (
+    ClaudeWorkerAdapter,
     CodexWorkerAdapter,
     LocalWorktreeWorkerAdapter,
     MulticaWorkerAdapter,
@@ -26,6 +27,18 @@ def register_configured_worker_adapters(service: ExecutionService) -> None:
                 CodexWorkerAdapter(
                     name=name,
                     command=worker.command or "codex",
+                    workspace_manager=service.workspace_manager,
+                    timeout_seconds=worker.timeout_seconds,
+                    poll_interval_seconds=worker.poll_interval_seconds,
+                    artifact_globs=worker.artifact_globs,
+                    env=worker.env,
+                )
+            )
+        elif worker.type == "claude_code":
+            service.register_worker_adapter(
+                ClaudeWorkerAdapter(
+                    name=name,
+                    command=worker.command or "claude",
                     workspace_manager=service.workspace_manager,
                     timeout_seconds=worker.timeout_seconds,
                     poll_interval_seconds=worker.poll_interval_seconds,

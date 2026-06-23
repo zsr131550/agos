@@ -42,7 +42,7 @@ def test_start_writes_task_status_and_dispatches(monkeypatch, tmp_repo):
     _write_config(tmp_repo)
     monkeypatch.chdir(tmp_repo)
     monkeypatch.setattr(
-        "agos.cli.cmd_start.MulticaAdapter.start",
+        "agos.cli.executor_registry.MulticaAdapter.start",
         lambda self, task: SimpleNamespace(adapter="multica", run_id="task-123", issue_id="AGO-77"),
     )
 
@@ -90,7 +90,7 @@ def test_start_aborts_if_task_already_active(monkeypatch, tmp_repo):
 
     monkeypatch.chdir(tmp_repo)
     monkeypatch.setattr(
-        "agos.cli.cmd_start.MulticaAdapter.start",
+        "agos.cli.executor_registry.MulticaAdapter.start",
         lambda self, task: (_ for _ in ()).throw(AssertionError("dispatch should not run")),
     )
 
@@ -112,7 +112,7 @@ def test_start_stages_task_until_dispatch_succeeds(monkeypatch, tmp_repo):
         assert staged_task_yaml.is_file()
         return SimpleNamespace(adapter="multica", run_id="task-staged", issue_id="AGO-100")
 
-    monkeypatch.setattr("agos.cli.cmd_start.MulticaAdapter.start", fake_start)
+    monkeypatch.setattr("agos.cli.executor_registry.MulticaAdapter.start", fake_start)
 
     result = runner.invoke(app, ["start", "--title", "Staged"])
 
@@ -129,7 +129,7 @@ def test_start_cleans_up_current_task_when_dispatch_fails(monkeypatch, tmp_repo)
     def fail_start(_self, _task):
         raise RuntimeError("multica unavailable")
 
-    monkeypatch.setattr("agos.cli.cmd_start.MulticaAdapter.start", fail_start)
+    monkeypatch.setattr("agos.cli.executor_registry.MulticaAdapter.start", fail_start)
 
     result = runner.invoke(app, ["start", "--title", "Dispatch fails"])
 
@@ -142,7 +142,7 @@ def test_start_uses_gate_override_when_provided(monkeypatch, tmp_repo):
     _write_config(tmp_repo)
     monkeypatch.chdir(tmp_repo)
     monkeypatch.setattr(
-        "agos.cli.cmd_start.MulticaAdapter.start",
+        "agos.cli.executor_registry.MulticaAdapter.start",
         lambda self, task: SimpleNamespace(adapter="multica", run_id="task-456", issue_id="AGO-88"),
     )
 

@@ -52,6 +52,32 @@ def test_discover_multica_agents_filters_named_items(monkeypatch):
     assert cmd_init.discover_multica_agents() == ["codex-gpt-5.4 xhigh", "glm-5.2"]
 
 
+def test_discover_local_agents_includes_multica_codex_and_claude(monkeypatch):
+    import agos.cli.cmd_init as cmd_init
+
+    monkeypatch.setattr(cmd_init, "discover_multica_agents", lambda: ["Lambda"])
+    monkeypatch.setattr(
+        cmd_init,
+        "_resolve_cli_command",
+        lambda command: {"codex": "codex.cmd", "claude": "claude.cmd"}.get(command),
+    )
+
+    candidates = cmd_init.discover_local_agents()
+
+    assert [candidate.key for candidate in candidates] == [
+        "multica:Lambda",
+        "codex:codex",
+        "claude:claude",
+    ]
+    assert [candidate.executor_name for candidate in candidates] == [
+        "multica",
+        "codex_cli",
+        "claude_code",
+    ]
+    assert candidates[1].worker_config == {"type": "codex_cli", "command": "codex.cmd"}
+    assert candidates[2].worker_config == {"type": "claude_code", "command": "claude.cmd"}
+
+
 def test_discover_multica_agents_rejects_invalid_json(monkeypatch):
     import agos.cli.cmd_init as cmd_init
 
@@ -99,35 +125,56 @@ def test_init_rejects_unsupported_executor(monkeypatch, tmp_repo):
     result = runner.invoke(app, ["init", "--executor", "other", "--agent", "Lambda"])
 
     assert result.exit_code != 0
-    assert "Only the 'multica' executor is supported" in result.stderr
+    assert "Executor must be one of: multica, codex_cli, claude_code." in result.stderr
 
 
 def test_init_lists_discovered_agents_and_requires_explicit_choice(monkeypatch, tmp_repo):
     monkeypatch.chdir(tmp_repo)
+    monkeypatch.setattr("agos.cli.cmd_init.discover_multica_agents", lambda: ["Lambda"])
     monkeypatch.setattr(
-        "agos.cli.cmd_init.discover_multica_agents",
-        lambda: ["codex-gpt-5.4 xhigh", "glm-5.2"],
+        "agos.cli.cmd_init._resolve_cli_command",
+        lambda command: {"codex": "codex.cmd", "claude": "claude.cmd"}.get(command),
     )
 
     result = runner.invoke(app, ["init"])
 
     assert result.exit_code == 1
-    assert "No default agent configured and --agent was not provided." in result.stderr
-    assert "Available Multica agents:" in result.stderr
-    assert "- codex-gpt-5.4 xhigh" in result.stderr
-    assert "- glm-5.2" in result.stderr
-    assert 'agos init --agent "codex-gpt-5.4 xhigh"' in result.stderr
+    assert "Available local agents:" in result.stdout
+    assert "1. multica:Lambda" in result.stdout
+    assert "2. codex:codex" in result.stdout
+    assert "3. claude:claude" in result.stdout
     assert not (tmp_repo / ".agos" / "agos.yaml").exists()
+
+
+def test_init_interactively_selects_executor_and_workers(monkeypatch, tmp_repo):
+    monkeypatch.chdir(tmp_repo)
+    monkeypatch.setattr("agos.cli.cmd_init.validate_executor_environment", lambda _executor: [])
+    monkeypatch.setattr("agos.cli.cmd_init.discover_multica_agents", lambda: ["Lambda"])
+    monkeypatch.setattr(
+        "agos.cli.cmd_init._resolve_cli_command",
+        lambda command: {"codex": "codex.cmd", "claude": "claude.cmd"}.get(command),
+    )
+
+    result = runner.invoke(app, ["init"], input="2\n2,3\n")
+
+    assert result.exit_code == 0, result.stderr
+    config = yaml.safe_load((tmp_repo / ".agos" / "agos.yaml").read_text(encoding="utf-8"))
+    assert config["executor"] == {"name": "codex_cli", "agent": "codex", "command": "codex.cmd"}
+    assert config["workers"] == {
+        "codex": {"type": "codex_cli", "command": "codex.cmd"},
+        "claude": {"type": "claude_code", "command": "claude.cmd"},
+    }
 
 
 def test_init_fails_when_agent_discovery_returns_no_candidates(monkeypatch, tmp_repo):
     monkeypatch.chdir(tmp_repo)
     monkeypatch.setattr("agos.cli.cmd_init.discover_multica_agents", lambda: [])
+    monkeypatch.setattr("agos.cli.cmd_init._resolve_cli_command", lambda _command: None)
 
     result = runner.invoke(app, ["init"])
 
     assert result.exit_code == 1
-    assert "No available Multica agents were found in the current workspace." in result.stderr
+    assert "No local AGOS-compatible agents were found in the current workspace." in result.stderr
     assert not (tmp_repo / ".agos" / "agos.yaml").exists()
 
 
@@ -138,12 +185,12 @@ def test_init_fails_when_agent_discovery_errors(monkeypatch, tmp_repo):
         raise RuntimeError("multica agent list failed: daemon unavailable")
 
     monkeypatch.setattr("agos.cli.cmd_init.discover_multica_agents", _fail)
+    monkeypatch.setattr("agos.cli.cmd_init._resolve_cli_command", lambda _command: None)
 
     result = runner.invoke(app, ["init"])
 
     assert result.exit_code == 1
-    assert "Could not discover Multica agents for the current workspace:" in result.stderr
-    assert "multica agent list failed: daemon unavailable" in result.stderr
+    assert "No local AGOS-compatible agents were found in the current workspace." in result.stderr
     assert not (tmp_repo / ".agos" / "agos.yaml").exists()
 
 
@@ -166,12 +213,13 @@ def test_init_explicit_agent_survives_discovery_failure(monkeypatch, tmp_repo):
 def test_init_explicit_agent_fails_when_not_in_discovered_candidates(monkeypatch, tmp_repo):
     monkeypatch.chdir(tmp_repo)
     monkeypatch.setattr("agos.cli.cmd_init.discover_multica_agents", lambda: ["glm-5.2"])
+    monkeypatch.setattr("agos.cli.cmd_init._resolve_cli_command", lambda _command: None)
 
     result = runner.invoke(app, ["init", "--agent", "codex-gpt-5.4 xhigh"])
 
     assert result.exit_code == 1
     assert 'Configured agent "codex-gpt-5.4 xhigh" was not found in the current workspace.' in result.stderr
-    assert "- glm-5.2" in result.stderr
+    assert "- multica:glm-5.2" in result.stderr
     assert not (tmp_repo / ".agos" / "agos.yaml").exists()
 
 

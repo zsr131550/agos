@@ -1,5 +1,6 @@
 """Built-in worker adapters."""
 from agos.adapters.workers.codex_cli import CodexWorkerAdapter
+from agos.adapters.workers.claude_code import ClaudeWorkerAdapter
 from agos.adapters.workers.fake import FakeWorkerAdapter
 from agos.adapters.workers.local_worktree import LocalWorktreeWorkerAdapter
 from agos.adapters.workers.multica_worker import MulticaWorkerAdapter
@@ -17,6 +18,7 @@ from agos.core.execution_worker import (
 
 __all__ = [
     "CodexWorkerAdapter",
+    "ClaudeWorkerAdapter",
     "FakeWorkerAdapter",
     "LocalWorktreeWorkerAdapter",
     "MulticaWorkerAdapter",

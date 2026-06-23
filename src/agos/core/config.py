@@ -37,6 +37,7 @@ class ExecutorConfig(BaseModel):
 
     name: str = "multica"
     agent: str
+    command: str | None = None
 
 
 class WorkerConfig(BaseModel):
@@ -62,7 +63,6 @@ class ReviewerConfig(BaseModel):
     command: str | None = None
 
 
-
 class OrchestrationConfig(BaseModel):
     """Runtime policy for multi-agent orchestration."""
 
@@ -74,6 +74,7 @@ class OrchestrationConfig(BaseModel):
     endpoint: str | None = None
     token: str | None = None
     timeout_seconds: int = Field(default=30, ge=1)
+
 
 class AGOSConfig(BaseModel):
     """Top-level `.agos/agos.yaml` structure."""
@@ -91,8 +92,10 @@ class AGOSConfig(BaseModel):
         *,
         executor: str = "multica",
         agent: str,
+        command: str | None = None,
+        workers: dict[str, WorkerConfig] | None = None,
     ) -> "AGOSConfig":
-        return default_config(executor=executor, agent=agent)
+        return default_config(executor=executor, agent=agent, command=command, workers=workers)
 
     @classmethod
     def load(cls, path: Path) -> "AGOSConfig":
@@ -102,7 +105,10 @@ class AGOSConfig(BaseModel):
     def save(self, path: Path) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(
-            yaml.safe_dump(self.model_dump(mode="python"), sort_keys=False),
+            yaml.safe_dump(
+                self.model_dump(mode="python", exclude_none=True, exclude_unset=True),
+                sort_keys=False,
+            ),
             encoding="utf-8",
         )
 
@@ -118,13 +124,16 @@ def default_config(
     *,
     executor: str = "multica",
     agent: str,
+    command: str | None = None,
+    workers: dict[str, WorkerConfig] | None = None,
 ) -> AGOSConfig:
     """The config `agos init` writes."""
 
     return AGOSConfig.model_validate(
         {
-            "executor": {"name": executor, "agent": agent},
+            "executor": {"name": executor, "agent": agent, "command": command},
             "default_workflow": "feature",
+            "workers": workers or {},
             "workflows": {
                 "feature": {
                     "gates": [

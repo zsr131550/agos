@@ -5,8 +5,9 @@ import time
 
 import typer
 
-from agos.adapters.multica import MulticaAdapter
+from agos.cli.executor_registry import configured_executor_adapter
 from agos.core.adapter import RunStatus
+from agos.core.adapter import ExecutorAdapter
 from agos.core.evidence import EvidenceStore
 from agos.core.ledger import Ledger
 from agos.core.repo import find_initialized_repo_root, git_head, git_status_porcelain, repo_paths
@@ -53,7 +54,7 @@ def _record_terminal_status(
     return True
 
 
-def _checkpoint_once(*, adapter: MulticaAdapter, status: TaskStatus, paths) -> tuple[bool, int | None]:
+def _checkpoint_once(*, adapter: ExecutorAdapter, status: TaskStatus, paths) -> tuple[bool, int | None]:
     run_info = _as_run_info(status.executor_run)
     store = EvidenceStore(paths.evidence)
     events = list(adapter.stream_events(run_info.run_id, since=status.last_event_seq))
@@ -128,7 +129,11 @@ def checkpoint_command(
         typer.echo("No active AGOS task found", err=True)
         raise typer.Exit(code=1)
 
-    adapter = MulticaAdapter()
+    try:
+        adapter = configured_executor_adapter(paths)
+    except Exception as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(code=1) from exc
     poll_once = once or not follow
 
     while True:

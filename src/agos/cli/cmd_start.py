@@ -5,7 +5,7 @@ import shutil
 
 import typer
 
-from agos.adapters.multica import MulticaAdapter
+from agos.cli.executor_registry import configured_executor_adapter
 from agos.core.config import load_config, resolve_gates
 from agos.core.evidence import EvidenceStore
 from agos.core.gate import gates_locked_payload
@@ -69,10 +69,6 @@ def start_command(
         ),
     )
 
-    if task.executor.adapter != "multica":
-        typer.echo(f"Unsupported executor '{task.executor.adapter}'", err=True)
-        raise typer.Exit(code=1)
-
     published_paths = repo_paths(repo_root)
     staging_dir = staging_task_dir(repo_root, task.id)
     shutil.rmtree(staging_dir, ignore_errors=True)
@@ -97,7 +93,7 @@ def start_command(
         }
     )
 
-    adapter = MulticaAdapter()
+    adapter = configured_executor_adapter(staging_paths)
     try:
         run = adapter.start(task)
     except RuntimeError as exc:

@@ -17,6 +17,7 @@ def test_register_configured_worker_adapters_uses_agos_yaml(tmp_repo):
                 "workers": {
                     "local_worktree": {"type": "local_worktree"},
                     "codex": {"type": "codex_cli", "command": "codex"},
+                    "claude": {"type": "claude_code", "command": "claude"},
                     "multica": {"type": "multica", "command": "multica", "agent": "Lambda"},
                     "openhands": {
                         "type": "openhands",
@@ -36,6 +37,7 @@ def test_register_configured_worker_adapters_uses_agos_yaml(tmp_repo):
 
     assert set(service.worker_adapter_names()) == {
         "codex",
+        "claude",
         "local_worktree",
         "multica",
         "openhands",

@@ -32,7 +32,7 @@ def config_show_command(
             json.dumps(
                 {
                     "path": str(paths.agos_yaml),
-                    "config": config.model_dump(mode="json"),
+                    "config": config.model_dump(mode="json", exclude_none=True),
                 },
                 sort_keys=True,
             )
@@ -41,7 +41,7 @@ def config_show_command(
 
     typer.echo(
         yaml.safe_dump(
-            config.model_dump(mode="python"),
+            config.model_dump(mode="python", exclude_none=True),
             sort_keys=False,
         ).rstrip()
     )

@@ -95,7 +95,7 @@ def test_checkpoint_once_writes_messages_anchor_ledger_and_status(monkeypatch, t
         seen["since"] = since
         return iter(events)
 
-    monkeypatch.setattr("agos.cli.cmd_checkpoint.MulticaAdapter.stream_events", fake_stream)
+    monkeypatch.setattr("agos.cli.executor_registry.MulticaAdapter.stream_events", fake_stream)
 
     result = runner.invoke(app, ["checkpoint", "--once"])
 
@@ -173,7 +173,7 @@ def test_checkpoint_follow_stops_after_run_complete(monkeypatch, tmp_repo):
             ]
         )
 
-    monkeypatch.setattr("agos.cli.cmd_checkpoint.MulticaAdapter.stream_events", fake_stream)
+    monkeypatch.setattr("agos.cli.executor_registry.MulticaAdapter.stream_events", fake_stream)
     monkeypatch.setattr("agos.cli.cmd_checkpoint.time.sleep", lambda _seconds: None)
 
     result = runner.invoke(app, ["checkpoint", "--follow"])
