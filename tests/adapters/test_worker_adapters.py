@@ -42,6 +42,55 @@ def test_codex_worker_adapter_starts_cli_with_workspace_and_prompt(monkeypatch, 
     assert "Implement README change" in calls[0]
 
 
+def test_codex_worker_adapter_parses_exec_jsonl_and_polls_cached_status(monkeypatch, tmp_path):
+    from agos.adapters.workers.codex_cli import CodexWorkerAdapter
+    import agos.adapters.workers.codex_cli as codex_module
+
+    calls: list[list[str]] = []
+
+    class FakeProc:
+        returncode = 0
+        stderr = ""
+
+        def __init__(self, stdout: str) -> None:
+            self.stdout = stdout
+
+    def fake_run(args, **kwargs):
+        del kwargs
+        calls.append(args)
+        if args[1] == "exec":
+            return FakeProc(
+                "\n".join(
+                    [
+                        '{"type":"thread.started","thread_id":"codex-thread-01"}',
+                        '{"type":"turn.started"}',
+                        '{"type":"item.completed","item":{"type":"agent_message","text":"done"}}',
+                        '{"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":2}}',
+                    ]
+                )
+            )
+        raise AssertionError(f"unexpected command: {args}")
+
+    monkeypatch.setattr(codex_module, "run_command", fake_run)
+    adapter = CodexWorkerAdapter(command="codex")
+
+    run = adapter.start(
+        WorkerStartRequest(
+            run_id="execution-run-01",
+            subtask_id="subtask-01",
+            prompt="Do the work",
+            workspace_path=str(tmp_path),
+        )
+    )
+    status = adapter.poll(run.run_id, subtask_id=run.subtask_id)
+
+    assert run.run_id == "codex-thread-01"
+    assert run.state == "running"
+    assert status.state == "completed"
+    assert status.detail == "done"
+    assert calls == [["codex", "exec", "--json", "Do the work"]]
+
+
 def test_codex_worker_adapter_poll_and_cancel(monkeypatch):
     from agos.adapters.workers.codex_cli import CodexWorkerAdapter
     import agos.adapters.workers.codex_cli as codex_module
@@ -228,6 +277,7 @@ def test_codex_worker_adapter_passes_timeout_and_env(monkeypatch, tmp_path):
 
     assert observed[0]["timeout"] == 99
     assert observed[0]["env"]["AGOS_WORKER_MODE"] == "production"
+    assert observed[0]["stdin"] == subprocess.DEVNULL
 
 
 def test_multica_worker_adapter_passes_timeout_and_env(monkeypatch):

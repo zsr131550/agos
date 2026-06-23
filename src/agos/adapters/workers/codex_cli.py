@@ -1,6 +1,7 @@
 """Codex CLI execution worker adapter."""
 from __future__ import annotations
 
+import json
 import shutil
 from pathlib import Path
 
@@ -57,6 +58,7 @@ class CodexWorkerAdapter:
         self.env = dict(env or {})
         self._subtasks_by_run_id: dict[str, str] = {}
         self._workspaces_by_run_id: dict[str, str] = {}
+        self._statuses_by_run_id: dict[str, WorkerRunStatus] = {}
 
     def health(self) -> WorkerHealth:
         resolved = shutil.which(self.command)
@@ -87,19 +89,18 @@ class CodexWorkerAdapter:
             env=self.env,
             runner=run_command,
         )
-        payload = load_json_object(proc.stdout, action="codex exec")
-        run_id = str(payload.get("run_id") or payload.get("id") or request.run_id)
+        worker_run, cached_status = _exec_result(self.name, request, proc.stdout)
+        run_id = worker_run.run_id
         self._subtasks_by_run_id[run_id] = request.subtask_id
         self._workspaces_by_run_id[run_id] = request.workspace_path
-        return WorkerRun(
-            backend=self.name,
-            run_id=run_id,
-            subtask_id=request.subtask_id,
-            state=_state(payload.get("state"), default="running"),
-            metadata=metadata_from_payload(payload),
-        )
+        if cached_status is not None:
+            self._statuses_by_run_id[run_id] = cached_status
+        return worker_run
 
     def poll(self, run_id: str, *, subtask_id: str) -> WorkerRunStatus:
+        cached = self._cached_status(run_id, subtask_id=subtask_id)
+        if cached is not None:
+            return cached
         proc = run_worker_command(
             [self.command, "status", run_id, "--json"],
             action="codex status",
@@ -118,6 +119,12 @@ class CodexWorkerAdapter:
         )
 
     def cancel(self, run_id: str) -> WorkerRunStatus:
+        cached = self._cached_status(
+            run_id,
+            subtask_id=self._subtasks_by_run_id.get(run_id, "unknown"),
+        )
+        if cached is not None and cached.is_terminal:
+            return cached
         proc = run_worker_command(
             [self.command, "cancel", run_id, "--json"],
             action="codex cancel",
@@ -137,9 +144,140 @@ class CodexWorkerAdapter:
             collect_artifact_refs(self._workspaces_by_run_id.get(run_id), self.artifact_globs),
         )
 
+    def _cached_status(self, run_id: str, *, subtask_id: str) -> WorkerRunStatus | None:
+        cached = self._statuses_by_run_id.get(run_id)
+        if cached is None:
+            return None
+        self._subtasks_by_run_id[run_id] = subtask_id
+        output_refs = merge_output_refs(
+            cached.output_refs,
+            collect_artifact_refs(self._workspaces_by_run_id.get(run_id), self.artifact_globs),
+        )
+        updated = cached.model_copy(
+            update={
+                "subtask_id": subtask_id,
+                "output_refs": output_refs,
+            }
+        )
+        self._statuses_by_run_id[run_id] = updated
+        return updated
+
 
 def _state(value: object, *, default: str) -> str:
     return STATE_MAP.get(str(value or default), default)
+
+
+def _exec_result(
+    backend: str,
+    request: WorkerStartRequest,
+    stdout: str,
+) -> tuple[WorkerRun, WorkerRunStatus | None]:
+    if _looks_like_jsonl(stdout):
+        return _exec_jsonl_result(backend, request, stdout)
+    payload = load_json_object(stdout, action="codex exec")
+    run_id = str(payload.get("run_id") or payload.get("id") or request.run_id)
+    return (
+        WorkerRun(
+            backend=backend,
+            run_id=run_id,
+            subtask_id=request.subtask_id,
+            state=_state(payload.get("state"), default="running"),
+            metadata=metadata_from_payload(payload),
+        ),
+        None,
+    )
+
+
+def _looks_like_jsonl(stdout: str) -> bool:
+    stripped = stdout.strip()
+    return bool(stripped and "\n" in stripped)
+
+
+def _exec_jsonl_result(
+    backend: str,
+    request: WorkerStartRequest,
+    stdout: str,
+) -> tuple[WorkerRun, WorkerRunStatus]:
+    events = _load_jsonl(stdout, action="codex exec")
+    run_id = _thread_id(events) or request.run_id
+    detail = _last_agent_message(events) or _last_error_message(events)
+    state = "failed" if _has_failed_event(events) else "completed"
+    metadata = _exec_metadata(events)
+    return (
+        WorkerRun(
+            backend=backend,
+            run_id=run_id,
+            subtask_id=request.subtask_id,
+            state="running",
+            metadata=metadata,
+        ),
+        WorkerRunStatus(
+            backend=backend,
+            run_id=run_id,
+            subtask_id=request.subtask_id,
+            state=state,
+            detail=detail,
+        ),
+    )
+
+
+def _load_jsonl(stdout: str, *, action: str) -> list[dict[str, object]]:
+    events: list[dict[str, object]] = []
+    for line_number, line in enumerate(stdout.splitlines(), start=1):
+        if not line.strip():
+            continue
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError as exc:
+            raise RuntimeError(
+                f"{action} returned invalid JSONL on line {line_number}: {exc.msg}"
+            ) from exc
+        if not isinstance(event, dict):
+            raise RuntimeError(f"{action} returned non-object JSONL on line {line_number}")
+        events.append(event)
+    if not events:
+        raise RuntimeError(f"{action} returned empty JSONL")
+    return events
+
+
+def _thread_id(events: list[dict[str, object]]) -> str | None:
+    for event in events:
+        if event.get("type") == "thread.started" and event.get("thread_id") is not None:
+            return str(event["thread_id"])
+    return None
+
+
+def _last_agent_message(events: list[dict[str, object]]) -> str | None:
+    for event in reversed(events):
+        item = event.get("item")
+        if not isinstance(item, dict):
+            continue
+        if item.get("type") == "agent_message" and item.get("text") is not None:
+            return str(item["text"])
+    return None
+
+
+def _last_error_message(events: list[dict[str, object]]) -> str | None:
+    for event in reversed(events):
+        for key in ("error", "message", "detail"):
+            value = event.get(key)
+            if value is not None:
+                return str(value)
+    return None
+
+
+def _has_failed_event(events: list[dict[str, object]]) -> bool:
+    return any(str(event.get("type", "")).endswith(".failed") for event in events)
+
+
+def _exec_metadata(events: list[dict[str, object]]) -> dict[str, str]:
+    metadata = {"event_count": str(len(events))}
+    for event in reversed(events):
+        usage = event.get("usage")
+        if isinstance(usage, dict):
+            metadata.update({f"usage_{key}": str(value) for key, value in usage.items()})
+            break
+    return metadata
 
 
 def _status(

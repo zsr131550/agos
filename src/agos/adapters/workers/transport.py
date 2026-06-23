@@ -30,6 +30,7 @@ def run_worker_command(
         "capture_output": True,
         "text": True,
         "encoding": "utf-8",
+        "stdin": subprocess.DEVNULL,
         "timeout": timeout_seconds,
         "env": worker_env(env),
     }
