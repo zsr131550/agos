@@ -53,6 +53,36 @@ def test_candidate_merge_decide_and_apply_non_overlapping_bundle(monkeypatch, tm
     assert store.read_candidate(second).status == "applied"
 
 
+def test_candidate_merge_preview_reports_dry_run_ref(monkeypatch, tmp_repo):
+    paths = _active_task(tmp_repo)
+    monkeypatch.chdir(tmp_repo)
+
+    plan = _plan_file(tmp_repo)
+    assert runner.invoke(app, ["execute-plan", "--plan", str(plan)]).exit_code == 0
+
+    store = ExecutionStore(paths)
+    readme_workspace = Path(store.read_workspace("subtask-readme").path)
+    docs_workspace = Path(store.read_workspace("subtask-docs").path)
+    (readme_workspace / "README.md").write_text("# changed\n", encoding="utf-8")
+    (docs_workspace / "docs").mkdir(exist_ok=True)
+    (docs_workspace / "docs" / "guide.md").write_text("# guide\n", encoding="utf-8")
+
+    first = _accepted_candidate("subtask-readme", "Update README", store)
+    second = _accepted_candidate("subtask-docs", "Add docs guide", store)
+
+    decide = runner.invoke(app, ["candidate", "merge", "decide", first, second])
+    bundle_id = decide.stdout.split()[0]
+
+    preview = runner.invoke(app, ["candidate", "merge", "preview", bundle_id])
+
+    assert preview.exit_code == 0, preview.stderr
+    preview_ref = preview.stdout.strip()
+    assert preview_ref.startswith("execution/merge_previews/")
+    assert store.read_candidate(first).status == "accepted"
+    assert store.read_candidate(second).status == "accepted"
+    assert any(path.name.startswith("merge-preview-") for path in (paths.evidence / "execution").glob("merge-preview-*.log"))
+
+
 def _accepted_candidate(subtask_id: str, summary: str, store: ExecutionStore) -> str:
     submit = runner.invoke(app, ["candidate", "submit", subtask_id, "--summary", summary])
     assert submit.exit_code == 0
@@ -222,3 +252,58 @@ def test_candidate_merge_apply_ordered_patch_stack(monkeypatch, tmp_repo):
     assert "second" in readme
     assert store.read_candidate(first).status == "applied"
     assert store.read_candidate(second).status == "applied"
+
+
+def test_candidate_merge_preview_prints_failed_ordered_stack_ref(monkeypatch, tmp_repo):
+    paths = _active_task(tmp_repo)
+    monkeypatch.chdir(tmp_repo)
+    (tmp_repo / "README.md").write_text("# t\nbase\n", encoding="utf-8")
+    subprocess.run(["git", "add", "README.md"], cwd=tmp_repo, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "expand readme"], cwd=tmp_repo, check=True)
+
+    plan = tmp_repo / "execution-plan-conflict.yaml"
+    plan.write_text(
+        yaml.safe_dump(
+            {
+                "id": "execution-plan-conflict",
+                "task_id": "agos-01",
+                "subtasks": [
+                    {
+                        "id": "subtask-readme-a",
+                        "title": "Update README A",
+                        "write_scope": ["README.md"],
+                        "worker": {"adapter": "local_worktree", "role": "worker_agent"},
+                    },
+                    {
+                        "id": "subtask-readme-b",
+                        "title": "Update README B",
+                        "depends_on": ["subtask-readme-a"],
+                        "write_scope": ["README.md"],
+                        "worker": {"adapter": "local_worktree", "role": "worker_agent"},
+                    },
+                ],
+            },
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+    assert runner.invoke(app, ["execute-plan", "--plan", str(plan)]).exit_code == 0
+
+    store = ExecutionStore(paths)
+    first_workspace = Path(store.read_workspace("subtask-readme-a").path)
+    second_workspace = Path(store.read_workspace("subtask-readme-b").path)
+    (first_workspace / "README.md").write_text("# t\nfirst\n", encoding="utf-8")
+    (second_workspace / "README.md").write_text("# t\nsecond\n", encoding="utf-8")
+    first = _accepted_candidate("subtask-readme-a", "Update README first", store)
+    second = _accepted_candidate("subtask-readme-b", "Update README second", store)
+    decide = runner.invoke(app, ["candidate", "merge", "decide", "--ordered", first, second])
+    bundle_id = decide.stdout.split()[0]
+
+    preview = runner.invoke(app, ["candidate", "merge", "preview", bundle_id])
+
+    assert preview.exit_code == 0, preview.stderr
+    preview_ref = preview.stdout.strip()
+    preview_id = Path(preview_ref).stem
+    preview_model = store.read_merge_preview(preview_id)
+    assert preview_model.state == "failed"
+    assert preview_model.conflict_evidence_refs

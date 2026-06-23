@@ -32,6 +32,13 @@ def _active_task(tmp_repo: Path):
             {
                 "executor": {"name": "multica", "agent": "Lambda"},
                 "default_workflow": "feature",
+                "reviewers": {
+                    "tests": {
+                        "type": "fake",
+                        "role": "test_reviewer",
+                        "required": True,
+                    }
+                },
                 "workflows": {
                     "feature": {
                         "gates": [
@@ -185,6 +192,93 @@ def test_candidate_cli_full_closed_loop(monkeypatch, tmp_repo):
     assert apply.exit_code == 0
     assert f"{candidate_id} applied" in apply.stdout
     assert (tmp_repo / "README.md").read_text(encoding="utf-8") == "# changed\n"
+
+
+def test_candidate_review_uses_configured_reviewers(monkeypatch, tmp_repo):
+    paths = _active_task(tmp_repo)
+    monkeypatch.chdir(tmp_repo)
+    runner.invoke(app, ["execute-plan", "--plan", str(_plan_file(tmp_repo))])
+    store = ExecutionStore(paths)
+    workspace = Path(store.read_workspace("subtask-readme").path)
+    (workspace / "README.md").write_text("# changed\n", encoding="utf-8")
+
+    submit = runner.invoke(
+        app,
+        ["candidate", "submit", "subtask-readme", "--summary", "Update README heading."],
+    )
+    candidate_id = submit.stdout.strip()
+    assert runner.invoke(app, ["candidate", "test", candidate_id]).exit_code == 0
+
+    result = runner.invoke(app, ["candidate", "review", candidate_id])
+
+    assert result.exit_code == 0, result.stderr
+    assert "reviews/review-" in result.stdout
+    assert "findings.json" in result.stdout
+    candidate = store.read_candidate(candidate_id)
+    assert candidate.status == "reviewed"
+    assert candidate.review_refs[-1].state == "completed"
+    assert candidate.review_refs[-1].report_ref is not None
+
+
+def test_candidate_review_with_configured_manual_reviewer_creates_packet(monkeypatch, tmp_repo):
+    paths = _active_task(tmp_repo)
+    paths.agos_yaml.write_text(
+        yaml.safe_dump(
+            {
+                "executor": {"name": "multica", "agent": "Lambda"},
+                "default_workflow": "feature",
+                "reviewers": {
+                    "security": {
+                        "type": "manual",
+                        "role": "security_reviewer",
+                        "required": True,
+                    }
+                },
+                "workflows": {
+                    "feature": {
+                        "gates": [
+                            {
+                                "id": "tests_pass",
+                                "stage": ["candidate", "pre-commit", "pre-push"],
+                                "argv": [
+                                    sys.executable,
+                                    "-c",
+                                    (
+                                        "from pathlib import Path; "
+                                        "assert Path('README.md').read_text().startswith('# changed')"
+                                    ),
+                                ],
+                            }
+                        ]
+                    }
+                },
+            },
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(tmp_repo)
+    runner.invoke(app, ["execute-plan", "--plan", str(_plan_file(tmp_repo))])
+    store = ExecutionStore(paths)
+    workspace = Path(store.read_workspace("subtask-readme").path)
+    (workspace / "README.md").write_text("# changed\n", encoding="utf-8")
+    submit = runner.invoke(
+        app,
+        ["candidate", "submit", "subtask-readme", "--summary", "Update README heading."],
+    )
+    candidate_id = submit.stdout.strip()
+    assert runner.invoke(app, ["candidate", "test", candidate_id]).exit_code == 0
+
+    result = runner.invoke(app, ["candidate", "review", candidate_id])
+
+    assert result.exit_code == 0, result.stderr
+    packet_ref = result.stdout.strip()
+    assert packet_ref.startswith("reviews/review-")
+    assert packet_ref.endswith("/packet.json")
+    candidate = store.read_candidate(candidate_id)
+    assert candidate.status == "reviewing"
+    assert candidate.review_refs[-1].state == "started"
+    assert candidate.review_refs[-1].report_ref is None
 
 
 def test_execute_plan_command_reports_task_mismatch(monkeypatch, tmp_repo):

@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -43,6 +43,7 @@ class ExecutionRuntimeSnapshot:
     waiting_nodes: tuple[str, ...] = ()
     completed_nodes: tuple[str, ...] = ()
     failed_nodes: tuple[str, ...] = ()
+    output_refs: dict[str, str] = field(default_factory=dict)
 
 
 class ExecutionRuntime:
@@ -229,6 +230,7 @@ class ExecutionRuntime:
                     "waiting_nodes": list(snapshot.waiting_nodes),
                     "completed_nodes": list(snapshot.completed_nodes),
                     "failed_nodes": list(snapshot.failed_nodes),
+                    "output_refs": snapshot.output_refs,
                 },
                 indent=2,
                 sort_keys=True,
@@ -277,6 +279,7 @@ def _execution_snapshot(
         cancelled_subtasks=cancelled,
         backend="native_async",
         state=_snapshot_state(plan, running, completed, failed, cancelled),
+        output_refs=_attempt_output_refs(attempts),
     )
 
 
@@ -310,6 +313,19 @@ def _subtasks_in_state(
         for subtask in plan.subtasks
         if attempts.get(subtask.id) is not None and attempts[subtask.id].state == state
     )
+
+
+def _attempt_output_refs(attempts: dict[str, WorkerAttempt]) -> dict[str, str]:
+    refs: dict[str, str] = {}
+    for subtask_id, attempt in attempts.items():
+        if not attempt.output_refs:
+            continue
+        if len(attempt.output_refs) == 1:
+            refs[subtask_id] = attempt.output_refs[0]
+            continue
+        for index, output_ref in enumerate(attempt.output_refs):
+            refs[f"{subtask_id}[{index}]"] = output_ref
+    return refs
 
 
 def _count_state(attempts: dict[str, WorkerAttempt], state: str) -> int:

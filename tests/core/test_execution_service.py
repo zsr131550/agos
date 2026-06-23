@@ -18,6 +18,8 @@ from agos.core.ledger import Ledger
 from agos.core.orchestration.models import OrchestratorRunHandle, OrchestratorRunStatus
 from agos.core.repo import repo_paths
 from agos.core.review import Finding, FindingResolution
+from agos.core.review_adapter import ReviewerRun, ReviewerRunStatus
+from agos.core.review_orchestrator import ReviewerSpec
 from agos.core.review_service import ReviewService
 from agos.core.status import TaskStatus, save_status
 from agos.core.task import ExecutorBinding, Task, save_task
@@ -655,8 +657,55 @@ def test_failed_candidate_review_ingest_marks_binding_failed(tmp_repo):
 
     candidate = ExecutionStore(service.paths).read_candidate(candidate_id)
     assert candidate.review_refs[-1].state == "failed"
+    assert candidate.status == "tested"
     assert _ledger_types(paths)[-1] == "candidate_review_failed"
     assert _ledger_records(paths)[-1]["task_id"] == "agos-01"
+
+
+def test_failed_configured_candidate_review_marks_binding_failed_and_resets_status(tmp_repo):
+    paths, service, candidate_id = _ready_candidate(tmp_repo)
+
+    class _FailingReviewer:
+        name = "failing"
+
+        def start(self, request):
+            return ReviewerRun(
+                backend=self.name,
+                run_id=request.run_id,
+                reviewer_id=request.reviewer_id,
+                state="running",
+            )
+
+        def poll(self, run_id: str, *, reviewer_id: str):
+            return ReviewerRunStatus(
+                backend=self.name,
+                run_id=run_id,
+                reviewer_id=reviewer_id,
+                state="failed",
+                detail="review failed",
+            )
+
+        def cancel(self, run_id: str):  # pragma: no cover - not used
+            raise AssertionError
+
+    with pytest.raises(ValueError, match="required reviewers failed"):
+        service.run_candidate_review(
+            candidate_id,
+            reviewer_adapters={"failing": _FailingReviewer()},
+            reviewer_specs=[
+                ReviewerSpec(
+                    id="security",
+                    role="security_reviewer",
+                    adapter="failing",
+                    required=True,
+                )
+            ],
+        )
+
+    candidate = ExecutionStore(paths).read_candidate(candidate_id)
+    assert candidate.status == "tested"
+    assert candidate.review_refs[-1].state == "failed"
+    assert _ledger_types(paths)[-1] == "candidate_review_failed"
 
 
 def test_accepted_decision_rejects_missing_candidate_review_report(tmp_repo):

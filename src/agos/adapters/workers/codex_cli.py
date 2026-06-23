@@ -14,12 +14,16 @@ from agos.adapters.workers.transport import (
 )
 from agos.core.command import run_command
 from agos.core.execution_worker import (
+    WorkerAssignment,
     WorkerHealth,
     WorkerHealthCheck,
+    WorkerPreparedWorkspace,
     WorkerRun,
     WorkerRunStatus,
     WorkerStartRequest,
+    WorkerWorkspaceHandle,
 )
+from agos.core.execution_workspace import ExecutionWorkspaceManager
 
 
 STATE_MAP = {
@@ -45,6 +49,8 @@ class CodexWorkerAdapter:
         *,
         command: str = "codex",
         name: str = "codex",
+        workspace_manager: ExecutionWorkspaceManager | None = None,
+        manager: ExecutionWorkspaceManager | None = None,
         timeout_seconds: int = 30,
         poll_interval_seconds: int = 1,
         artifact_globs: tuple[str, ...] | list[str] = (),
@@ -52,6 +58,8 @@ class CodexWorkerAdapter:
     ) -> None:
         self.command = command
         self.name = name
+        self.workspace_manager = workspace_manager if workspace_manager is not None else manager
+        self.manager = self.workspace_manager
         self.timeout_seconds = timeout_seconds
         self.poll_interval_seconds = poll_interval_seconds
         self.artifact_globs = tuple(artifact_globs)
@@ -59,6 +67,25 @@ class CodexWorkerAdapter:
         self._subtasks_by_run_id: dict[str, str] = {}
         self._workspaces_by_run_id: dict[str, str] = {}
         self._statuses_by_run_id: dict[str, WorkerRunStatus] = {}
+
+    def prepare(self, assignment: WorkerAssignment) -> WorkerPreparedWorkspace:
+        manager = self._workspace_manager("prepare")
+        binding = manager.create_workspace(assignment.subtask)
+        return WorkerPreparedWorkspace(
+            binding=binding,
+            handle=WorkerWorkspaceHandle(
+                subtask_id=assignment.subtask.id,
+                metadata={
+                    "workspace_path": binding.path,
+                    "workspace_ref": binding.ref,
+                },
+            ),
+        )
+
+    def export_candidate(self, handle: WorkerWorkspaceHandle) -> dict[str, bytes]:
+        manager = self._workspace_manager("export_candidate")
+        patch_bytes = manager.capture_patch(Path(handle.metadata["workspace_path"]))
+        return {"patch_bytes": patch_bytes}
 
     def health(self) -> WorkerHealth:
         resolved = shutil.which(self.command)
@@ -161,6 +188,13 @@ class CodexWorkerAdapter:
         )
         self._statuses_by_run_id[run_id] = updated
         return updated
+
+    def _workspace_manager(self, operation: str) -> ExecutionWorkspaceManager:
+        if self.workspace_manager is None:
+            raise RuntimeError(
+                f"worker {self.name!r} requires a workspace manager to {operation}"
+            )
+        return self.workspace_manager
 
 
 def _state(value: object, *, default: str) -> str:

@@ -98,6 +98,47 @@ def test_execution_runtime_cancel_stops_running_attempts(tmp_path):
     assert snapshot.cancelled_subtasks == ("a",)
 
 
+def test_execution_runtime_surfaces_worker_output_refs(tmp_path):
+    class OutputWorker(CompletingWorker):
+        def poll(self, run_id: str, *, subtask_id: str):
+            return WorkerRunStatus(
+                backend=self.name,
+                run_id=run_id,
+                subtask_id=subtask_id,
+                state="completed",
+                output_refs=["evidence/subtask-a.json"],
+            )
+
+    runtime = ExecutionRuntime(state_dir=tmp_path, worker_adapters={"fake": OutputWorker()})
+
+    runtime.tick(_plan(), run_id="execution-run-01")
+    snapshot = runtime.tick(_plan(), run_id="execution-run-01")
+
+    assert snapshot.output_refs == {"a": "evidence/subtask-a.json"}
+
+
+def test_execution_runtime_surfaces_multiple_worker_output_refs(tmp_path):
+    class MultiOutputWorker(CompletingWorker):
+        def poll(self, run_id: str, *, subtask_id: str):
+            return WorkerRunStatus(
+                backend=self.name,
+                run_id=run_id,
+                subtask_id=subtask_id,
+                state="completed",
+                output_refs=["remote/subtask-a.json", "local/subtask-a.json"],
+            )
+
+    runtime = ExecutionRuntime(state_dir=tmp_path, worker_adapters={"fake": MultiOutputWorker()})
+
+    runtime.tick(_plan(), run_id="execution-run-01")
+    snapshot = runtime.tick(_plan(), run_id="execution-run-01")
+
+    assert snapshot.output_refs == {
+        "a[0]": "remote/subtask-a.json",
+        "a[1]": "local/subtask-a.json",
+    }
+
+
 def _plan() -> ExecutionPlan:
     return ExecutionPlan(
         id="plan-01",

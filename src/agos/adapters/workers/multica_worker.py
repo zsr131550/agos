@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+from pathlib import Path
 
 from agos.adapters.workers.artifacts import collect_artifact_refs, merge_output_refs
 from agos.adapters.workers.transport import (
@@ -13,12 +14,16 @@ from agos.adapters.workers.transport import (
 )
 from agos.core.command import run_command
 from agos.core.execution_worker import (
+    WorkerAssignment,
     WorkerHealth,
     WorkerHealthCheck,
+    WorkerPreparedWorkspace,
     WorkerRun,
     WorkerRunStatus,
     WorkerStartRequest,
+    WorkerWorkspaceHandle,
 )
+from agos.core.execution_workspace import ExecutionWorkspaceManager
 
 
 STATUS_MAP = {
@@ -45,6 +50,8 @@ class MulticaWorkerAdapter:
         multica_bin: str = "multica",
         agent: str | None = None,
         name: str = "multica",
+        workspace_manager: ExecutionWorkspaceManager | None = None,
+        manager: ExecutionWorkspaceManager | None = None,
         timeout_seconds: int = 30,
         poll_interval_seconds: int = 1,
         artifact_globs: tuple[str, ...] | list[str] = (),
@@ -53,6 +60,8 @@ class MulticaWorkerAdapter:
         self.multica_bin = multica_bin
         self.agent = agent or "Lambda"
         self.name = name
+        self.workspace_manager = workspace_manager if workspace_manager is not None else manager
+        self.manager = self.workspace_manager
         self.timeout_seconds = timeout_seconds
         self.poll_interval_seconds = poll_interval_seconds
         self.artifact_globs = tuple(artifact_globs)
@@ -60,6 +69,25 @@ class MulticaWorkerAdapter:
         self._issue_by_run_id: dict[str, str] = {}
         self._subtask_by_run_id: dict[str, str] = {}
         self._workspaces_by_run_id: dict[str, str] = {}
+
+    def prepare(self, assignment: WorkerAssignment) -> WorkerPreparedWorkspace:
+        manager = self._workspace_manager("prepare")
+        binding = manager.create_workspace(assignment.subtask)
+        return WorkerPreparedWorkspace(
+            binding=binding,
+            handle=WorkerWorkspaceHandle(
+                subtask_id=assignment.subtask.id,
+                metadata={
+                    "workspace_path": binding.path,
+                    "workspace_ref": binding.ref,
+                },
+            ),
+        )
+
+    def export_candidate(self, handle: WorkerWorkspaceHandle) -> dict[str, bytes]:
+        manager = self._workspace_manager("export_candidate")
+        patch_bytes = manager.capture_patch(Path(handle.metadata["workspace_path"]))
+        return {"patch_bytes": patch_bytes}
 
     def health(self) -> WorkerHealth:
         return WorkerHealth(
@@ -140,8 +168,9 @@ class MulticaWorkerAdapter:
         )
 
     def cancel(self, run_id: str) -> WorkerRunStatus:
+        issue_id = self._issue_by_run_id.get(run_id, run_id)
         proc = run_worker_command(
-            [self.multica_bin, "issue", "cancel", run_id, "--output", "json"],
+            [self.multica_bin, "issue", "cancel", issue_id, "--output", "json"],
             action="multica issue cancel",
             timeout_seconds=self.timeout_seconds,
             env=self.env,
@@ -215,6 +244,13 @@ class MulticaWorkerAdapter:
         if not isinstance(runs, list):
             return []
         return [item for item in runs if isinstance(item, dict)]
+
+    def _workspace_manager(self, operation: str) -> ExecutionWorkspaceManager:
+        if self.workspace_manager is None:
+            raise RuntimeError(
+                f"worker {self.name!r} requires a workspace manager to {operation}"
+            )
+        return self.workspace_manager
 
 
 def _state(value: object, *, default: str) -> str:

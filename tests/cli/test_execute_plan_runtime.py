@@ -82,6 +82,7 @@ def test_execute_plan_run_uses_configured_external_orchestration_backend(monkeyp
                 backend=self.name,
                 run_id=handle.run_id,
                 state=self.states[handle.run_id],
+                output_refs={"manual-review": "reviews/review-01/raw/manual.json"},
             )
 
         def cancel(self, handle):
@@ -90,6 +91,7 @@ def test_execute_plan_run_uses_configured_external_orchestration_backend(monkeyp
                 backend=self.name,
                 run_id=handle.run_id,
                 state="cancelled",
+                output_refs={"manual-review": "reviews/review-01/raw/manual.json"},
             )
 
         def collect(self, handle):  # pragma: no cover - protocol compatibility
@@ -107,6 +109,7 @@ def test_execute_plan_run_uses_configured_external_orchestration_backend(monkeyp
     assert payload["backend"] == "external"
     assert payload["state"] == "queued"
     assert payload["completed_subtasks"] == []
+    assert payload["output_refs"] == {"manual-review": "reviews/review-01/raw/manual.json"}
 
     status = runner.invoke(app, ["execute-plan", "status", payload["run_id"], "--json"])
     cancelled = runner.invoke(app, ["execute-plan", "cancel", payload["run_id"], "--json"])
@@ -115,6 +118,9 @@ def test_execute_plan_run_uses_configured_external_orchestration_backend(monkeyp
     assert json.loads(status.stdout)["backend"] == "external"
     assert cancelled.exit_code == 0, cancelled.stderr
     assert json.loads(cancelled.stdout)["state"] == "cancelled"
+    assert json.loads(cancelled.stdout)["output_refs"] == {
+        "manual-review": "reviews/review-01/raw/manual.json"
+    }
 
 
 def _active_task(tmp_repo: Path, *, orchestration: dict[str, object] | None = None):

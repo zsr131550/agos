@@ -6,7 +6,9 @@ from pathlib import Path
 
 import typer
 
-from agos.adapters.workers import LocalWorktreeWorkerAdapter
+from agos.adapters.reviewers import ManualReviewerAdapter
+from agos.cli.reviewer_registry import configured_reviewer_adapters, configured_reviewer_specs
+from agos.cli.worker_registry import register_configured_worker_adapters
 from agos.core.execution_service import ExecutionService
 from agos.core.execution_store import ExecutionStore
 from agos.core.repo import find_initialized_repo_root, repo_paths
@@ -45,9 +47,7 @@ def candidate_submit_command(
         repo_root = find_initialized_repo_root()
         paths = repo_paths(repo_root)
         service = ExecutionService(paths)
-        service.register_worker_adapter(
-            LocalWorktreeWorkerAdapter(service.workspace_manager),
-        )
+        register_configured_worker_adapters(service)
         candidate = service.submit_candidate(
             subtask_id,
             summary=summary,
@@ -94,16 +94,27 @@ def candidate_review_command(
             typer.echo(packet_ref)
             return
         if ingest is None:
-            raise ValueError("Use --packet-only or --ingest <file>")
-        if review_id is None:
-            raise ValueError("--review-id is required with --ingest")
-        payload = json.loads(ingest.read_text(encoding="utf-8"))
-        findings = [Finding.model_validate(item) for item in payload["findings"]]
-        report_ref, report = service.ingest_candidate_review(
-            candidate_id,
-            review_id,
-            findings=findings,
-        )
+            reviewer_adapters = configured_reviewer_adapters(repo_root)
+            reviewer_specs = configured_reviewer_specs(repo_root)
+            if _has_manual_reviewer(reviewer_specs, reviewer_adapters):
+                packet_ref, _packet = service.review_candidate(candidate_id)
+                typer.echo(packet_ref)
+                return
+            report_ref, report, _result = service.run_candidate_review(
+                candidate_id,
+                reviewer_adapters=reviewer_adapters,
+                reviewer_specs=reviewer_specs,
+            )
+        else:
+            if review_id is None:
+                raise ValueError("--review-id is required with --ingest")
+            payload = json.loads(ingest.read_text(encoding="utf-8"))
+            findings = [Finding.model_validate(item) for item in payload["findings"]]
+            report_ref, report = service.ingest_candidate_review(
+                candidate_id,
+                review_id,
+                findings=findings,
+            )
     except Exception as exc:
         typer.echo(str(exc), err=True)
         raise typer.Exit(code=1) from exc
@@ -183,4 +194,24 @@ def candidate_merge_apply_command(bundle_decision_id: str) -> None:
     typer.echo("applied " + " ".join(candidate.id for candidate in candidates))
 
 
+@merge_app.command("preview")
+def candidate_merge_preview_command(bundle_decision_id: str) -> None:
+    try:
+        repo_root = find_initialized_repo_root()
+        paths = repo_paths(repo_root)
+        preview_ref, _preview = ExecutionService(paths).preview_candidate_bundle(bundle_decision_id)
+    except Exception as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(code=1) from exc
+
+    typer.echo(preview_ref)
+
+
 candidate_app.add_typer(merge_app, name="merge")
+
+
+def _has_manual_reviewer(reviewer_specs: list[object], reviewer_adapters: dict[str, object]) -> bool:
+    return any(
+        isinstance(reviewer_adapters.get(getattr(spec, "adapter", "")), ManualReviewerAdapter)
+        for spec in reviewer_specs
+    )

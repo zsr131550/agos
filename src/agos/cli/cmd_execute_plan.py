@@ -112,6 +112,9 @@ def _format_snapshot(snapshot: ExecutionRuntimeSnapshot) -> str:
         parts.append(f"waiting nodes: {_join(snapshot.waiting_nodes)}")
         parts.append(f"completed nodes: {_join(snapshot.completed_nodes)}")
         parts.append(f"failed nodes: {_join(snapshot.failed_nodes)}")
+    if snapshot.output_refs:
+        refs = ", ".join(f"{key}={value}" for key, value in sorted(snapshot.output_refs.items()))
+        parts.append(f"output refs: {refs}")
     return " | ".join(parts)
 
 
@@ -128,6 +131,7 @@ def _snapshot_json(snapshot: ExecutionRuntimeSnapshot) -> str:
             "waiting_nodes": list(snapshot.waiting_nodes),
             "completed_nodes": list(snapshot.completed_nodes),
             "failed_nodes": list(snapshot.failed_nodes),
+            "output_refs": snapshot.output_refs,
         },
         sort_keys=True,
     )

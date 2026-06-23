@@ -1,6 +1,7 @@
 """OpenHands HTTP execution worker adapter."""
 from __future__ import annotations
 
+from pathlib import Path
 from urllib.request import urlopen
 
 from agos.adapters.workers.artifacts import collect_artifact_refs, merge_output_refs
@@ -10,12 +11,16 @@ from agos.adapters.workers.transport import (
     output_refs_from_payload,
 )
 from agos.core.execution_worker import (
+    WorkerAssignment,
     WorkerHealth,
     WorkerHealthCheck,
+    WorkerPreparedWorkspace,
     WorkerRun,
     WorkerRunStatus,
     WorkerStartRequest,
+    WorkerWorkspaceHandle,
 )
+from agos.core.execution_workspace import ExecutionWorkspaceManager
 
 
 STATE_MAP = {
@@ -41,6 +46,8 @@ class OpenHandsWorkerAdapter:
         endpoint: str,
         token: str | None = None,
         name: str = "openhands",
+        workspace_manager: ExecutionWorkspaceManager | None = None,
+        manager: ExecutionWorkspaceManager | None = None,
         timeout: int = 30,
         timeout_seconds: int | None = None,
         poll_interval_seconds: int = 1,
@@ -50,6 +57,8 @@ class OpenHandsWorkerAdapter:
         self.endpoint = endpoint.rstrip("/")
         self.token = token
         self.name = name
+        self.workspace_manager = workspace_manager if workspace_manager is not None else manager
+        self.manager = self.workspace_manager
         self.timeout_seconds = timeout if timeout_seconds is None else timeout_seconds
         self.timeout = self.timeout_seconds
         self.poll_interval_seconds = poll_interval_seconds
@@ -57,6 +66,25 @@ class OpenHandsWorkerAdapter:
         self.env = dict(env or {})
         self._subtasks_by_run_id: dict[str, str] = {}
         self._workspaces_by_run_id: dict[str, str] = {}
+
+    def prepare(self, assignment: WorkerAssignment) -> WorkerPreparedWorkspace:
+        manager = self._workspace_manager("prepare")
+        binding = manager.create_workspace(assignment.subtask)
+        return WorkerPreparedWorkspace(
+            binding=binding,
+            handle=WorkerWorkspaceHandle(
+                subtask_id=assignment.subtask.id,
+                metadata={
+                    "workspace_path": binding.path,
+                    "workspace_ref": binding.ref,
+                },
+            ),
+        )
+
+    def export_candidate(self, handle: WorkerWorkspaceHandle) -> dict[str, bytes]:
+        manager = self._workspace_manager("export_candidate")
+        patch_bytes = manager.capture_patch(Path(handle.metadata["workspace_path"]))
+        return {"patch_bytes": patch_bytes}
 
     def health(self) -> WorkerHealth:
         try:
@@ -149,6 +177,13 @@ class OpenHandsWorkerAdapter:
         if not self.token:
             return {}
         return {"Authorization": f"Bearer {self.token}"}
+
+    def _workspace_manager(self, operation: str) -> ExecutionWorkspaceManager:
+        if self.workspace_manager is None:
+            raise RuntimeError(
+                f"worker {self.name!r} requires a workspace manager to {operation}"
+            )
+        return self.workspace_manager
 
 
 def _json_request(

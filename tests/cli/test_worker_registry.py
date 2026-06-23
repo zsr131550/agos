@@ -94,3 +94,37 @@ def test_worker_registry_passes_runtime_fields(tmp_repo):
     assert adapter.poll_interval_seconds == 2
     assert adapter.artifact_globs == (".agos-worker/*.json",)
     assert adapter.env == {"AGOS_WORKER_MODE": "production"}
+
+
+def test_worker_registry_passes_workspace_manager_to_real_workers(tmp_repo):
+    paths = repo_paths(tmp_repo)
+    paths.agos_dir.mkdir(parents=True, exist_ok=True)
+    paths.agos_yaml.write_text(
+        yaml.safe_dump(
+            {
+                "executor": {"name": "multica", "agent": "Lambda"},
+                "workers": {
+                    "codex": {"type": "codex_cli", "command": "codex"},
+                    "multica": {
+                        "type": "multica",
+                        "command": "multica",
+                        "agent": "Lambda",
+                    },
+                    "openhands": {
+                        "type": "openhands",
+                        "endpoint": "http://openhands.local",
+                    },
+                },
+                "workflows": {},
+            },
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+    service = ExecutionService(paths)
+
+    register_configured_worker_adapters(service)
+
+    assert service._worker_adapters["codex"].workspace_manager is service.workspace_manager
+    assert service._worker_adapters["multica"].workspace_manager is service.workspace_manager
+    assert service._worker_adapters["openhands"].workspace_manager is service.workspace_manager

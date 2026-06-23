@@ -5,7 +5,146 @@ from io import BytesIO
 from pathlib import Path
 from urllib.error import HTTPError, URLError
 
-from agos.core.execution_worker import WorkerStartRequest, WorkerWorkspaceHandle
+import pytest
+
+from agos.core.execution import ExecutionSubtask, ExecutionWorker, WorkspaceBinding
+from agos.core.execution_worker import (
+    WorkerAssignment,
+    WorkerStartRequest,
+    WorkerWorkspaceHandle,
+)
+
+
+def _worker_subtask(adapter: str = "codex") -> ExecutionSubtask:
+    return ExecutionSubtask(
+        id="subtask-01",
+        title="Implement README change",
+        intent="Update the README",
+        write_scope=["README.md"],
+        worker=ExecutionWorker(adapter=adapter),
+    )
+
+
+class RecordingWorkspaceManager:
+    def __init__(self, workspace_path: Path) -> None:
+        self.workspace_path = workspace_path
+        self.created_subtasks: list[ExecutionSubtask] = []
+        self.captured_paths: list[Path] = []
+
+    def create_workspace(self, subtask: ExecutionSubtask) -> WorkspaceBinding:
+        self.created_subtasks.append(subtask)
+        return WorkspaceBinding(
+            subtask_id=subtask.id,
+            path=str(self.workspace_path),
+            base_ref="main",
+            base_commit="abc123",
+        )
+
+    def capture_patch(self, workspace: Path) -> bytes:
+        self.captured_paths.append(workspace)
+        return b"diff --git a/README.md b/README.md\n"
+
+
+@pytest.mark.parametrize(
+    ("adapter_factory", "adapter_name"),
+    [
+        (
+            lambda manager: __import__(
+                "agos.adapters.workers.codex_cli",
+                fromlist=["CodexWorkerAdapter"],
+            ).CodexWorkerAdapter(
+                command="codex",
+                name="codex-real",
+                workspace_manager=manager,
+            ),
+            "codex-real",
+        ),
+        (
+            lambda manager: __import__(
+                "agos.adapters.workers.multica_worker",
+                fromlist=["MulticaWorkerAdapter"],
+            ).MulticaWorkerAdapter(
+                multica_bin="multica",
+                agent="Lambda",
+                name="multica-real",
+                workspace_manager=manager,
+            ),
+            "multica-real",
+        ),
+        (
+            lambda manager: __import__(
+                "agos.adapters.workers.openhands",
+                fromlist=["OpenHandsWorkerAdapter"],
+            ).OpenHandsWorkerAdapter(
+                endpoint="http://openhands.local",
+                name="openhands-real",
+                workspace_manager=manager,
+            ),
+            "openhands-real",
+        ),
+    ],
+)
+def test_real_worker_adapters_prepare_and_export_with_workspace_manager(
+    adapter_factory,
+    adapter_name,
+    tmp_path,
+):
+    manager = RecordingWorkspaceManager(tmp_path / "subtask-01")
+    adapter = adapter_factory(manager)
+    subtask = _worker_subtask(adapter_name)
+
+    prepared = adapter.prepare(WorkerAssignment(subtask=subtask))
+    export = adapter.export_candidate(prepared.handle)
+
+    assert adapter.name == adapter_name
+    assert manager.created_subtasks == [subtask]
+    assert prepared.binding.path == str(tmp_path / "subtask-01")
+    assert prepared.handle.subtask_id == "subtask-01"
+    assert prepared.handle.metadata == {
+        "workspace_path": str(tmp_path / "subtask-01"),
+        "workspace_ref": "execution/workspaces/subtask-01.json",
+    }
+    assert export["patch_bytes"].startswith(b"diff --git")
+    assert manager.captured_paths == [tmp_path / "subtask-01"]
+
+
+@pytest.mark.parametrize(
+    "adapter",
+    [
+        pytest.param(
+            __import__(
+                "agos.adapters.workers.codex_cli",
+                fromlist=["CodexWorkerAdapter"],
+            ).CodexWorkerAdapter(command="codex"),
+            id="codex",
+        ),
+        pytest.param(
+            __import__(
+                "agos.adapters.workers.multica_worker",
+                fromlist=["MulticaWorkerAdapter"],
+            ).MulticaWorkerAdapter(multica_bin="multica", agent="Lambda"),
+            id="multica",
+        ),
+        pytest.param(
+            __import__(
+                "agos.adapters.workers.openhands",
+                fromlist=["OpenHandsWorkerAdapter"],
+            ).OpenHandsWorkerAdapter(endpoint="http://openhands.local"),
+            id="openhands",
+        ),
+    ],
+)
+def test_real_worker_adapters_require_workspace_manager_for_prepare_and_export(adapter, tmp_path):
+    with pytest.raises(RuntimeError, match="workspace manager"):
+        adapter.prepare(WorkerAssignment(subtask=_worker_subtask(adapter.name)))
+
+    with pytest.raises(RuntimeError, match="workspace manager"):
+        adapter.export_candidate(
+            WorkerWorkspaceHandle(
+                subtask_id="subtask-01",
+                metadata={"workspace_path": str(tmp_path)},
+            )
+        )
 
 
 def test_codex_worker_adapter_starts_cli_with_workspace_and_prompt(monkeypatch, tmp_path):
@@ -735,6 +874,56 @@ def test_multica_worker_cancel_collects_artifacts(monkeypatch, tmp_path):
     status = adapter.cancel("multica-run-01")
 
     assert status.state == "cancelled"
+    assert status.output_refs == ["remote/cancel.json", ".agos-worker/cancel.json"]
+
+
+def test_multica_worker_cancel_uses_issue_id_after_start(monkeypatch, tmp_path):
+    from agos.adapters.workers.multica_worker import MulticaWorkerAdapter
+    import agos.adapters.workers.multica_worker as worker_module
+
+    artifact_dir = tmp_path / ".agos-worker"
+    artifact_dir.mkdir()
+    (artifact_dir / "cancel.json").write_text("{}", encoding="utf-8")
+    calls: list[list[str]] = []
+
+    class FakeProc:
+        returncode = 0
+        stderr = ""
+
+        def __init__(self, stdout: str) -> None:
+            self.stdout = stdout
+
+    def fake_run(args, **kwargs):
+        del kwargs
+        calls.append(args)
+        if args[1:3] == ["issue", "create"]:
+            return FakeProc('{"identifier": "MUL-42"}')
+        if args[1:3] == ["issue", "runs"]:
+            return FakeProc('{"runs": [{"id": "multica-run-42", "status": "running"}]}')
+        if args[1:3] == ["issue", "cancel"]:
+            return FakeProc('{"state": "cancelled", "output_refs": ["remote/cancel.json"]}')
+        raise AssertionError(args)
+
+    monkeypatch.setattr(worker_module, "run_command", fake_run)
+    adapter = MulticaWorkerAdapter(
+        multica_bin="multica",
+        agent="Lambda",
+        artifact_globs=[".agos-worker/*.json"],
+    )
+    run = adapter.start(
+        WorkerStartRequest(
+            run_id="execution-run-01",
+            subtask_id="subtask-01",
+            prompt="Do the work",
+            workspace_path=str(tmp_path),
+        )
+    )
+
+    status = adapter.cancel(run.run_id)
+
+    assert calls[-1] == ["multica", "issue", "cancel", "MUL-42", "--output", "json"]
+    assert status.run_id == "multica-run-42"
+    assert status.subtask_id == "subtask-01"
     assert status.output_refs == ["remote/cancel.json", ".agos-worker/cancel.json"]
 
 

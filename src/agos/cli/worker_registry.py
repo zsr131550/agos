@@ -26,6 +26,7 @@ def register_configured_worker_adapters(service: ExecutionService) -> None:
                 CodexWorkerAdapter(
                     name=name,
                     command=worker.command or "codex",
+                    workspace_manager=service.workspace_manager,
                     timeout_seconds=worker.timeout_seconds,
                     poll_interval_seconds=worker.poll_interval_seconds,
                     artifact_globs=worker.artifact_globs,
@@ -38,6 +39,7 @@ def register_configured_worker_adapters(service: ExecutionService) -> None:
                     name=name,
                     multica_bin=worker.command or "multica",
                     agent=worker.agent or config.executor.agent,
+                    workspace_manager=service.workspace_manager,
                     timeout_seconds=worker.timeout_seconds,
                     poll_interval_seconds=worker.poll_interval_seconds,
                     artifact_globs=worker.artifact_globs,
@@ -52,6 +54,7 @@ def register_configured_worker_adapters(service: ExecutionService) -> None:
                     name=name,
                     endpoint=worker.endpoint,
                     token=worker.token,
+                    workspace_manager=service.workspace_manager,
                     timeout_seconds=worker.timeout_seconds,
                     poll_interval_seconds=worker.poll_interval_seconds,
                     artifact_globs=worker.artifact_globs,
