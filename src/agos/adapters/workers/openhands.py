@@ -5,7 +5,13 @@ import json
 from urllib.request import Request, urlopen
 
 from agos.adapters.workers.artifacts import collect_artifact_refs, merge_output_refs
-from agos.core.execution_worker import WorkerRun, WorkerRunStatus, WorkerStartRequest
+from agos.core.execution_worker import (
+    WorkerHealth,
+    WorkerHealthCheck,
+    WorkerRun,
+    WorkerRunStatus,
+    WorkerStartRequest,
+)
 
 
 STATE_MAP = {
@@ -47,6 +53,33 @@ class OpenHandsWorkerAdapter:
         self.env = dict(env or {})
         self._subtasks_by_run_id: dict[str, str] = {}
         self._workspaces_by_run_id: dict[str, str] = {}
+
+    def health(self) -> WorkerHealth:
+        try:
+            payload = _json_request(
+                "GET",
+                f"{self.endpoint}/health",
+                timeout=self.timeout,
+                headers=self._headers(),
+            )
+        except Exception as exc:
+            check = WorkerHealthCheck(name="endpoint_health", state="failed", detail=str(exc))
+        else:
+            detail = payload.get("status") or payload.get("state") or "ok"
+            check = WorkerHealthCheck(name="endpoint_health", state="passed", detail=str(detail))
+        return WorkerHealth(
+            name=self.name,
+            adapter="openhands",
+            checks=[check],
+            metadata={
+                "endpoint": self.endpoint,
+                "timeout_seconds": str(self.timeout_seconds),
+                "poll_interval_seconds": str(self.poll_interval_seconds),
+                "artifact_globs": ",".join(self.artifact_globs),
+                "token_configured": str(self.token is not None).lower(),
+                "env_keys": ",".join(sorted(self.env)),
+            },
+        )
 
     def start(self, request: WorkerStartRequest) -> WorkerRun:
         payload = _json_request(

@@ -6,6 +6,8 @@ from agos.adapters.workers.multica_worker import MulticaWorkerAdapter
 from agos.adapters.workers.openhands import OpenHandsWorkerAdapter
 from agos.core.execution_worker import (
     WorkerAssignment,
+    WorkerHealth,
+    WorkerHealthCheck,
     WorkerPreparedWorkspace,
     WorkerRun,
     WorkerRunStatus,
@@ -20,6 +22,8 @@ __all__ = [
     "MulticaWorkerAdapter",
     "OpenHandsWorkerAdapter",
     "WorkerAssignment",
+    "WorkerHealth",
+    "WorkerHealthCheck",
     "WorkerPreparedWorkspace",
     "WorkerRun",
     "WorkerRunStatus",

@@ -6,7 +6,13 @@ import os
 
 from agos.adapters.workers.artifacts import collect_artifact_refs
 from agos.core.command import run_command
-from agos.core.execution_worker import WorkerRun, WorkerRunStatus, WorkerStartRequest
+from agos.core.execution_worker import (
+    WorkerHealth,
+    WorkerHealthCheck,
+    WorkerRun,
+    WorkerRunStatus,
+    WorkerStartRequest,
+)
 
 
 STATUS_MAP = {
@@ -48,6 +54,24 @@ class MulticaWorkerAdapter:
         self._issue_by_run_id: dict[str, str] = {}
         self._subtask_by_run_id: dict[str, str] = {}
         self._workspaces_by_run_id: dict[str, str] = {}
+
+    def health(self) -> WorkerHealth:
+        return WorkerHealth(
+            name=self.name,
+            adapter="multica",
+            checks=[
+                self._health_command("daemon_status", [self.multica_bin, "daemon", "status"]),
+                self._workspace_list_health(),
+            ],
+            metadata={
+                "command": self.multica_bin,
+                "agent": self.agent,
+                "timeout_seconds": str(self.timeout_seconds),
+                "poll_interval_seconds": str(self.poll_interval_seconds),
+                "artifact_globs": ",".join(self.artifact_globs),
+                "env_keys": ",".join(sorted(self.env)),
+            },
+        )
 
     def start(self, request: WorkerStartRequest) -> WorkerRun:
         issue_proc = run_command(
@@ -134,6 +158,42 @@ class MulticaWorkerAdapter:
             state="cancelled",
         )
 
+    def _health_command(self, name: str, args: list[str]) -> WorkerHealthCheck:
+        try:
+            proc = run_command(
+                args,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                timeout=self.timeout_seconds,
+                env={**os.environ, **self.env},
+            )
+        except Exception as exc:
+            return WorkerHealthCheck(name=name, state="failed", detail=str(exc))
+        if proc.returncode != 0:
+            return WorkerHealthCheck(name=name, state="failed", detail=_proc_detail(proc))
+        return WorkerHealthCheck(name=name, state="passed", detail=_proc_detail(proc) or "ok")
+
+    def _workspace_list_health(self) -> WorkerHealthCheck:
+        try:
+            proc = run_command(
+                [self.multica_bin, "workspace", "list", "--output", "json"],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                timeout=self.timeout_seconds,
+                env={**os.environ, **self.env},
+            )
+        except Exception as exc:
+            return WorkerHealthCheck(name="workspace_list", state="failed", detail=str(exc))
+        if proc.returncode != 0:
+            return WorkerHealthCheck(name="workspace_list", state="failed", detail=_proc_detail(proc))
+        try:
+            _load_json_or_list(proc.stdout or "")
+        except Exception as exc:
+            return WorkerHealthCheck(name="workspace_list", state="failed", detail=str(exc))
+        return WorkerHealthCheck(name="workspace_list", state="passed", detail=_proc_detail(proc) or "ok")
+
     def _issue_runs(self, issue_id: str) -> list[dict[str, object]]:
         proc = run_command(
             [self.multica_bin, "issue", "runs", issue_id, "--output", "json"],
@@ -172,6 +232,10 @@ def _load_json_or_list(stdout: str) -> dict[str, object] | list[object]:
 def _raise_on_failure(proc, action: str) -> None:
     if proc.returncode != 0:
         raise RuntimeError(f"{action} failed with exit {proc.returncode}: {proc.stderr.strip()}")
+
+
+def _proc_detail(proc) -> str:
+    return (proc.stderr or proc.stdout or "").strip()
 
 
 def _state(value: object, *, default: str) -> str:

@@ -14,6 +14,7 @@ from agos.cli.cmd_resolve import resolve_command
 from agos.cli.cmd_review import review_app
 from agos.cli.cmd_start import start_command
 from agos.cli.cmd_task import task_app
+from agos.cli.cmd_worker import worker_app
 
 app = typer.Typer(
     name="agos",
@@ -43,6 +44,7 @@ app.command("closeout")(closeout_command)
 app.add_typer(candidate_app, name="candidate")
 app.add_typer(review_app, name="review")
 app.add_typer(task_app, name="task")
+app.add_typer(worker_app, name="worker")
 
 
 if __name__ == "__main__":

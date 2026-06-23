@@ -18,7 +18,9 @@ def register_configured_worker_adapters(service: ExecutionService) -> None:
     workers = config.workers or {"local_worktree": WorkerConfig(type="local_worktree")}
     for name, worker in workers.items():
         if worker.type == "local_worktree":
-            service.register_worker_adapter(LocalWorktreeWorkerAdapter(service.workspace_manager))
+            service.register_worker_adapter(
+                LocalWorktreeWorkerAdapter(service.workspace_manager, name=name)
+            )
         elif worker.type == "codex_cli":
             service.register_worker_adapter(
                 CodexWorkerAdapter(

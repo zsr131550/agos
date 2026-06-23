@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import yaml
@@ -38,7 +39,31 @@ def test_execute_plan_runtime_run_status_resume_and_cancel(monkeypatch, tmp_repo
     assert run_id in cancel.stdout
 
 
-def _active_task(tmp_repo: Path):
+def test_execute_plan_run_uses_configured_external_orchestration_backend(monkeypatch, tmp_repo):
+    _active_task(tmp_repo, orchestration={"backend": "external"})
+    monkeypatch.chdir(tmp_repo)
+
+    started = runner.invoke(
+        app,
+        ["execute-plan", "run", "--plan", str(_plan_file(tmp_repo)), "--json"],
+    )
+
+    assert started.exit_code == 0, started.stderr
+    payload = json.loads(started.stdout)
+    assert payload["backend"] == "external"
+    assert payload["state"] == "queued"
+    assert payload["completed_subtasks"] == []
+
+    status = runner.invoke(app, ["execute-plan", "status", payload["run_id"], "--json"])
+    cancelled = runner.invoke(app, ["execute-plan", "cancel", payload["run_id"], "--json"])
+
+    assert status.exit_code == 0, status.stderr
+    assert json.loads(status.stdout)["backend"] == "external"
+    assert cancelled.exit_code == 0, cancelled.stderr
+    assert json.loads(cancelled.stdout)["state"] == "cancelled"
+
+
+def _active_task(tmp_repo: Path, *, orchestration: dict[str, object] | None = None):
     paths = repo_paths(tmp_repo)
     paths.agos_dir.mkdir(parents=True, exist_ok=True)
     paths.agos_yaml.write_text(
@@ -46,6 +71,7 @@ def _active_task(tmp_repo: Path):
             {
                 "executor": {"name": "multica", "agent": "Lambda"},
                 "workers": {"local_worktree": {"type": "local_worktree"}},
+                "orchestration": orchestration or {"backend": "native_async"},
                 "workflows": {},
             },
             sort_keys=False,

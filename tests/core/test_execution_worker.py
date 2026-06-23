@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from agos.core.execution_worker import (
+    WorkerHealth,
+    WorkerHealthCheck,
     WorkerRun,
     WorkerRunStatus,
     WorkerStartRequest,
@@ -49,3 +51,25 @@ def test_worker_run_status_identifies_terminal_states():
         subtask_id="subtask-01",
         state="running",
     ).is_terminal
+
+
+def test_worker_health_models_report_aggregate_state():
+    health = WorkerHealth(
+        name="codex",
+        adapter="codex_cli",
+        checks=[
+            WorkerHealthCheck(name="command_available", state="passed", detail="codex"),
+            WorkerHealthCheck(name="artifact_contract", state="passed", detail=".agos-worker/*.json"),
+        ],
+        metadata={"timeout_seconds": "30"},
+    )
+    unhealthy = WorkerHealth(
+        name="multica",
+        adapter="multica",
+        checks=[WorkerHealthCheck(name="daemon_status", state="failed", detail="daemon down")],
+    )
+
+    assert health.state == "healthy"
+    assert health.is_healthy
+    assert unhealthy.state == "unhealthy"
+    assert not unhealthy.is_healthy

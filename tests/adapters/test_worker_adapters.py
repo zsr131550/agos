@@ -333,6 +333,39 @@ def test_codex_worker_adapter_collects_configured_artifacts(monkeypatch, tmp_pat
     assert status.output_refs == [".agos-worker/result.json"]
 
 
+def test_codex_worker_health_reports_command_availability(monkeypatch):
+    from agos.adapters.workers.codex_cli import CodexWorkerAdapter
+    import agos.adapters.workers.codex_cli as codex_module
+
+    monkeypatch.setattr(codex_module.shutil, "which", lambda command: f"C:/bin/{command}.exe")
+
+    health = CodexWorkerAdapter(
+        command="codex",
+        timeout_seconds=120,
+        poll_interval_seconds=2,
+        artifact_globs=[".agos-worker/*.json"],
+    ).health()
+
+    assert health.name == "codex"
+    assert health.adapter == "codex_cli"
+    assert health.state == "healthy"
+    assert health.metadata["timeout_seconds"] == "120"
+    assert health.metadata["artifact_globs"] == ".agos-worker/*.json"
+
+
+def test_codex_worker_health_reports_missing_command(monkeypatch):
+    from agos.adapters.workers.codex_cli import CodexWorkerAdapter
+    import agos.adapters.workers.codex_cli as codex_module
+
+    monkeypatch.setattr(codex_module.shutil, "which", lambda _command: None)
+
+    health = CodexWorkerAdapter(command="missing-codex").health()
+
+    assert health.state == "unhealthy"
+    assert health.checks[0].name == "command_available"
+    assert health.checks[0].state == "failed"
+
+
 def test_multica_worker_adapter_collects_configured_artifacts(monkeypatch, tmp_path):
     from agos.adapters.workers.multica_worker import MulticaWorkerAdapter
     import agos.adapters.workers.multica_worker as worker_module
@@ -375,6 +408,52 @@ def test_multica_worker_adapter_collects_configured_artifacts(monkeypatch, tmp_p
     assert status.output_refs == [".agos-worker/result.json"]
 
 
+def test_multica_worker_health_checks_daemon_and_workspace(monkeypatch):
+    from agos.adapters.workers.multica_worker import MulticaWorkerAdapter
+    import agos.adapters.workers.multica_worker as worker_module
+
+    calls: list[list[str]] = []
+
+    class FakeProc:
+        returncode = 0
+        stdout = "[]"
+        stderr = ""
+
+    def fake_run(args, **kwargs):
+        del kwargs
+        calls.append(args)
+        return FakeProc()
+
+    monkeypatch.setattr(worker_module, "run_command", fake_run)
+
+    health = MulticaWorkerAdapter(multica_bin="multica", agent="Lambda").health()
+
+    assert health.state == "healthy"
+    assert calls == [
+        ["multica", "daemon", "status"],
+        ["multica", "workspace", "list", "--output", "json"],
+    ]
+
+
+def test_multica_worker_health_reports_failed_check(monkeypatch):
+    from agos.adapters.workers.multica_worker import MulticaWorkerAdapter
+    import agos.adapters.workers.multica_worker as worker_module
+
+    class FakeProc:
+        returncode = 1
+        stdout = ""
+        stderr = "daemon down"
+
+    monkeypatch.setattr(worker_module, "run_command", lambda *_args, **_kwargs: FakeProc())
+
+    health = MulticaWorkerAdapter(multica_bin="multica", agent="Lambda").health()
+
+    assert health.state == "unhealthy"
+    assert health.checks[0].name == "daemon_status"
+    assert health.checks[0].state == "failed"
+    assert "daemon down" in health.checks[0].detail
+
+
 def test_openhands_worker_adapter_collects_configured_artifacts(monkeypatch, tmp_path):
     from agos.adapters.workers.openhands import OpenHandsWorkerAdapter
     import agos.adapters.workers.openhands as openhands_module
@@ -408,3 +487,40 @@ def test_openhands_worker_adapter_collects_configured_artifacts(monkeypatch, tmp
     status = adapter.poll(run.run_id, subtask_id=run.subtask_id)
 
     assert status.output_refs == [".agos-worker/result.json"]
+
+
+def test_openhands_worker_health_calls_health_endpoint(monkeypatch):
+    from agos.adapters.workers.openhands import OpenHandsWorkerAdapter
+    import agos.adapters.workers.openhands as openhands_module
+
+    requests: list[tuple[str, str]] = []
+
+    def fake_request(method: str, url: str, payload=None, timeout=30, headers=None):
+        del payload, timeout, headers
+        requests.append((method, url))
+        return {"status": "ok"}
+
+    monkeypatch.setattr(openhands_module, "_json_request", fake_request)
+
+    health = OpenHandsWorkerAdapter(endpoint="http://openhands.local").health()
+
+    assert health.state == "healthy"
+    assert requests == [("GET", "http://openhands.local/health")]
+
+
+def test_openhands_worker_health_reports_endpoint_failure(monkeypatch):
+    from agos.adapters.workers.openhands import OpenHandsWorkerAdapter
+    import agos.adapters.workers.openhands as openhands_module
+
+    def fake_request(method: str, url: str, payload=None, timeout=30, headers=None):
+        del method, url, payload, timeout, headers
+        raise RuntimeError("connection refused")
+
+    monkeypatch.setattr(openhands_module, "_json_request", fake_request)
+
+    health = OpenHandsWorkerAdapter(endpoint="http://openhands.local").health()
+
+    assert health.state == "unhealthy"
+    assert health.checks[0].name == "endpoint_health"
+    assert health.checks[0].state == "failed"
+    assert "connection refused" in health.checks[0].detail

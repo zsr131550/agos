@@ -4,6 +4,8 @@ from __future__ import annotations
 from pathlib import Path
 
 from agos.core.execution_worker import (
+    WorkerHealth,
+    WorkerHealthCheck,
     WorkerAssignment,
     WorkerPreparedWorkspace,
     WorkerRun,
@@ -17,8 +19,16 @@ from agos.core.execution_workspace import ExecutionWorkspaceManager
 class LocalWorktreeWorkerAdapter:
     name = "local_worktree"
 
-    def __init__(self, manager: ExecutionWorkspaceManager) -> None:
+    def __init__(self, manager: ExecutionWorkspaceManager, *, name: str = "local_worktree") -> None:
         self.manager = manager
+        self.name = name
+
+    def health(self) -> WorkerHealth:
+        return WorkerHealth(
+            name=self.name,
+            adapter="local_worktree",
+            checks=[WorkerHealthCheck(name="local_workspace", state="passed", detail="ready")],
+        )
 
     def prepare(self, assignment: WorkerAssignment) -> WorkerPreparedWorkspace:
         binding = self.manager.create_workspace(assignment.subtask)

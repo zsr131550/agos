@@ -37,6 +37,11 @@ class ExecutionRuntimeSnapshot:
     completed_subtasks: tuple[str, ...] = ()
     failed_subtasks: tuple[str, ...] = ()
     cancelled_subtasks: tuple[str, ...] = ()
+    backend: str = "native_async"
+    state: str = "queued"
+    waiting_nodes: tuple[str, ...] = ()
+    completed_nodes: tuple[str, ...] = ()
+    failed_nodes: tuple[str, ...] = ()
 
 
 class ExecutionRuntime:
@@ -213,10 +218,15 @@ class ExecutionRuntime:
             json.dumps(
                 {
                     "run_id": snapshot.run_id,
+                    "backend": snapshot.backend,
+                    "state": snapshot.state,
                     "running_subtasks": list(snapshot.running_subtasks),
                     "completed_subtasks": list(snapshot.completed_subtasks),
                     "failed_subtasks": list(snapshot.failed_subtasks),
                     "cancelled_subtasks": list(snapshot.cancelled_subtasks),
+                    "waiting_nodes": list(snapshot.waiting_nodes),
+                    "completed_nodes": list(snapshot.completed_nodes),
+                    "failed_nodes": list(snapshot.failed_nodes),
                 },
                 indent=2,
                 sort_keys=True,
@@ -253,13 +263,39 @@ def _execution_snapshot(
     plan: ExecutionPlan,
     attempts: dict[str, WorkerAttempt],
 ) -> ExecutionRuntimeSnapshot:
+    running = _subtasks_in_state(plan, attempts, "running")
+    completed = _subtasks_in_state(plan, attempts, "completed")
+    failed = _subtasks_in_state(plan, attempts, "failed")
+    cancelled = _subtasks_in_state(plan, attempts, "cancelled")
     return ExecutionRuntimeSnapshot(
         run_id=run_id,
-        running_subtasks=_subtasks_in_state(plan, attempts, "running"),
-        completed_subtasks=_subtasks_in_state(plan, attempts, "completed"),
-        failed_subtasks=_subtasks_in_state(plan, attempts, "failed"),
-        cancelled_subtasks=_subtasks_in_state(plan, attempts, "cancelled"),
+        running_subtasks=running,
+        completed_subtasks=completed,
+        failed_subtasks=failed,
+        cancelled_subtasks=cancelled,
+        backend="native_async",
+        state=_snapshot_state(plan, running, completed, failed, cancelled),
     )
+
+
+def _snapshot_state(
+    plan: ExecutionPlan,
+    running: tuple[str, ...],
+    completed: tuple[str, ...],
+    failed: tuple[str, ...],
+    cancelled: tuple[str, ...],
+) -> str:
+    if failed:
+        return "failed"
+    if running:
+        return "running"
+    if cancelled and len(cancelled) == len(plan.subtasks):
+        return "cancelled"
+    if len(completed) == len(plan.subtasks):
+        return "completed"
+    if cancelled:
+        return "cancelled"
+    return "queued"
 
 
 def _subtasks_in_state(

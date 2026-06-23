@@ -5,6 +5,8 @@ from dataclasses import dataclass
 
 from agos.core.execution import WorkspaceBinding
 from agos.core.execution_worker import (
+    WorkerHealth,
+    WorkerHealthCheck,
     WorkerAssignment,
     WorkerPreparedWorkspace,
     WorkerRun,
@@ -27,6 +29,13 @@ class FakeWorkerAdapter:
     def __init__(self, patch_bytes: bytes = b"") -> None:
         self.patch_bytes = patch_bytes
         self._runs: dict[str, WorkerRunStatus] = {}
+
+    def health(self) -> WorkerHealth:
+        return WorkerHealth(
+            name=self.name,
+            adapter="fake",
+            checks=[WorkerHealthCheck(name="fake_worker", state="passed", detail="ready")],
+        )
 
     def prepare(self, assignment: WorkerAssignment) -> WorkerPreparedWorkspace:
         binding = WorkspaceBinding(

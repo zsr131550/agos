@@ -1,9 +1,11 @@
 """Execution orchestration service for isolated candidate patches."""
 from __future__ import annotations
 
+import json
 import subprocess
 import time
 from collections.abc import Iterable
+from dataclasses import replace
 from pathlib import Path
 from typing import Any, Literal, cast
 from uuid import uuid4
@@ -48,6 +50,12 @@ from agos.core.execution_workspace import (
 )
 from agos.core.gate import GateContext, build_gate, gates_match
 from agos.core.ledger import Ledger, LedgerTamperError
+from agos.core.orchestration.models import (
+    OrchestrationRunSpec,
+    OrchestratorRunHandle,
+    OrchestratorRunStatus,
+)
+from agos.core.orchestration.protocols import OrchestrationBackend
 from agos.core.repo import AgosPaths, git_status_porcelain
 from agos.core.review import Finding, ReviewPacket, ReviewReport
 from agos.core.review_service import ReviewService
@@ -64,6 +72,7 @@ class ExecutionService:
         *,
         worktree_root: Path | None = None,
         worker_adapters: dict[str, ExecutionWorkerAdapter] | None = None,
+        orchestration_backends: dict[str, OrchestrationBackend] | None = None,
     ) -> None:
         self.paths = paths
         self.store = ExecutionStore(paths)
@@ -77,12 +86,21 @@ class ExecutionService:
         self.candidate_arbiter = CandidateDecisionArbiter()
         self.merge_arbiter = CandidateMergeArbiter()
         self._worker_adapters: dict[str, ExecutionWorkerAdapter] = dict(worker_adapters or {})
+        self._orchestration_backends: dict[str, OrchestrationBackend] = dict(
+            orchestration_backends or {}
+        )
 
     def register_worker_adapter(self, adapter: ExecutionWorkerAdapter) -> None:
         self._worker_adapters[adapter.name] = adapter
 
+    def register_orchestration_backend(self, backend: OrchestrationBackend) -> None:
+        self._orchestration_backends[backend.name] = backend
+
     def worker_adapter_names(self) -> list[str]:
         return sorted(self._worker_adapters)
+
+    def worker_adapters(self) -> dict[str, ExecutionWorkerAdapter]:
+        return dict(self._worker_adapters)
 
     def start_execution_run(
         self,
@@ -92,17 +110,34 @@ class ExecutionService:
     ) -> ExecutionRuntimeSnapshot:
         plan = self.execute_plan(plan_path)
         execution_run_id = run_id or _new_id("execution-run")
+        backend_name = load_config(self.paths.root).orchestration.backend
+        if backend_name != "native_async":
+            spec = self._execution_spec_for_backend(plan_path, backend_name, run_id=execution_run_id)
+            backend = self._orchestration_backend(backend_name)
+            handle = backend.run(spec)
+            snapshot = _snapshot_from_orchestrator_status(backend.poll(handle))
+            self._write_run_snapshot(snapshot)
+            return snapshot
         return self._execution_runtime(plan).tick(plan, run_id=execution_run_id)
 
     def resume_execution_run(self, run_id: str) -> ExecutionRuntimeSnapshot:
+        persisted = self._read_run_snapshot(run_id)
+        if persisted is not None and persisted.backend != "native_async":
+            return self._poll_orchestration_snapshot(persisted)
         plan = self.store.read_plan()
         return self._execution_runtime(plan).tick(plan, run_id=run_id)
 
     def status_execution_run(self, run_id: str) -> ExecutionRuntimeSnapshot:
+        persisted = self._read_run_snapshot(run_id)
+        if persisted is not None and persisted.backend != "native_async":
+            return self._poll_orchestration_snapshot(persisted)
         plan = self.store.read_plan()
         return self._execution_runtime(plan).status(plan, run_id=run_id)
 
     def cancel_execution_run(self, run_id: str) -> ExecutionRuntimeSnapshot:
+        persisted = self._read_run_snapshot(run_id)
+        if persisted is not None and persisted.backend != "native_async":
+            return self._cancel_orchestration_snapshot(persisted)
         plan = self.store.read_plan()
         return self._execution_runtime(plan).cancel(plan, run_id=run_id)
 
@@ -1029,6 +1064,75 @@ class ExecutionService:
             raise ValueError(f"unsupported worker adapter: {adapter_name}")
         return self._worker_adapters[adapter_name]
 
+    def _orchestration_backend(self, backend_name: str) -> OrchestrationBackend:
+        if backend_name not in self._orchestration_backends:
+            raise ValueError(f"unsupported orchestration backend: {backend_name}")
+        return self._orchestration_backends[backend_name]
+
+    def _execution_spec_for_backend(
+        self,
+        plan_path: Path,
+        backend_name: str,
+        *,
+        run_id: str,
+    ) -> OrchestrationRunSpec:
+        spec = self.execution_orchestrator.build_spec(plan_path)
+        nodes = tuple(node.model_copy(update={"backend": backend_name}) for node in spec.nodes)
+        configured = spec.model_copy(
+            update={
+                "run_id": run_id,
+                "backend": backend_name,
+                "nodes": nodes,
+            }
+        )
+        path = self.paths.orchestration_runs / f"{configured.run_id}.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(configured.model_dump_json(indent=2), encoding="utf-8")
+        return configured
+
+    def _poll_orchestration_snapshot(
+        self,
+        snapshot: ExecutionRuntimeSnapshot,
+    ) -> ExecutionRuntimeSnapshot:
+        handle = OrchestratorRunHandle(backend=snapshot.backend, run_id=snapshot.run_id)
+        try:
+            updated = _snapshot_from_orchestrator_status(
+                self._orchestration_backend(snapshot.backend).poll(handle)
+            )
+        except ValueError:
+            return snapshot
+        self._write_run_snapshot(updated)
+        return updated
+
+    def _cancel_orchestration_snapshot(
+        self,
+        snapshot: ExecutionRuntimeSnapshot,
+    ) -> ExecutionRuntimeSnapshot:
+        handle = OrchestratorRunHandle(backend=snapshot.backend, run_id=snapshot.run_id)
+        try:
+            updated = _snapshot_from_orchestrator_status(
+                self._orchestration_backend(snapshot.backend).cancel(handle)
+            )
+        except ValueError:
+            updated = replace(snapshot, state="cancelled")
+        self._write_run_snapshot(updated)
+        return updated
+
+    def _write_run_snapshot(self, snapshot: ExecutionRuntimeSnapshot) -> None:
+        path = self._run_status_path(snapshot.run_id)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(_snapshot_payload(snapshot), indent=2, sort_keys=True), encoding="utf-8")
+
+    def _read_run_snapshot(self, run_id: str) -> ExecutionRuntimeSnapshot | None:
+        path = self._run_status_path(run_id)
+        if not path.is_file():
+            return None
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        return _snapshot_from_payload(payload)
+
+    def _run_status_path(self, run_id: str) -> Path:
+        return self.paths.current_task / "execution" / "runs" / run_id / "status.json"
+
     def _execution_runtime(self, plan: ExecutionPlan) -> ExecutionRuntime:
         runtime_config = load_config(self.paths.root).orchestration
         return ExecutionRuntime(
@@ -1052,6 +1156,55 @@ def _workspace_binding(prepared: object) -> WorkspaceBinding:
     if isinstance(binding, WorkspaceBinding):
         return binding
     raise TypeError("worker prepare() must return a WorkspaceBinding or an object with binding")
+
+
+def _snapshot_from_orchestrator_status(
+    status: OrchestratorRunStatus,
+) -> ExecutionRuntimeSnapshot:
+    return ExecutionRuntimeSnapshot(
+        run_id=status.run_id,
+        backend=status.backend,
+        state=status.state,
+        waiting_nodes=tuple(status.waiting_nodes),
+        completed_nodes=tuple(status.completed_nodes),
+        failed_nodes=tuple(status.failed_nodes),
+    )
+
+
+def _snapshot_payload(snapshot: ExecutionRuntimeSnapshot) -> dict[str, object]:
+    return {
+        "run_id": snapshot.run_id,
+        "backend": snapshot.backend,
+        "state": snapshot.state,
+        "running_subtasks": list(snapshot.running_subtasks),
+        "completed_subtasks": list(snapshot.completed_subtasks),
+        "failed_subtasks": list(snapshot.failed_subtasks),
+        "cancelled_subtasks": list(snapshot.cancelled_subtasks),
+        "waiting_nodes": list(snapshot.waiting_nodes),
+        "completed_nodes": list(snapshot.completed_nodes),
+        "failed_nodes": list(snapshot.failed_nodes),
+    }
+
+
+def _snapshot_from_payload(payload: dict[str, object]) -> ExecutionRuntimeSnapshot:
+    return ExecutionRuntimeSnapshot(
+        run_id=str(payload["run_id"]),
+        backend=str(payload.get("backend") or "native_async"),
+        state=str(payload.get("state") or "queued"),
+        running_subtasks=_string_tuple(payload.get("running_subtasks", [])),
+        completed_subtasks=_string_tuple(payload.get("completed_subtasks", [])),
+        failed_subtasks=_string_tuple(payload.get("failed_subtasks", [])),
+        cancelled_subtasks=_string_tuple(payload.get("cancelled_subtasks", [])),
+        waiting_nodes=_string_tuple(payload.get("waiting_nodes", [])),
+        completed_nodes=_string_tuple(payload.get("completed_nodes", [])),
+        failed_nodes=_string_tuple(payload.get("failed_nodes", [])),
+    )
+
+
+def _string_tuple(value: object) -> tuple[str, ...]:
+    if not isinstance(value, list | tuple):
+        return ()
+    return tuple(str(item) for item in value)
 
 
 def _worker_handle_metadata(prepared: object) -> dict[str, str]:

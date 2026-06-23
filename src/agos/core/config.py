@@ -71,6 +71,9 @@ class OrchestrationConfig(BaseModel):
     max_retries: int = Field(default=0, ge=0)
     worker_timeout_seconds: int | None = Field(default=None, ge=1)
     retry_backoff_seconds: int = Field(default=0, ge=0)
+    endpoint: str | None = None
+    token: str | None = None
+    timeout_seconds: int = Field(default=30, ge=1)
 
 class AGOSConfig(BaseModel):
     """Top-level `.agos/agos.yaml` structure."""

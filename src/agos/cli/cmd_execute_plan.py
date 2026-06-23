@@ -6,6 +6,7 @@ from pathlib import Path
 
 import typer
 
+from agos.cli.orchestration_registry import register_configured_orchestration_backends
 from agos.cli.worker_registry import register_configured_worker_adapters
 from agos.core.execution_runtime import ExecutionRuntimeSnapshot
 from agos.core.execution_service import ExecutionService
@@ -95,15 +96,22 @@ def _service() -> ExecutionService:
     paths = repo_paths(repo_root)
     service = ExecutionService(paths)
     register_configured_worker_adapters(service)
+    register_configured_orchestration_backends(service)
     return service
 
 
 def _format_snapshot(snapshot: ExecutionRuntimeSnapshot) -> str:
     parts = [snapshot.run_id]
+    parts.append(f"backend: {snapshot.backend}")
+    parts.append(f"state: {snapshot.state}")
     parts.append(f"running: {_join(snapshot.running_subtasks)}")
     parts.append(f"completed: {_join(snapshot.completed_subtasks)}")
     parts.append(f"failed: {_join(snapshot.failed_subtasks)}")
     parts.append(f"cancelled: {_join(snapshot.cancelled_subtasks)}")
+    if snapshot.waiting_nodes or snapshot.completed_nodes or snapshot.failed_nodes:
+        parts.append(f"waiting nodes: {_join(snapshot.waiting_nodes)}")
+        parts.append(f"completed nodes: {_join(snapshot.completed_nodes)}")
+        parts.append(f"failed nodes: {_join(snapshot.failed_nodes)}")
     return " | ".join(parts)
 
 
@@ -111,10 +119,15 @@ def _snapshot_json(snapshot: ExecutionRuntimeSnapshot) -> str:
     return json.dumps(
         {
             "run_id": snapshot.run_id,
+            "backend": snapshot.backend,
+            "state": snapshot.state,
             "running_subtasks": list(snapshot.running_subtasks),
             "completed_subtasks": list(snapshot.completed_subtasks),
             "failed_subtasks": list(snapshot.failed_subtasks),
             "cancelled_subtasks": list(snapshot.cancelled_subtasks),
+            "waiting_nodes": list(snapshot.waiting_nodes),
+            "completed_nodes": list(snapshot.completed_nodes),
+            "failed_nodes": list(snapshot.failed_nodes),
         },
         sort_keys=True,
     )
