@@ -2,9 +2,12 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Literal
 
 import yaml
 from pydantic import BaseModel, Field, model_validator
+
+GateType = Literal["secret_scan", "opa", "semgrep", "trufflehog", "codeql"]
 
 
 class GateSpec(BaseModel):
@@ -14,7 +17,8 @@ class GateSpec(BaseModel):
     stage: list[str]
     command: str | None = None
     argv: list[str] | None = None
-    type: str | None = None
+    type: GateType | None = None
+    options: dict[str, object] = Field(default_factory=dict)
 
     @model_validator(mode="after")
     def _exactly_one(self) -> "GateSpec":

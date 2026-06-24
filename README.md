@@ -20,9 +20,12 @@ agos config validate [--json]
 agos status [--json]
 agos start --title "..." [--intent "..."] [--workflow feature] [--gate tests_pass,...]
 agos checkpoint [--follow] [--once]
+agos anchor publish [--backend file|git-ref] [--path anchor.json]
+agos anchor verify [--backend file|git-ref] [--path anchor.json] [--json]
 agos review --packet-only
 agos review --ingest findings.json --review-id review-...
 agos run --plan execution-plan.yaml
+agos run auto [--dry-run] [--apply] [--json]
 agos run start --plan execution-plan.yaml [--json]
 agos run status <run-id> [--json]
 agos run resume <run-id> [--json]
@@ -37,6 +40,7 @@ agos candidate apply <candidate-id>
 agos resolve <finding-id> --status resolved --evidence <ref> --rationale "..."
 agos closeout
 agos ci --local --stage <pre-commit|pre-push>
+agos merge-gate [--require-anchor] [--anchor-backend git-ref|file] [--anchor-path anchor.json] [--base <base> --head <head>] [--json]
 agos task status
 agos task clear --force
 agos worker doctor [--worker <name>] [--json]
@@ -72,6 +76,24 @@ agos run start --plan execution-plan.yaml --json
 agos run status <run-id> --json
 agos candidate list
 agos candidate merge preview
+```
+
+Run the autonomous execution loop:
+
+```bash
+agos run auto --dry-run --json
+agos run auto --apply --json
+```
+
+`--dry-run` prepares and evaluates AGOS execution artifacts without applying
+candidate patches to the governed working tree. `--apply` uses the same guarded
+candidate apply path as the manual flow.
+
+Run the CI merge gate:
+
+```bash
+agos anchor verify --backend git-ref --json
+agos merge-gate --require-anchor --anchor-backend git-ref --base origin/main --head HEAD --json
 ```
 
 ## The v0.1 loop
@@ -133,10 +155,30 @@ Runtime commands can be read by humans or tools:
 
 ```bash
 agos run start --plan plan.json --json
+agos run auto --dry-run --json
 agos run status <run-id> --json
 agos run resume <run-id> --json
 agos run cancel <run-id> --json
 ```
+
+### Trust Anchors And Merge Gate
+
+`agos anchor publish` records the expected ledger head outside the task ledger.
+The file backend is for local development and tests and requires `--path`;
+protected Git refs or a trusted CI publisher should be used for real
+enforcement.
+
+`agos merge-gate` is the server-side verifier. It checks the task ledger,
+`gates_locked`, optional trust anchor, candidate patch hashes, test evidence,
+review evidence, mergeability state, and submitted-diff binding when `--base`
+and `--head` are provided. Local hooks are still useful feedback, but CI is the
+enforcement point.
+
+### Security Gates
+
+The default `feature` workflow stays lightweight. Production security scans can
+be enabled with typed gates such as `opa`, `semgrep`, `trufflehog`, and `codeql`.
+See `docs/security-gates.md` for examples and scanner boundary guidance.
 
 ### Merge Strategies
 
@@ -178,7 +220,11 @@ Required remote endpoints:
 - Gate commands may use shell-style `command: "pytest -q"` for compatibility or structured `argv: ["pytest", "-q"]` for cross-platform execution without a shell. New configs prefer `argv`.
 - `agos task status` prints the active task cache, and `agos task clear --force` clears a stale `.agos/tasks/current` directory after manual review.
 
-## Trust model (v0.1 limitation)
+## Trust model
 
-The ledger hash chain is tamper-evident, not tamper-proof. It detects accidental edits and naive agents that edit a record without recomputing its hash. A determined agent that rewrites the whole ledger and recomputes every hash is not defended against in v0.1; a real out-of-band trust anchor lands in v0.2.
+The ledger hash chain is tamper-evident. A trust anchor makes it CI-verifiable by
+recording the expected ledger head outside the mutable task ledger. For local
+development, the file anchor backend is convenient but not a security boundary.
+For production, publish anchors from trusted automation or a protected Git ref
+and require them in `agos merge-gate --anchor-backend git-ref`.
 

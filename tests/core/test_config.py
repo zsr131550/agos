@@ -85,12 +85,15 @@ def test_gate_spec_command_xor_type():
     GateSpec(id="g", stage=["pre-commit"], command="pytest -q", type=None)
     GateSpec(id="g", stage=["pre-commit"], argv=["pytest", "-q"], type=None)
     GateSpec(id="g", stage=["pre-commit"], command=None, type="secret_scan")
+    GateSpec(id="g", stage=["pre-commit"], command=None, type="opa", options={"policy": "p.rego"})
     with pytest.raises(Exception):
         GateSpec(id="g", stage=["pre-commit"], command="x", type="secret_scan")
     with pytest.raises(Exception):
         GateSpec(id="g", stage=["pre-commit"], command="x", argv=["pytest"])
     with pytest.raises(Exception):
         GateSpec(id="g", stage=["pre-commit"], command=None, type=None)
+    with pytest.raises(Exception):
+        GateSpec(id="g", stage=["pre-commit"], command=None, type="unknown")
 
 
 def test_default_config_has_feature_workflow():

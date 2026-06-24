@@ -7,7 +7,9 @@ from pathlib import Path
 import typer
 
 from agos.cli.orchestration_registry import register_configured_orchestration_backends
+from agos.cli.reviewer_registry import configured_reviewer_adapters, configured_reviewer_specs
 from agos.cli.worker_registry import register_configured_worker_adapters
+from agos.core.execution_pipeline import AutoExecutionResult, run_auto_execution
 from agos.core.execution_runtime import ExecutionRuntimeSnapshot
 from agos.core.execution_service import ExecutionService
 from agos.core.repo import find_initialized_repo_root, repo_paths
@@ -95,6 +97,34 @@ def execute_plan_cancel_command(
     typer.echo(_snapshot_json(snapshot) if json_output else _format_snapshot(snapshot))
 
 
+def run_auto_command(
+    dry_run: bool = typer.Option(False, "--dry-run", help="Run without applying accepted candidates."),
+    apply: bool = typer.Option(False, "--apply", help="Apply accepted candidates to the governed repo."),
+    json_output: bool = typer.Option(False, "--json", help="Print machine-readable JSON."),
+    allow_missing_review: bool = typer.Option(
+        False,
+        "--allow-missing-review",
+        help="Allow acceptance when no review adapters are configured.",
+    ),
+) -> None:
+    if dry_run and apply:
+        typer.echo("--dry-run and --apply are mutually exclusive", err=True)
+        raise typer.Exit(code=2)
+    try:
+        service = _service()
+        result = run_auto_execution(
+            service,
+            apply=apply,
+            allow_missing_review=allow_missing_review,
+            reviewer_adapters=configured_reviewer_adapters(service.paths.root),
+            reviewer_specs=configured_reviewer_specs(service.paths.root),
+        )
+    except Exception as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(code=1) from exc
+    typer.echo(result.model_dump_json() if json_output else _format_auto_result(result))
+
+
 def _service() -> ExecutionService:
     repo_root = find_initialized_repo_root()
     paths = repo_paths(repo_root)
@@ -141,6 +171,23 @@ def _snapshot_json(snapshot: ExecutionRuntimeSnapshot) -> str:
     )
 
 
+def _format_auto_result(result: AutoExecutionResult) -> str:
+    parts = [
+        result.plan_id,
+        f"run: {result.run_id}",
+        f"state: {result.run_state}",
+        f"mode: {'dry-run' if result.dry_run else 'apply'}",
+        f"completed: {_join(tuple(result.completed_subtasks))}",
+        f"failed: {_join(tuple(result.failed_subtasks))}",
+        f"candidates: {_join(tuple(result.candidate_ids))}",
+        f"accepted: {_join(tuple(result.accepted_candidate_ids))}",
+        f"applied: {_join(tuple(result.applied_candidate_ids))}",
+    ]
+    if result.notes:
+        parts.append("notes: " + " | ".join(result.notes))
+    return " | ".join(parts)
+
+
 def _join(values: tuple[str, ...]) -> str:
     return ", ".join(values) if values else "-"
 
@@ -148,6 +195,7 @@ def _join(values: tuple[str, ...]) -> str:
 run_app.callback(invoke_without_command=True)(execute_plan_command)
 run_app.command("start")(execute_plan_run_command)
 run_app.command("run")(execute_plan_run_command)
+run_app.command("auto")(run_auto_command)
 run_app.command("resume")(execute_plan_resume_command)
 run_app.command("status")(execute_plan_status_command)
 run_app.command("cancel")(execute_plan_cancel_command)

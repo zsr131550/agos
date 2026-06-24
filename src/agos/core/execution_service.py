@@ -48,7 +48,7 @@ from agos.core.execution_workspace import (
     candidate_patch_paths,
     patch_bytes_sha256,
 )
-from agos.core.gate import GateContext, build_gate, gates_match
+from agos.core.gate import GateContext, build_gate, gate_command_text, gates_match
 from agos.core.ledger import Ledger, LedgerTamperError
 from agos.core.orchestration.models import (
     OrchestrationRunSpec,
@@ -163,15 +163,30 @@ class ExecutionService:
         *,
         build_orchestration_spec: bool = True,
     ) -> ExecutionPlan:
-        status, task = self._active_task()
-        del status
         payload = yaml.safe_load(plan_path.read_text(encoding="utf-8")) or {}
         plan = ExecutionPlan.model_validate(payload)
+        return self.execute_plan_model(
+            plan,
+            build_orchestration_spec=build_orchestration_spec,
+            plan_path=plan_path,
+        )
+
+    def execute_plan_model(
+        self,
+        plan: ExecutionPlan,
+        *,
+        build_orchestration_spec: bool = False,
+        plan_path: Path | None = None,
+    ) -> ExecutionPlan:
+        status, task = self._active_task()
+        del status
         if plan.task_id != task.id:
             raise ValueError(f"execution plan task_id {plan.task_id!r} does not match active task {task.id!r}")
 
         plan_ref = self.store.write_plan(plan)
         if build_orchestration_spec:
+            if plan_path is None:
+                raise ValueError("plan_path is required when building an orchestration spec")
             self.execution_orchestrator.build_spec(plan_path)
         self._append_event(
             {
@@ -555,6 +570,7 @@ class ExecutionService:
                 "task_id": task.id,
                 "bundle_decision_id": decision.id,
                 "candidate_ids": [candidate.id for candidate in applied],
+                "patch_refs": {candidate.id: candidate.patch_ref for candidate in applied},
             }
         )
         return applied
@@ -959,7 +975,7 @@ class ExecutionService:
                     id=_new_id("candidate-test"),
                     candidate_id=candidate.id,
                     gate_id=gate_spec.id,
-                    command=gate_spec.command or " ".join(gate_spec.argv or []),
+                    command=gate_command_text(gate_spec),
                     state="passed" if result.state == "pass" else "failed",
                     evidence_ref=_evidence_ref(self.paths.evidence, result.evidence_path),
                     workspace_ref=candidate.workspace_ref,
