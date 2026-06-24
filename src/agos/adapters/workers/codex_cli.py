@@ -223,8 +223,14 @@ def _exec_result(
 
 
 def _looks_like_jsonl(stdout: str) -> bool:
-    stripped = stdout.strip()
-    return bool(stripped and "\n" in stripped)
+    lines = [line for line in stdout.splitlines() if line.strip()]
+    if len(lines) < 2:
+        return False
+    try:
+        events = [json.loads(line) for line in lines]
+    except json.JSONDecodeError:
+        return False
+    return all(isinstance(event, dict) for event in events)
 
 
 def _exec_jsonl_result(

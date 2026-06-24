@@ -6,12 +6,14 @@ import time
 import typer
 
 from agos.cli.executor_registry import configured_executor_adapter
+from agos.core.config import load_config
 from agos.core.adapter import RunStatus
 from agos.core.adapter import ExecutorAdapter
 from agos.core.evidence import EvidenceStore
 from agos.core.ledger import Ledger
 from agos.core.repo import find_initialized_repo_root, git_head, git_status_porcelain, repo_paths
 from agos.core.status import ExecutorRunInfo, TaskStatus, load_status, save_status
+from agos.core.trust_anchor import publish_current_anchor, store_from_config
 
 
 def _anchor_ts() -> str:
@@ -131,6 +133,7 @@ def checkpoint_command(
 
     try:
         adapter = configured_executor_adapter(paths)
+        config = load_config(repo_root)
     except Exception as exc:
         typer.echo(str(exc), err=True)
         raise typer.Exit(code=1) from exc
@@ -138,6 +141,16 @@ def checkpoint_command(
 
     while True:
         completed, _last_seq = _checkpoint_once(adapter=adapter, status=status, paths=paths)
+        if config.trust_anchor.auto_publish_on_checkpoint:
+            try:
+                publish_current_anchor(
+                    paths,
+                    store_from_config(paths, config.trust_anchor),
+                    issuer=config.trust_anchor.issuer,
+                )
+            except Exception as exc:
+                typer.echo(str(exc), err=True)
+                raise typer.Exit(code=1) from exc
         if poll_once or completed:
             return
         time.sleep(3)

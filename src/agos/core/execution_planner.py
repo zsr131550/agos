@@ -69,10 +69,10 @@ def _fallback_plan(task: Task, config: AGOSConfig, worker_names: list[str]) -> E
 
 
 def _fallback_write_scope() -> list[str]:
-    # ExecutionSubtask rejects "." and the existing patch-scope guard matches
-    # concrete paths, so README.md is the broadest safe default that also works
-    # for the repository's MVP smoke path.
-    return ["README.md"]
+    # ExecutionSubtask rejects ".". Use explicit top-level project boundaries so
+    # fallback automation can work on code, tests, and docs without opening the
+    # whole repository.
+    return ["README.md", "src/agos", "tests", "docs"]
 
 
 def _validate_plan_workers(plan: ExecutionPlan, worker_names: list[str]) -> None:

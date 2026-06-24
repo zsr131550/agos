@@ -8,6 +8,7 @@ import yaml
 from pydantic import BaseModel, Field, model_validator
 
 GateType = Literal["secret_scan", "opa", "semgrep", "trufflehog", "codeql"]
+TrustAnchorBackend = Literal["file", "git-ref"]
 
 
 class GateSpec(BaseModel):
@@ -80,6 +81,15 @@ class OrchestrationConfig(BaseModel):
     timeout_seconds: int = Field(default=30, ge=1)
 
 
+class TrustAnchorConfig(BaseModel):
+    """Out-of-band ledger anchor publication policy."""
+
+    backend: TrustAnchorBackend = "git-ref"
+    path: str | None = None
+    auto_publish_on_checkpoint: bool = False
+    issuer: str = "agos"
+
+
 class AGOSConfig(BaseModel):
     """Top-level `.agos/agos.yaml` structure."""
 
@@ -89,6 +99,7 @@ class AGOSConfig(BaseModel):
     workers: dict[str, WorkerConfig] = Field(default_factory=dict)
     reviewers: dict[str, ReviewerConfig] = Field(default_factory=dict)
     orchestration: OrchestrationConfig = Field(default_factory=OrchestrationConfig)
+    trust_anchor: TrustAnchorConfig = Field(default_factory=TrustAnchorConfig)
 
     @classmethod
     def default(

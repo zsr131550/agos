@@ -103,7 +103,7 @@ class ExecutionWorkspaceManager:
     def validate_patch_scope(self, patch_bytes: bytes, write_scope: list[str]) -> None:
         paths = candidate_patch_paths(patch_bytes)
         allowed = {_normalize_git_path(path) for path in write_scope}
-        outside = sorted(path for path in paths if path not in allowed)
+        outside = sorted(path for path in paths if not _path_is_allowed(path, allowed))
         if outside:
             joined = ", ".join(outside)
             raise ValueError(f"candidate patch touches files outside write_scope: {joined}")
@@ -222,6 +222,11 @@ def _strip_git_prefix(path: str) -> str:
 
 def _normalize_git_path(path: str) -> str:
     return path.replace("\\", "/").strip("/")
+
+
+def _path_is_allowed(path: str, allowed: set[str]) -> bool:
+    normalized = _normalize_git_path(path)
+    return any(normalized == scope or normalized.startswith(f"{scope}/") for scope in allowed)
 
 
 def _safe_path_component(value: str) -> str:

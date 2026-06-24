@@ -39,7 +39,7 @@ def test_fallback_plan_uses_active_task_first_worker_and_configured_parallelism(
     assert plan.task_id == "agos-01"
     assert plan.max_parallel == 4
     assert [subtask.worker.adapter for subtask in plan.subtasks] == ["alpha"]
-    assert plan.subtasks[0].write_scope
+    assert plan.subtasks[0].write_scope == ["README.md", "src/agos", "tests", "docs"]
 
 
 def test_fallback_plan_uses_local_worktree_when_no_workers_are_configured() -> None:

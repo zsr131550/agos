@@ -2,7 +2,10 @@
 
 Executor-agnostic governance layer for AI coding agents. *Agent writes. AGOS verifies. CI enforces.*
 
-v0.1 ships the local advisory gate + hash-chained ledger + evidence plumbing. See `docs/superpowers/specs/2026-06-21-agos-multica-executor-backend-design.md` for the full design.
+The current CLI ships local advisory gates, hash-chained task ledgers, candidate
+execution, trust anchors, and a CI-oriented merge gate. See
+`docs/superpowers/specs/2026-06-24-agos-v1-hardening-design.md` for the current
+production-hardening design.
 
 ## Install (dev)
 
@@ -20,7 +23,7 @@ agos config validate [--json]
 agos status [--json]
 agos start --title "..." [--intent "..."] [--workflow feature] [--gate tests_pass,...]
 agos checkpoint [--follow] [--once]
-agos anchor publish [--backend file|git-ref] [--path anchor.json]
+agos anchor publish [--backend file|git-ref] [--path anchor.json] --issuer <issuer>
 agos anchor verify [--backend file|git-ref] [--path anchor.json] [--json]
 agos review --packet-only
 agos review --ingest findings.json --review-id review-...
@@ -149,6 +152,11 @@ orchestration:
   max_retries: 1
   worker_timeout_seconds: 900
   retry_backoff_seconds: 5
+
+trust_anchor:
+  backend: git-ref
+  auto_publish_on_checkpoint: true
+  issuer: ci
 ```
 
 Runtime commands can be read by humans or tools:
@@ -167,6 +175,11 @@ agos run cancel <run-id> --json
 The file backend is for local development and tests and requires `--path`;
 protected Git refs or a trusted CI publisher should be used for real
 enforcement.
+
+When `trust_anchor.auto_publish_on_checkpoint` is enabled, `agos checkpoint`
+publishes the latest verified ledger head after each checkpoint. File anchor
+paths in `trust_anchor.path` are resolved relative to the governed repository;
+omitting the path uses `.agos/tasks/current/evidence/anchors.json`.
 
 `agos merge-gate` is the server-side verifier. It checks the task ledger,
 `gates_locked`, optional trust anchor, candidate patch hashes, test evidence,
@@ -216,8 +229,9 @@ Required remote endpoints:
 
 - The agent runs in multica's isolated workspace (`~/multica_workspaces/<per-task>/`), not in your repo.
 - `agos checkpoint` streams the agent's reported activity into an evidence ledger and records a governed-repo anchor (HEAD + status) at capture time. It does not claim the agent edited your working tree.
-- `agos ci --local` gates a human developer's commit/push only (advisory and bypassable with `--no-verify`). The agent's own commits never pass through these hooks. Agent output is gated server-side at the merge gate, which lands in v0.2.
+- `agos ci --local` gates a human developer's commit/push only (advisory and bypassable with `--no-verify`). The agent's own commits never pass through these hooks. Agent output is gated server-side by `agos merge-gate`.
 - Gate commands may use shell-style `command: "pytest -q"` for compatibility or structured `argv: ["pytest", "-q"]` for cross-platform execution without a shell. New configs prefer `argv`.
+- `agos run auto` falls back to a conservative write scope covering `README.md`, `src/agos`, `tests`, and `docs` when an external planner is unavailable. Directory entries allow child paths without opening the entire repository.
 - `agos task status` prints the active task cache, and `agos task clear --force` clears a stale `.agos/tasks/current` directory after manual review.
 
 ## Trust model

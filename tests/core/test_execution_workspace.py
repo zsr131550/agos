@@ -96,6 +96,21 @@ def test_validate_patch_scope_rejects_out_of_scope_paths(tmp_repo):
         manager.validate_patch_scope(patch, ["src/allowed.py"])
 
 
+def test_validate_patch_scope_accepts_directory_scope_for_child_paths(tmp_repo):
+    manager = ExecutionWorkspaceManager(
+        repo_paths(tmp_repo),
+        task_id="agos-01",
+        worktree_root=tmp_repo.parent / ".agos-worktrees" / "agos-01",
+    )
+    binding = manager.create_workspace(_subtask(["src"]))
+    workspace = Path(binding.path)
+    (workspace / "src").mkdir()
+    (workspace / "src" / "allowed.py").write_text("print('ok')\n", encoding="utf-8")
+    patch = manager.capture_patch(workspace)
+
+    manager.validate_patch_scope(patch, ["src"])
+
+
 def test_apply_check_accepts_valid_patch_in_temp_workspace(tmp_repo):
     paths = repo_paths(tmp_repo)
     manager = ExecutionWorkspaceManager(

@@ -181,6 +181,30 @@ def test_codex_worker_adapter_starts_cli_with_workspace_and_prompt(monkeypatch, 
     assert "Implement README change" in calls[0]
 
 
+def test_codex_worker_adapter_parses_pretty_exec_json(monkeypatch, tmp_path):
+    from agos.adapters.workers.codex_cli import CodexWorkerAdapter
+    import agos.adapters.workers.codex_cli as codex_module
+
+    class FakeProc:
+        returncode = 0
+        stdout = '{\n  "run_id": "codex-run-01",\n  "state": "completed"\n}'
+        stderr = ""
+
+    monkeypatch.setattr(codex_module, "run_command", lambda *_args, **_kwargs: FakeProc())
+
+    run = CodexWorkerAdapter(command="codex").start(
+        WorkerStartRequest(
+            run_id="execution-run-01",
+            subtask_id="subtask-01",
+            prompt="Implement README change",
+            workspace_path=str(tmp_path),
+        )
+    )
+
+    assert run.run_id == "codex-run-01"
+    assert run.state == "completed"
+
+
 def test_codex_worker_adapter_parses_exec_jsonl_and_polls_cached_status(monkeypatch, tmp_path):
     from agos.adapters.workers.codex_cli import CodexWorkerAdapter
     import agos.adapters.workers.codex_cli as codex_module

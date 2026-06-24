@@ -130,6 +130,51 @@ def test_checkpoint_once_writes_messages_anchor_ledger_and_status(monkeypatch, t
     assert status.ledger_head_hash == checkpoint["hash"]
 
 
+def test_checkpoint_auto_publishes_file_trust_anchor_when_configured(monkeypatch, tmp_repo):
+    paths, task = _write_active_task(tmp_repo)
+    raw_config = yaml.safe_load(paths.agos_yaml.read_text(encoding="utf-8"))
+    raw_config["trust_anchor"] = {
+        "backend": "file",
+        "path": ".agos/tasks/current/evidence/anchors.json",
+        "auto_publish_on_checkpoint": True,
+        "issuer": "checkpoint-ci",
+    }
+    paths.agos_yaml.write_text(yaml.safe_dump(raw_config, sort_keys=False), encoding="utf-8")
+    monkeypatch.chdir(tmp_repo)
+
+    def fake_stream(self, run_id: str, since: int | None = None):
+        del self, run_id, since
+        return iter(
+            [
+                Event(
+                    seq=1,
+                    ts="2026-06-21T00:00:01Z",
+                    kind="text",
+                    content="checkpointed",
+                    raw={
+                        "seq": 1,
+                        "ts": "2026-06-21T00:00:01Z",
+                        "kind": "text",
+                        "content": "checkpointed",
+                    },
+                )
+            ]
+        )
+
+    monkeypatch.setattr("agos.cli.executor_registry.MulticaAdapter.stream_events", fake_stream)
+
+    result = runner.invoke(app, ["checkpoint", "--once"])
+
+    assert result.exit_code == 0, result.stderr
+    anchor_path = paths.evidence / "anchors.json"
+    payload = json.loads(anchor_path.read_text(encoding="utf-8"))
+    ledger_records = [json.loads(line) for line in paths.ledger.read_text(encoding="utf-8").splitlines()]
+    assert payload["task_id"] == task.id
+    assert payload["issuer"] == "checkpoint-ci"
+    assert payload["ledger_seq"] == ledger_records[-1]["seq"]
+    assert payload["ledger_head_hash"] == ledger_records[-1]["hash"]
+
+
 def test_checkpoint_follow_stops_after_run_complete(monkeypatch, tmp_repo):
     paths, _task = _write_active_task(tmp_repo)
     monkeypatch.chdir(tmp_repo)

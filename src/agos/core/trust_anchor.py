@@ -8,6 +8,7 @@ from typing import Protocol
 from pydantic import BaseModel, Field, field_validator
 
 from agos.core.command import run_command
+from agos.core.config import TrustAnchorConfig
 from agos.core.ledger import Ledger
 from agos.core.repo import AgosPaths, git_head
 from agos.core.status import load_status
@@ -111,6 +112,23 @@ class GitRefTrustAnchorStore:
                 f"anchor task mismatch: expected {task_id!r}, got {payload.task_id!r}"
             )
         return payload
+
+
+def store_from_config(paths: AgosPaths, config: TrustAnchorConfig) -> TrustAnchorStore:
+    """Build the configured trust-anchor store for a governed repo."""
+
+    if config.backend == "file":
+        return FileTrustAnchorStore(_anchor_file_path(paths, config.path))
+    if config.backend == "git-ref":
+        return GitRefTrustAnchorStore(paths.root)
+    raise ValueError(f"unsupported anchor backend: {config.backend}")
+
+
+def _anchor_file_path(paths: AgosPaths, configured_path: str | None) -> Path:
+    if configured_path is None:
+        return paths.evidence / "anchors.json"
+    path = Path(configured_path)
+    return path if path.is_absolute() else paths.root / path
 
 
 def publish_current_anchor(

@@ -17,7 +17,7 @@ from agos.core.config import AGOSConfig
 from agos.core.execution_service import ExecutionService
 from agos.core.repo import find_repo_root, repo_paths
 from agos.core.status import load_status
-from agos.core.trust_anchor import FileTrustAnchorStore, GitRefTrustAnchorStore, verify_current_anchor
+from agos.core.trust_anchor import GitRefTrustAnchorStore, store_from_config, verify_current_anchor
 
 
 @dataclass(frozen=True)
@@ -123,7 +123,7 @@ def _run_checks() -> list[DoctorCheck]:
     except Exception as exc:
         checks.append(DoctorCheck("orchestration", "failed", str(exc)))
 
-    checks.append(_trust_anchor_check(paths))
+    checks.append(_trust_anchor_check(paths, config))
 
     return checks
 
@@ -213,15 +213,13 @@ def _worker_health_check(service: ExecutionService) -> DoctorCheck:
     return DoctorCheck("workers", "passed", f"{len(adapters)} worker(s) healthy")
 
 
-def _trust_anchor_check(paths) -> DoctorCheck:
+def _trust_anchor_check(paths, config: AGOSConfig) -> DoctorCheck:
     if load_status(paths) is None or not paths.task_yaml.is_file():
         return DoctorCheck("trust_anchor", "skipped", "no active AGOS task")
 
-    stores = []
-    default_file = paths.evidence / "anchors.json"
-    if default_file.is_file():
-        stores.append(("file", FileTrustAnchorStore(default_file)))
-    stores.append(("git-ref", GitRefTrustAnchorStore(paths.root)))
+    stores = [(config.trust_anchor.backend, store_from_config(paths, config.trust_anchor))]
+    if config.trust_anchor.backend != "git-ref":
+        stores.append(("git-ref", GitRefTrustAnchorStore(paths.root)))
 
     issues: list[str] = []
     for label, store in stores:

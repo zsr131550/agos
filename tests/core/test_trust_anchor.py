@@ -7,6 +7,7 @@ from types import SimpleNamespace
 import pytest
 
 from agos.core.adapter import ExecutorRun
+from agos.core.config import TrustAnchorConfig
 from agos.core.ledger import Ledger
 from agos.core.repo import repo_paths
 from agos.core.status import TaskStatus, save_status
@@ -17,6 +18,7 @@ from agos.core.trust_anchor import (
     TrustAnchorPayload,
     canonical_json,
     publish_current_anchor,
+    store_from_config,
     verify_current_anchor,
 )
 
@@ -106,6 +108,21 @@ def test_file_store_rejects_task_mismatch(tmp_path: Path):
 
     with pytest.raises(ValueError, match="task mismatch"):
         store.read("agos-task-01")
+
+
+def test_store_from_config_uses_repo_relative_file_path(tmp_repo: Path):
+    paths = repo_paths(tmp_repo)
+
+    store = store_from_config(
+        paths,
+        TrustAnchorConfig(
+            backend="file",
+            path=".agos/tasks/current/evidence/anchors.json",
+        ),
+    )
+
+    assert isinstance(store, FileTrustAnchorStore)
+    assert store.path == paths.evidence / "anchors.json"
 
 
 def test_publish_current_anchor_requires_status(tmp_repo: Path):
