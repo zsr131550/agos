@@ -134,6 +134,17 @@ def verify_merge_gate(
                 details=patch_issues,
             )
         )
+        status_issues = _candidate_status_issues(candidates)
+        checks.append(
+            MergeGateCheck(
+                name="candidate_status",
+                state="block" if status_issues else "pass",
+                message="candidate status verification failed"
+                if status_issues
+                else "candidate statuses verified",
+                details=status_issues,
+            )
+        )
         evidence_issues = _candidate_evidence_issues(
             store,
             candidates,
@@ -271,6 +282,15 @@ def _candidate_evidence_issues(
         )
         if review_issue is not None:
             issues.append(f"{candidate.id}: {review_issue}")
+    return issues
+
+
+def _candidate_status_issues(candidates: list[CandidatePatch]) -> list[str]:
+    issues: list[str] = []
+    non_terminal = {"proposed", "testing", "reviewing", "tested", "reviewed"}
+    for candidate in candidates:
+        if candidate.status in non_terminal:
+            issues.append(f"{candidate.id}: candidate status is not terminal: {candidate.status}")
     return issues
 
 

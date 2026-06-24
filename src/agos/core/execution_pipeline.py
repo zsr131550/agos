@@ -56,6 +56,8 @@ def run_auto_execution(
     accepted_candidate_ids: list[str] = []
     applied_candidate_ids: list[str] = []
     notes: list[str] = []
+    if snapshot.state == "stuck":
+        notes.append("execution runtime stopped after repeated state observations; manual inspection required")
     reviewers = dict(reviewer_adapters or {})
     specs = list(reviewer_specs or [])
 
@@ -158,6 +160,19 @@ def _run_prepared_plan(service: ExecutionService, plan) -> ExecutionRuntimeSnaps
         if snapshot.state not in {"queued", "running"}:
             break
         if previous == state_key:
+            snapshot = ExecutionRuntimeSnapshot(
+                run_id=snapshot.run_id,
+                running_subtasks=snapshot.running_subtasks,
+                completed_subtasks=snapshot.completed_subtasks,
+                failed_subtasks=snapshot.failed_subtasks,
+                cancelled_subtasks=snapshot.cancelled_subtasks,
+                backend=snapshot.backend,
+                state="stuck",
+                waiting_nodes=snapshot.waiting_nodes,
+                completed_nodes=snapshot.completed_nodes,
+                failed_nodes=snapshot.failed_nodes,
+                output_refs=dict(snapshot.output_refs),
+            )
             break
         previous = state_key
         snapshot = runtime.tick(plan, run_id=run_id)

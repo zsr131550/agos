@@ -209,6 +209,10 @@ def _select_interactive_executor(
     return candidates[selected_index - 1]
 
 
+def _prompt_task_intent() -> str:
+    return str(typer.prompt("Task intent", default="")).strip()
+
+
 def _prompt_task_title() -> str:
     title = str(typer.prompt("Task title")).strip()
     if not title:
@@ -488,12 +492,20 @@ def init_command(
         raise typer.BadParameter("Executor must be one of: multica, codex_cli, claude_code.")
 
     auto_run_title: str | None = None
+    auto_run_intent: str = ""
     try:
         candidates = discover_local_agents()
         if executor is not None:
             candidates = [candidate for candidate in candidates if candidate.executor_name == executor]
         if agent is None:
             if not candidates:
+                if executor is not None:
+                    raise InitAgentResolutionError(
+                        "No local AGOS-compatible agents were found in the current workspace after "
+                        f"applying --executor {executor}.\n\n"
+                        "Install or enable Multica, Codex CLI, or Claude Code, then re-run:\n"
+                        '  agos init --agent "<agent-name>"'
+                    )
                 raise InitAgentResolutionError(
                     "No default agent configured and --agent was not provided.\n\n"
                     "No local AGOS-compatible agents were found in the current workspace.\n"
@@ -502,6 +514,7 @@ def init_command(
                 )
             selected_agent = _select_interactive_executor(candidates)
             auto_run_title = _prompt_task_title()
+            auto_run_intent = _prompt_task_intent()
             selected_workers = plan_workers_for_goal(selected_agent, auto_run_title, candidates)
             if not selected_workers:
                 selected_workers = [selected_agent]
@@ -562,5 +575,5 @@ def init_command(
     typer.echo("Starting AGOS task...")
     from agos.cli.cmd_start import start_command
 
-    start_command(title=auto_run_title, intent=None, workflow=None, gate=None)
+    start_command(title=auto_run_title, intent=auto_run_intent, workflow=None, gate=None)
 

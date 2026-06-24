@@ -30,7 +30,7 @@ pip install -e ".[langgraph]"
 ## Commands (current CLI)
 
 ```
-agos init [--executor multica] [--agent "Lambda"]
+agos init [--executor multica] [--agent "<agent-name>"]
 agos doctor [--json]
 agos config show [--json]
 agos config validate [--json]
@@ -79,12 +79,15 @@ agos status
 Run the local governance loop:
 
 ```bash
-agos init --agent "Lambda"
+agos init
+# or: agos init --agent "<agent-name>"
 agos start --title "Implement feature"
 agos checkpoint --once
 agos ci --local --stage pre-commit
 agos closeout
 ```
+
+`agos init` now discovers local agents interactively and records the chosen executor/workers in `.agos/agos.yaml`. Use `--agent` only when you want to pin a specific discovered agent name.
 
 Run the multi-agent execution loop:
 
@@ -247,7 +250,6 @@ Required remote endpoints:
 - `POST /runs/{run_id}/cancel`
 - `GET /runs/{run_id}/artifacts`
 
-- The agent runs in multica's isolated workspace (`~/multica_workspaces/<per-task>/`), not in your repo.
 - `agos checkpoint` streams the agent's reported activity into an evidence ledger and records a governed-repo anchor (HEAD + status) at capture time. It does not claim the agent edited your working tree.
 - `agos ci --local` gates a human developer's commit/push only (advisory and bypassable with `--no-verify`). The agent's own commits never pass through these hooks. Agent output is gated server-side by `agos merge-gate`.
 - Gate commands may use shell-style `command: "pytest -q"` for compatibility or structured `argv: ["pytest", "-q"]` for cross-platform execution without a shell. New configs prefer `argv`.

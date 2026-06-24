@@ -2,13 +2,13 @@
 from __future__ import annotations
 
 import json
+import shutil
 import sys
 from dataclasses import dataclass
 
 import typer
 from pydantic import ValidationError
 
-from agos import __version__
 from agos.cli.orchestration_registry import register_configured_orchestration_backends
 from agos.cli.reviewer_registry import configured_reviewer_adapters, configured_reviewer_specs
 from agos.cli.worker_registry import register_configured_worker_adapters
@@ -136,7 +136,25 @@ def _python_version_check() -> DoctorCheck:
 
 
 def _cli_entrypoint_check() -> DoctorCheck:
-    return DoctorCheck("cli_entrypoint", "passed", f"agos {__version__} importable")
+    script = shutil.which("agos")
+    if script is None:
+        return DoctorCheck(
+            "cli_entrypoint",
+            "failed",
+            "agos console script not found on PATH",
+        )
+
+    completed = run_command([script, "--help"], capture_output=True, text=True, check=False)
+    if completed.returncode != 0:
+        detail = completed.stderr.strip() or completed.stdout.strip() or "command failed"
+        return DoctorCheck(
+            "cli_entrypoint",
+            "failed",
+            f"agos console script at {script} could not run: {detail}",
+        )
+
+    detail = completed.stdout.strip().splitlines()[0] if completed.stdout.strip() else "help available"
+    return DoctorCheck("cli_entrypoint", "passed", f"agos console script at {script} ran: {detail}")
 
 
 def _git_hooks_check(repo_root) -> DoctorCheck:

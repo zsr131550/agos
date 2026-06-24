@@ -101,6 +101,11 @@ def run_auto_command(
     dry_run: bool = typer.Option(False, "--dry-run", help="Run without applying accepted candidates."),
     apply: bool = typer.Option(False, "--apply", help="Apply accepted candidates to the governed repo."),
     json_output: bool = typer.Option(False, "--json", help="Print machine-readable JSON."),
+    planner_json: str | None = typer.Option(
+        None,
+        "--planner-json",
+        help="Planner output JSON to seed automatic execution planning.",
+    ),
     allow_missing_review: bool = typer.Option(
         False,
         "--allow-missing-review",
@@ -116,6 +121,7 @@ def run_auto_command(
             service,
             apply=apply,
             allow_missing_review=allow_missing_review,
+            planner_json=planner_json,
             reviewer_adapters=configured_reviewer_adapters(service.paths.root),
             reviewer_specs=configured_reviewer_specs(service.paths.root),
         )

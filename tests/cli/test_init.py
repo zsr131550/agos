@@ -218,7 +218,7 @@ def test_init_interactively_prompts_title_plans_workers_and_auto_starts(monkeypa
 
     monkeypatch.setattr("agos.cli.cmd_init.plan_workers_for_goal", planner, raising=False)
 
-    result = runner.invoke(app, ["init"], input="2\nBuild interactive init\n")
+    result = runner.invoke(app, ["init"], input="2\nBuild interactive init\nShip init/start intent\n")
 
     assert result.exit_code == 0, result.stderr
     config = yaml.safe_load((tmp_repo / ".agos" / "agos.yaml").read_text(encoding="utf-8"))
@@ -229,10 +229,86 @@ def test_init_interactively_prompts_title_plans_workers_and_auto_starts(monkeypa
     }
     task = yaml.safe_load((tmp_repo / ".agos" / "tasks" / "current" / "task.yaml").read_text(encoding="utf-8"))
     assert task["title"] == "Build interactive init"
-    assert task["intent"] == ""
+    assert task["intent"] == "Ship init/start intent"
     assert task["executor"] == {"adapter": "codex_cli", "agent": "codex"}
     status = json.loads((tmp_repo / ".agos" / "tasks" / "current" / "status.json").read_text(encoding="utf-8"))
     assert status["executor_run"]["run_id"] == "codex-run-1"
+
+
+def test_init_interactively_preserves_empty_task_intent(monkeypatch, tmp_repo):
+    monkeypatch.chdir(tmp_repo)
+    monkeypatch.setattr("agos.cli.cmd_init.validate_executor_environment", lambda _executor: [])
+    monkeypatch.setattr("agos.cli.cmd_init.discover_multica_agents", lambda: ["Lambda"])
+    monkeypatch.setattr(
+        "agos.cli.cmd_init._resolve_cli_command",
+        lambda command: {"codex": "codex.cmd", "claude": "claude.cmd"}.get(command),
+    )
+    monkeypatch.setattr(
+        "agos.cli.executor_registry.CodexCliExecutorAdapter.start",
+        lambda self, task: type("Run", (), {"adapter": "codex_cli", "run_id": "codex-run-1", "issue_id": None})(),
+    )
+    monkeypatch.setattr("agos.cli.cmd_init.run_init_health_checks", lambda _config, _repo_root: [], raising=False)
+    monkeypatch.setattr(
+        "agos.cli.cmd_init.plan_workers_for_goal",
+        lambda _selected, _title, candidates: [candidate for candidate in candidates if candidate.key == "codex:codex"],
+        raising=False,
+    )
+
+    result = runner.invoke(app, ["init"], input="2\nBuild interactive init\n\n")
+
+    assert result.exit_code == 0, result.stderr
+    task = yaml.safe_load((tmp_repo / ".agos" / "tasks" / "current" / "task.yaml").read_text(encoding="utf-8"))
+    assert task["title"] == "Build interactive init"
+    assert task["intent"] == ""
+
+
+def test_init_interactively_uses_task_intent_when_provided(monkeypatch, tmp_repo):
+    import agos.cli.cmd_init as cmd_init
+
+    captured = {}
+
+    monkeypatch.chdir(tmp_repo)
+    monkeypatch.setattr("agos.cli.cmd_init.validate_executor_environment", lambda _executor: [])
+    monkeypatch.setattr("agos.cli.cmd_init.discover_multica_agents", lambda: ["Lambda"])
+    monkeypatch.setattr(
+        "agos.cli.cmd_init._resolve_cli_command",
+        lambda command: {"codex": "codex.cmd", "claude": "claude.cmd"}.get(command),
+    )
+    monkeypatch.setattr("agos.cli.cmd_init.run_init_health_checks", lambda _config, _repo_root: [], raising=False)
+    monkeypatch.setattr(
+        "agos.cli.executor_registry.CodexCliExecutorAdapter.start",
+        lambda self, task: type("Run", (), {"adapter": "codex_cli", "run_id": "codex-run-1", "issue_id": None})(),
+    )
+
+    def planner(
+        selected_agent: cmd_init.LocalAgentCandidate,
+        title: str,
+        candidates: list[cmd_init.LocalAgentCandidate],
+    ) -> list[cmd_init.LocalAgentCandidate]:
+        captured["title"] = title
+        return [candidate for candidate in candidates if candidate.key == "codex:codex"]
+
+    monkeypatch.setattr("agos.cli.cmd_init.plan_workers_for_goal", planner, raising=False)
+
+    result = runner.invoke(app, ["init"], input="2\nBuild interactive init\nShip init/start intent\n")
+
+    assert result.exit_code == 0, result.stderr
+    task = yaml.safe_load((tmp_repo / ".agos" / "tasks" / "current" / "task.yaml").read_text(encoding="utf-8"))
+    assert task["intent"] == "Ship init/start intent"
+    assert captured["title"] == "Build interactive init"
+
+
+def test_init_filters_executor_candidates_and_reports_when_none_remain(monkeypatch, tmp_repo):
+    monkeypatch.chdir(tmp_repo)
+    monkeypatch.setattr("agos.cli.cmd_init.discover_multica_agents", lambda: ["Lambda"])
+    monkeypatch.setattr("agos.cli.cmd_init._resolve_cli_command", lambda command: {"codex": "codex.cmd"}.get(command))
+
+    result = runner.invoke(app, ["init", "--executor", "claude_code"])
+
+    assert result.exit_code == 1
+    assert "No local AGOS-compatible agents were found in the current workspace after applying --executor claude_code." in result.stderr
+    assert "after applying --executor claude_code" in result.stderr
+    assert not (tmp_repo / ".agos" / "agos.yaml").exists()
 
 
 def test_init_auto_run_stops_when_health_check_fails(monkeypatch, tmp_repo):
@@ -258,7 +334,7 @@ def test_init_auto_run_stops_when_health_check_fails(monkeypatch, tmp_repo):
         lambda self, task: (_ for _ in ()).throw(AssertionError("auto start should not run")),
     )
 
-    result = runner.invoke(app, ["init"], input="2\nBuild interactive init\n")
+    result = runner.invoke(app, ["init"], input="2\nBuild interactive init\nShip init/start intent\n")
 
     assert result.exit_code == 1
     assert "Health check failed" in result.stderr

@@ -330,6 +330,17 @@ def test_merge_gate_blocks_candidate_patch_hash_mismatch(tmp_repo: Path):
     assert _check(result, "candidate_patch_hashes").state == "block"
 
 
+def test_merge_gate_blocks_non_terminal_candidate_status(tmp_repo: Path):
+    _task, paths = _write_active_task(tmp_repo)
+    _write_candidate(paths, status="proposed", clean_review=False)
+
+    result = verify_merge_gate(paths)
+
+    assert result.passed is False
+    assert _check(result, "candidate_status").state == "block"
+    assert "proposed" in "; ".join(_check(result, "candidate_status").details)
+
+
 def test_merge_gate_blocks_missing_candidate_patch_file(tmp_repo: Path):
     _task, paths = _write_active_task(tmp_repo)
     candidate = _write_candidate(paths, status="proposed")

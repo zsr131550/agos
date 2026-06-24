@@ -159,3 +159,57 @@ def test_run_auto_human_output_reports_missing_review(monkeypatch, tmp_repo):
     assert "auto-plan-agos-01" in result.stdout
     assert "accepted: -" in result.stdout
     assert "review" in result.stdout
+
+
+def test_run_auto_passes_planner_json_to_pipeline(monkeypatch, tmp_repo):
+    _active_task(tmp_repo)
+    monkeypatch.chdir(tmp_repo)
+    monkeypatch.setattr("agos.cli.cmd_execute_plan.register_configured_worker_adapters", _register_fake_worker)
+    captured = {}
+
+    def fake_run_auto_execution(service, **kwargs):
+        captured["planner_json"] = kwargs.get("planner_json")
+        return type(
+            "Result",
+            (),
+            {
+                "model_dump_json": lambda self: json.dumps(
+                    {
+                        "plan_id": "auto-plan-agos-01",
+                        "task_id": "agos-01",
+                        "run_id": "auto-run-agos-01",
+                        "run_state": "completed",
+                        "completed_subtasks": [],
+                        "failed_subtasks": [],
+                        "candidate_ids": [],
+                        "accepted_candidate_ids": [],
+                        "applied_candidate_ids": [],
+                        "dry_run": True,
+                        "notes": [],
+                    }
+                ),
+            },
+        )()
+
+    monkeypatch.setattr("agos.cli.cmd_execute_plan.run_auto_execution", fake_run_auto_execution)
+
+    result = runner.invoke(app, ["run", "auto", "--planner-json", '{"plan":"from-cli"}', "--json"])
+
+    assert result.exit_code == 0, result.stderr
+    assert captured["planner_json"] == '{"plan":"from-cli"}'
+
+
+def test_run_auto_reports_internal_error_to_stderr(monkeypatch, tmp_repo):
+    _active_task(tmp_repo)
+    monkeypatch.chdir(tmp_repo)
+    monkeypatch.setattr("agos.cli.cmd_execute_plan.register_configured_worker_adapters", _register_fake_worker)
+
+    def fail_run_auto_execution(*_args, **_kwargs):
+        raise RuntimeError("pipeline exploded")
+
+    monkeypatch.setattr("agos.cli.cmd_execute_plan.run_auto_execution", fail_run_auto_execution)
+
+    result = runner.invoke(app, ["run", "auto", "--json"])
+
+    assert result.exit_code == 1
+    assert "pipeline exploded" in result.stderr

@@ -12,6 +12,7 @@ import agos.core.execution_pipeline as execution_pipeline
 from agos.adapters.reviewers import FakeReviewerAdapter
 from agos.adapters.workers import LocalWorktreeWorkerAdapter, WorkerRun
 from agos.core.adapter import ExecutorRun
+from agos.core.execution import ExecutionPlan
 from agos.core.execution_pipeline import run_auto_execution
 from agos.core.execution_runtime import ExecutionRuntimeSnapshot
 from agos.core.execution_service import ExecutionService
@@ -319,18 +320,74 @@ def test_apply_failure_is_reported_after_acceptance(monkeypatch, tmp_repo):
     assert any("apply failed" in note for note in result.notes)
 
 
-def test_run_prepared_plan_stops_when_runtime_state_repeats(monkeypatch, tmp_repo):
+def test_run_auto_execution_passes_planner_json_to_plan_creation(monkeypatch, tmp_repo):
     _active_task(tmp_repo)
-    snapshot = ExecutionRuntimeSnapshot(
-        run_id="auto-run-01",
-        state="running",
-        running_subtasks=("subtask-01",),
+    reviewer_adapters, reviewer_specs = _reviewers()
+    captured = {}
+
+    def fake_create_execution_plan(task, config, workers, *, planner_json=None):
+        captured["planner_json"] = planner_json
+        return ExecutionPlan.model_validate(
+            {
+                "id": "auto-plan-01",
+                "task_id": task.id,
+                "max_parallel": 1,
+                "requires_candidate_review": True,
+                "subtasks": [
+                    {
+                        "id": "subtask-01",
+                        "title": "Update README",
+                        "intent": "Update the README heading.",
+                        "depends_on": [],
+                        "write_scope": ["README.md"],
+                        "worker": {"adapter": "editing", "role": "worker_agent"},
+                    }
+                ],
+            }
+        )
+
+    monkeypatch.setattr(execution_pipeline, "create_execution_plan", fake_create_execution_plan)
+    monkeypatch.setattr(
+        execution_pipeline,
+        "_run_prepared_plan",
+        lambda _service, plan: ExecutionRuntimeSnapshot(
+            run_id="auto-run-01",
+            state="completed",
+            completed_subtasks=(),
+            failed_subtasks=(),
+        ),
     )
+
+    execution_pipeline.run_auto_execution(
+        _service(tmp_repo),
+        apply=False,
+        planner_json='{"plan":"from-planner"}',
+        reviewer_adapters=reviewer_adapters,
+        reviewer_specs=reviewer_specs,
+    )
+
+    assert captured["planner_json"] == '{"plan":"from-planner"}'
+
+
+def test_run_prepared_plan_reports_stuck_state_when_runtime_state_repeats(monkeypatch, tmp_repo):
+    _active_task(tmp_repo)
+    snapshots = [
+        ExecutionRuntimeSnapshot(
+            run_id="auto-run-01",
+            state="running",
+            running_subtasks=("subtask-01",),
+        ),
+        ExecutionRuntimeSnapshot(
+            run_id="auto-run-01",
+            state="running",
+            running_subtasks=("subtask-01",),
+        ),
+    ]
     tick_run_ids: list[str] = []
 
     def fake_tick(_runtime, _plan, *, run_id: str):
         tick_run_ids.append(run_id)
-        return snapshot
+        return snapshots[min(len(tick_run_ids) - 1, len(snapshots) - 1)]
 
     monkeypatch.setattr(execution_pipeline.ExecutionRuntime, "tick", fake_tick)
 
@@ -339,7 +396,7 @@ def test_run_prepared_plan_stops_when_runtime_state_repeats(monkeypatch, tmp_rep
         SimpleNamespace(id="auto-plan-01", subtasks=[]),
     )
 
-    assert result is snapshot
+    assert result.state == "stuck"
     assert tick_run_ids == ["auto-run-01", "auto-run-01"]
 
 

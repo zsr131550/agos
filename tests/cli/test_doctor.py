@@ -18,9 +18,61 @@ from agos.core.task import ExecutorBinding, Task, save_task
 runner = CliRunner()
 
 
+def _stub_cli_entrypoint_success(monkeypatch):
+    import agos.cli.cmd_doctor as cmd_doctor
+
+    monkeypatch.setattr(cmd_doctor.shutil, "which", lambda _name: r"C:\\Tools\\agos.cmd")
+
+    def fake_run_command(args, **_kwargs):
+        if args[:3] == ["git", "rev-parse", "--git-path"]:
+            return type("Proc", (), {"returncode": 0, "stdout": ".git/hooks\n", "stderr": ""})()
+        return type("Proc", (), {"returncode": 0, "stdout": "agos 0.1.0", "stderr": ""})()
+
+    monkeypatch.setattr(cmd_doctor, "run_command", fake_run_command)
+
+
+def test_doctor_cli_entrypoint_check_passes_when_console_script_runs(monkeypatch):
+    import agos.cli.cmd_doctor as cmd_doctor
+
+    _stub_cli_entrypoint_success(monkeypatch)
+
+    check = cmd_doctor._cli_entrypoint_check()
+
+    assert check.state == "passed"
+    assert "console script" in check.detail
+
+
+def test_doctor_cli_entrypoint_check_fails_when_console_script_path_is_missing(monkeypatch):
+    import agos.cli.cmd_doctor as cmd_doctor
+
+    monkeypatch.setattr(cmd_doctor.shutil, "which", lambda _name: None)
+
+    check = cmd_doctor._cli_entrypoint_check()
+
+    assert check.state == "failed"
+    assert "not found" in check.detail
+
+
+def test_doctor_cli_entrypoint_check_fails_when_console_script_cannot_run(monkeypatch):
+    import agos.cli.cmd_doctor as cmd_doctor
+
+    monkeypatch.setattr(cmd_doctor.shutil, "which", lambda _name: r"C:\\Tools\\agos.cmd")
+    monkeypatch.setattr(
+        cmd_doctor,
+        "run_command",
+        lambda *_args, **_kwargs: type("Proc", (), {"returncode": 1, "stdout": "", "stderr": "permission denied"})(),
+    )
+
+    check = cmd_doctor._cli_entrypoint_check()
+
+    assert check.state == "failed"
+    assert "permission denied" in check.detail
+
+
 def test_doctor_json_reports_healthy_initialized_repo(monkeypatch, tmp_repo):
     _write_config(tmp_repo)
     monkeypatch.chdir(tmp_repo)
+    _stub_cli_entrypoint_success(monkeypatch)
 
     result = runner.invoke(app, ["doctor", "--json"])
 
@@ -42,6 +94,7 @@ def test_doctor_json_reports_healthy_initialized_repo(monkeypatch, tmp_repo):
 def test_doctor_human_reports_check_lines(monkeypatch, tmp_repo):
     _write_config(tmp_repo)
     monkeypatch.chdir(tmp_repo)
+    _stub_cli_entrypoint_success(monkeypatch)
 
     result = runner.invoke(app, ["doctor"])
 
@@ -76,6 +129,7 @@ def test_doctor_json_fails_for_invalid_config(monkeypatch, tmp_repo):
         encoding="utf-8",
     )
     monkeypatch.chdir(tmp_repo)
+    _stub_cli_entrypoint_success(monkeypatch)
 
     result = runner.invoke(app, ["doctor", "--json"])
 
@@ -90,6 +144,7 @@ def test_doctor_json_fails_for_invalid_config(monkeypatch, tmp_repo):
 def test_doctor_reports_missing_hooks_as_warning(monkeypatch, tmp_repo):
     _write_config(tmp_repo)
     monkeypatch.chdir(tmp_repo)
+    _stub_cli_entrypoint_success(monkeypatch)
 
     result = runner.invoke(app, ["doctor", "--json"])
 
@@ -120,6 +175,7 @@ def test_doctor_warns_when_active_task_has_no_trust_anchor(monkeypatch, tmp_repo
         paths,
     )
     monkeypatch.chdir(tmp_repo)
+    _stub_cli_entrypoint_success(monkeypatch)
 
     result = runner.invoke(app, ["doctor", "--json"])
 
@@ -132,6 +188,7 @@ def test_doctor_warns_when_active_task_has_no_trust_anchor(monkeypatch, tmp_repo
 
 def test_doctor_reports_uninitialized_repo(monkeypatch, tmp_repo):
     monkeypatch.chdir(tmp_repo)
+    _stub_cli_entrypoint_success(monkeypatch)
 
     result = runner.invoke(app, ["doctor", "--json"])
 
@@ -159,6 +216,7 @@ def test_doctor_reports_installed_and_unmanaged_hooks(monkeypatch, tmp_repo):
     (hooks_dir / "pre-commit").write_text("# Managed by AGOS\n", encoding="utf-8")
     (hooks_dir / "pre-push").write_text("# Managed by AGOS\n", encoding="utf-8")
     monkeypatch.chdir(tmp_repo)
+    _stub_cli_entrypoint_success(monkeypatch)
 
     result = runner.invoke(app, ["doctor", "--json"])
     payload = json.loads(result.stdout)
