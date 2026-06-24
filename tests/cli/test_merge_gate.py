@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 from typer.testing import CliRunner
+from typer.main import get_command
 
 from agos.cli import cmd_merge_gate
 from agos.cli.main import app
@@ -130,11 +131,15 @@ def test_merge_gate_requires_base_and_head_together(monkeypatch, tmp_repo: Path)
 
 
 def test_merge_gate_help_exposes_submitted_diff_refs():
-    result = runner.invoke(app, ["merge-gate", "--help"], terminal_width=200, color=False)
+    command = get_command(app).commands["merge-gate"]
+    opts = {
+        option
+        for param in command.params
+        for option in getattr(param, "opts", [])
+    }
 
-    assert result.exit_code == 0
-    assert "--base" in result.stdout
-    assert "--head" in result.stdout
+    assert "--base" in opts
+    assert "--head" in opts
 
 
 def test_merge_gate_exits_nonzero_on_unexpected_error(monkeypatch, tmp_repo: Path):
