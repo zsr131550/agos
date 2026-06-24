@@ -130,7 +130,7 @@ def test_merge_gate_requires_base_and_head_together(monkeypatch, tmp_repo: Path)
 
 
 def test_merge_gate_help_exposes_submitted_diff_refs():
-    result = runner.invoke(app, ["merge-gate", "--help"])
+    result = runner.invoke(app, ["merge-gate", "--help"], terminal_width=200, color=False)
 
     assert result.exit_code == 0
     assert "--base" in result.stdout

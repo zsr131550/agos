@@ -7,10 +7,24 @@ execution, trust anchors, and a CI-oriented merge gate. See
 `docs/superpowers/specs/2026-06-24-agos-v1-hardening-design.md` for the current
 production-hardening design.
 
-## Install (dev)
+## Install
+
+From a release wheel:
+
+```bash
+pip install agos-0.1.0-py3-none-any.whl
+```
+
+For local development:
 
 ```bash
 pip install -e ".[dev]"
+```
+
+Optional LangGraph support:
+
+```bash
+pip install -e ".[langgraph]"
 ```
 
 ## Commands (current CLI)
@@ -192,6 +206,12 @@ enforcement point.
 The default `feature` workflow stays lightweight. Production security scans can
 be enabled with typed gates such as `opa`, `semgrep`, `trufflehog`, and `codeql`.
 See `docs/security-gates.md` for examples and scanner boundary guidance.
+
+### Protected CI Merge Gate
+
+The repository CI adds a dedicated `merge-gate` job for branch protection. Use
+`docs/security-gates.md` for the required status-check shape and
+`docs/release-install.md` for release and install paths.
 
 ### Merge Strategies
 

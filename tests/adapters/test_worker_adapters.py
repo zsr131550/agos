@@ -321,6 +321,43 @@ def test_multica_worker_adapter_wraps_existing_executor(monkeypatch):
     assert "--assignee" in calls[0]
 
 
+def test_multica_worker_adapter_resolves_windows_shim(monkeypatch):
+    from agos.adapters.workers.multica_worker import MulticaWorkerAdapter
+    import agos.adapters.workers.multica_worker as worker_module
+
+    calls: list[list[str]] = []
+
+    class FakeProc:
+        def __init__(self, stdout: str) -> None:
+            self.returncode = 0
+            self.stdout = stdout
+            self.stderr = ""
+
+    def fake_run(args, **kwargs):
+        del kwargs
+        calls.append(args)
+        if args[1:3] == ["issue", "create"]:
+            return FakeProc('{"identifier": "MUL-1"}')
+        if args[1:3] == ["issue", "runs"]:
+            return FakeProc('{"runs": [{"id": "multica-run-01", "status": "done"}]}')
+        raise AssertionError(args)
+
+    monkeypatch.setattr(worker_module, "run_command", fake_run)
+    monkeypatch.setattr(worker_module, "resolve_multica_bin", lambda value="multica": r"C:\tools\multica.cmd", raising=False)
+
+    adapter = MulticaWorkerAdapter(multica_bin="multica", agent="Lambda")
+    adapter.start(
+        WorkerStartRequest(
+            run_id="execution-run-01",
+            subtask_id="subtask-01",
+            prompt="Do the work",
+            workspace_path="C:/workspace",
+        )
+    )
+
+    assert calls[0][0] == r"C:\tools\multica.cmd"
+
+
 def test_openhands_worker_adapter_posts_and_polls(monkeypatch, tmp_path):
     from agos.adapters.workers.openhands import OpenHandsWorkerAdapter
     import agos.adapters.workers.openhands as openhands_module
@@ -639,6 +676,7 @@ def test_multica_worker_health_checks_daemon_and_workspace(monkeypatch):
         calls.append(args)
         return FakeProc()
 
+    monkeypatch.setattr(worker_module, "resolve_multica_bin", lambda value="multica": value)
     monkeypatch.setattr(worker_module, "run_command", fake_run)
 
     health = MulticaWorkerAdapter(multica_bin="multica", agent="Lambda").health()
@@ -928,6 +966,7 @@ def test_multica_worker_cancel_uses_issue_id_after_start(monkeypatch, tmp_path):
             return FakeProc('{"state": "cancelled", "output_refs": ["remote/cancel.json"]}')
         raise AssertionError(args)
 
+    monkeypatch.setattr(worker_module, "resolve_multica_bin", lambda value="multica": value)
     monkeypatch.setattr(worker_module, "run_command", fake_run)
     adapter = MulticaWorkerAdapter(
         multica_bin="multica",

@@ -19,8 +19,19 @@ def make_stub(tmp_path: Path, monkeypatch) -> str:
     script.write_text(src.read_text(encoding="utf-8"), encoding="utf-8")
     script.chmod(script.stat().st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
 
-    wrapper = bin_dir / "multica.cmd"
-    wrapper.write_text(f'@echo off\r\n"{sys.executable}" "%~dp0fake_multica.py" %*\r\n', encoding="utf-8")
+    if os.name == "nt":
+        wrapper = bin_dir / "multica.cmd"
+        wrapper.write_text(
+            f'@echo off\r\n"{sys.executable}" "%~dp0fake_multica.py" %*\r\n',
+            encoding="utf-8",
+        )
+    else:
+        wrapper = bin_dir / "multica"
+        wrapper.write_text(
+            f'#!/usr/bin/env sh\nexec "{sys.executable}" "$(dirname "$0")/fake_multica.py" "$@"\n',
+            encoding="utf-8",
+        )
+        wrapper.chmod(wrapper.stat().st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
 
     monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
     monkeypatch.setenv("FAKE_MULTICA_STATE", str(tmp_path / "state"))

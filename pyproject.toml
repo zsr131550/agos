@@ -20,6 +20,7 @@ classifiers = [
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
+    "Operating System :: OS Independent",
     "Topic :: Software Development :: Quality Assurance",
 ]
 dependencies = [
@@ -28,6 +29,11 @@ dependencies = [
     "pyyaml>=6.0",
     "python-ulid>=2.2",
 ]
+
+[project.urls]
+Homepage = "https://github.com/zsr131550/agos"
+Source = "https://github.com/zsr131550/agos"
+Issues = "https://github.com/zsr131550/agos/issues"
 
 [project.optional-dependencies]
 dev = [

@@ -56,7 +56,7 @@ Do not add heavy external gates to the default `feature` workflow unless every d
 
 Use AGOS gates for governance evidence and use scanner-native GitHub Actions where they are the stronger control. CodeQL, for example, is usually best enforced with GitHub code scanning while AGOS records whether the task's candidate evidence is complete and mergeable.
 
-Recommended CI shape:
+Recommended strict CI shape:
 
 ```bash
 python -m pytest --cov=agos --cov-report=term-missing -q
@@ -67,3 +67,27 @@ agos merge-gate --require-anchor --anchor-backend git-ref --base "$BASE_SHA" --h
 For GitHub pull requests, set `BASE_SHA` to the pull request base SHA and
 `HEAD_SHA` to the submitted head SHA. The file trust-anchor backend is intended
 for local development and tests; if you use it, pass `--anchor-path`.
+
+## GitHub Protected Check
+
+The workflow `.github/workflows/ci.yml` publishes a dedicated job named
+`merge-gate`. That is the status check to require in branch protection for
+`main`.
+
+Minimum branch protection settings:
+
+- require status checks before merging
+- require branches to be up to date before merging
+- required check: `merge-gate`
+- disallow force pushes
+- require conversation resolution if PR review is used
+
+For private repositories, GitHub may require a paid plan to enable protected
+branches. If the protection API returns `Upgrade to GitHub Pro or make this
+repository public to enable this feature.`, the repository must be made public
+or moved to a plan that supports protected branches before AGOS can enforce the
+check at GitHub's merge button.
+
+The CI smoke test exercises strict `--require-anchor --anchor-backend git-ref`
+inside a temporary repository. Production enforcement needs the same trust
+anchor flow for real PRs; otherwise the merge gate should fail closed.

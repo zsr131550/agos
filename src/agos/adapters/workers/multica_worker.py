@@ -4,6 +4,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
+from agos.adapters.multica import resolve_multica_bin
 from agos.adapters.workers.artifacts import collect_artifact_refs, merge_output_refs
 from agos.adapters.workers.transport import (
     load_json_object,
@@ -57,7 +58,7 @@ class MulticaWorkerAdapter:
         artifact_globs: tuple[str, ...] | list[str] = (),
         env: dict[str, str] | None = None,
     ) -> None:
-        self.multica_bin = multica_bin
+        self.multica_bin = resolve_multica_bin(multica_bin)
         self.agent = agent or "Lambda"
         self.name = name
         self.workspace_manager = workspace_manager if workspace_manager is not None else manager

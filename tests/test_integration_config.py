@@ -31,8 +31,9 @@ def test_integration_agent_uses_env_override(monkeypatch):
     assert _integration_agent() == "codex-gpt-5.4 xhigh"
 
 
-def test_integration_title_uses_unique_repo_context():
-    title = _integration_title(Path(r"E:\repo\.basetemp_integration\test_round_trip0\repo"))
+def test_integration_title_uses_unique_repo_context(tmp_path: Path):
+    repo = tmp_path / "test_round_trip0" / "repo"
+    title = _integration_title(repo)
 
     assert title.startswith("smoke-")
     assert title.endswith("test_round_trip0")

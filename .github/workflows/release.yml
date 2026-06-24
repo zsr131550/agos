@@ -20,6 +20,11 @@ jobs:
       - run: python -m pip install -e ".[dev]"
       - run: python -m pytest -q
       - run: python -m build
+      - name: install built wheel
+        run: python -c "from pathlib import Path; import subprocess, sys; wheel = next(Path('dist').glob('*.whl')); subprocess.check_call([sys.executable, '-m', 'pip', 'install', '--force-reinstall', str(wheel)])"
+      - run: agos version
+      - run: agos --help
+      - run: agos merge-gate --help
       - uses: actions/upload-artifact@v4
         with:
           name: agos-dist
