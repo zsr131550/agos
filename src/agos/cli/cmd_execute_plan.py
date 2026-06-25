@@ -7,6 +7,7 @@ from pathlib import Path
 import typer
 
 from agos.cli.orchestration_registry import register_configured_orchestration_backends
+from agos.cli.planner_registry import configured_planner_adapter
 from agos.cli.reviewer_registry import configured_reviewer_adapters, configured_reviewer_specs
 from agos.cli.worker_registry import register_configured_worker_adapters
 from agos.core.execution_pipeline import AutoExecutionResult, run_auto_execution
@@ -122,6 +123,7 @@ def run_auto_command(
             apply=apply,
             allow_missing_review=allow_missing_review,
             planner_json=planner_json,
+            planner=configured_planner_adapter(service.paths.root),
             reviewer_adapters=configured_reviewer_adapters(service.paths.root),
             reviewer_specs=configured_reviewer_specs(service.paths.root),
         )

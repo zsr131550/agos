@@ -30,6 +30,7 @@ def _active_task(tmp_repo):
                         "required": True,
                     }
                 },
+                "allow_fake_reviewer": True,
                 "workflows": {},
             },
             sort_keys=False,

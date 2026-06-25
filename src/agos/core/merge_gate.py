@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import hashlib
+import json
 from pathlib import PurePosixPath
 from typing import Literal
 
@@ -10,7 +11,7 @@ from pydantic import BaseModel, Field
 
 from agos.core.command import run_command
 from agos.core.config import GateSpec, load_config, resolve_gates
-from agos.core.execution import CandidateBundleDecision, CandidateMergePreview, CandidatePatch
+from agos.core.execution import CandidateBundleDecision, CandidateMergePreview, CandidatePatch, ReviewBinding
 from agos.core.execution_store import ExecutionStore
 from agos.core.execution_workspace import candidate_patch_paths
 from agos.core.gate import gates_match
@@ -145,7 +146,7 @@ def verify_merge_gate(
                 details=status_issues,
             )
         )
-        evidence_issues = _candidate_evidence_issues(
+        evidence_issues, evidence_warnings = _candidate_evidence_issues(
             store,
             candidates,
             required_gate_ids=[gate.id for gate in resolved_gates],
@@ -154,6 +155,7 @@ def verify_merge_gate(
             ledger_records_by_hash={
                 str(record["hash"]): record for record in records if record.get("hash")
             },
+            allow_fake_reviewer=config.allow_fake_reviewer,
         )
         checks.append(
             MergeGateCheck(
@@ -162,7 +164,7 @@ def verify_merge_gate(
                 message="candidate evidence verification failed"
                 if evidence_issues
                 else "candidate evidence verified",
-                details=evidence_issues,
+                details=evidence_issues + evidence_warnings,
             )
         )
         arbitration_issues = _merge_arbitration_issues(store, records)
@@ -261,8 +263,10 @@ def _candidate_evidence_issues(
     allow_missing_review: bool,
     paths: AgosPaths,
     ledger_records_by_hash: dict[str, dict],
-) -> list[str]:
+    allow_fake_reviewer: bool = False,
+) -> tuple[list[str], list[str]]:
     issues: list[str] = []
+    warnings: list[str] = []
     required = {"patch_applies", *required_gate_ids}
     for candidate in candidates:
         if candidate.status not in {"accepted", "applied"}:
@@ -282,7 +286,17 @@ def _candidate_evidence_issues(
         )
         if review_issue is not None:
             issues.append(f"{candidate.id}: {review_issue}")
-    return issues
+            continue
+        block, warning = _dev_only_review_provenance(
+            candidate,
+            paths=paths,
+            allow_fake_reviewer=allow_fake_reviewer,
+        )
+        if block is not None:
+            issues.append(f"{candidate.id}: {block}")
+        if warning is not None:
+            warnings.append(f"{candidate.id}: {warning}")
+    return issues, warnings
 
 
 def _candidate_status_issues(candidates: list[CandidatePatch]) -> list[str]:
@@ -361,6 +375,48 @@ def _review_report_issue(
     if open_blocking_count != binding.open_blocking_count:
         return "candidate-bound review open blocking count is stale"
     return None
+
+
+def _dev_only_review_provenance(
+    candidate: CandidatePatch,
+    *,
+    paths: AgosPaths,
+    allow_fake_reviewer: bool,
+) -> tuple[str | None, str | None]:
+    """Inspect completed review raw outputs for a dev_only provenance marker.
+
+    fake.py stamps ``dev_only: true`` into its raw output; production reviewers
+    do not. Returns ``(block_issue, warning)``: block when a dev-only review is
+    not explicitly allowed, otherwise a non-blocking warning. Raw outputs that
+    are missing or unreadable are treated as non-dev-only; the reviewer registry
+    is the primary defense against fake reviewers reaching production.
+    """
+    completed = [binding for binding in candidate.review_refs if binding.state == "completed"]
+    if not completed:
+        return None, None
+    binding = completed[-1]
+    if not _binding_is_dev_only(binding, paths=paths):
+        return None, None
+    if allow_fake_reviewer:
+        return None, "candidate reviewed by dev-only reviewer (allow_fake_reviewer=true)"
+    return "candidate reviewed by non-production reviewer", None
+
+
+def _binding_is_dev_only(binding: ReviewBinding, *, paths: AgosPaths) -> bool:
+    for ref in binding.raw_refs:
+        try:
+            path = _task_ref_path(paths, ref)
+        except ValueError:
+            continue
+        if not path.is_file():
+            continue
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if isinstance(payload, dict) and payload.get("dev_only") is True:
+            return True
+    return False
 
 
 def _merge_arbitration_issues(store: ExecutionStore, records: list[dict]) -> list[str]:

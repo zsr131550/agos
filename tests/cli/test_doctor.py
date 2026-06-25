@@ -91,6 +91,36 @@ def test_doctor_json_reports_healthy_initialized_repo(monkeypatch, tmp_repo):
     assert checks["git_hooks"]["state"] == "warning"
 
 
+def test_doctor_warns_on_dev_only_reviewer(monkeypatch, tmp_repo):
+    agos_dir = tmp_repo / ".agos"
+    agos_dir.mkdir()
+    (agos_dir / "agos.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "executor": {"name": "multica", "agent": "Lambda"},
+                "workers": {"local_worktree": {"type": "local_worktree"}},
+                "reviewers": {"clean": {"type": "fake", "role": "reviewer"}},
+                "allow_fake_reviewer": True,
+                "orchestration": {"backend": "native_async", "max_parallel": 2},
+                "workflows": {"feature": {"gates": []}},
+            },
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(tmp_repo)
+    _stub_cli_entrypoint_success(monkeypatch)
+
+    result = runner.invoke(app, ["doctor", "--json"])
+
+    assert result.exit_code == 0, result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["healthy"] is True
+    checks = {check["name"]: check for check in payload["checks"]}
+    assert checks["reviewers"]["state"] == "warning"
+    assert "dev-only reviewer" in checks["reviewers"]["detail"]
+
+
 def test_doctor_human_reports_check_lines(monkeypatch, tmp_repo):
     _write_config(tmp_repo)
     monkeypatch.chdir(tmp_repo)

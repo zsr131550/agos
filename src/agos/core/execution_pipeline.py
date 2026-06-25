@@ -6,7 +6,7 @@ from pydantic import BaseModel, Field
 from agos.core.config import load_config
 from agos.core.execution_runtime import ExecutionRuntime, ExecutionRuntimeSnapshot
 from agos.core.execution_service import ExecutionService
-from agos.core.execution_planner import create_execution_plan
+from agos.core.execution_planner import PlannerAdapter, create_execution_plan
 from agos.core.review_adapter import ReviewerAdapter
 from agos.core.review_orchestrator import ReviewerSpec
 from agos.core.status import load_status
@@ -33,6 +33,7 @@ def run_auto_execution(
     apply: bool = False,
     allow_missing_review: bool = False,
     planner_json: str | None = None,
+    planner: PlannerAdapter | None = None,
     reviewer_adapters: dict[str, ReviewerAdapter] | None = None,
     reviewer_specs: list[ReviewerSpec] | None = None,
 ) -> AutoExecutionResult:
@@ -48,6 +49,7 @@ def run_auto_execution(
         config,
         config.workers,
         planner_json=planner_json,
+        planner=planner,
     )
     prepared = service.execute_plan_model(plan)
     snapshot = _run_prepared_plan(service, prepared)
@@ -134,7 +136,13 @@ def run_auto_execution(
 
 
 def _run_prepared_plan(service: ExecutionService, plan) -> ExecutionRuntimeSnapshot:
-    runtime_config = load_config(service.paths.root).orchestration
+    config = load_config(service.paths.root)
+    runtime_config = config.orchestration
+    worker_timeout_seconds = runtime_config.worker_timeout_seconds
+    if worker_timeout_seconds is None and _any_claude_async_poll(config):
+        # Async `--bg` polling without an overall timeout would let a stuck
+        # background session poll indefinitely; apply a bounded fallback.
+        worker_timeout_seconds = CLAUDE_ASYNC_FALLBACK_TIMEOUT_SECONDS
     runtime = ExecutionRuntime(
         state_dir=service.paths.current_task / "execution" / "runs",
         worker_adapters=service.worker_adapters(),
@@ -145,12 +153,12 @@ def _run_prepared_plan(service: ExecutionService, plan) -> ExecutionRuntimeSnaps
         },
         max_retries=runtime_config.max_retries,
         retry_backoff_seconds=runtime_config.retry_backoff_seconds,
-        worker_timeout_seconds=runtime_config.worker_timeout_seconds,
+        worker_timeout_seconds=worker_timeout_seconds,
     )
     run_id = "auto-run-" + plan.id.removeprefix("auto-plan-")
     snapshot = runtime.tick(plan, run_id=run_id)
     previous: tuple[str, str, tuple[str, ...], tuple[str, ...]] | None = None
-    for _ in range(20):
+    for _ in range(runtime_config.max_tick_iterations):
         state_key = (
             snapshot.state,
             ",".join(snapshot.running_subtasks),
@@ -183,3 +191,16 @@ def _acceptance_reason(*, reviewed: bool) -> str:
     if reviewed:
         return "Automatic pipeline accepted candidate after passing tests and clean review."
     return "Automatic pipeline accepted candidate after passing tests with missing review explicitly allowed."
+
+
+# Overall timeout applied when a claude_code worker opts into async `--bg`
+# polling but no explicit `worker_timeout_seconds` is configured. Keeps a stuck
+# background session from polling forever (P1-2 correction #3).
+CLAUDE_ASYNC_FALLBACK_TIMEOUT_SECONDS = 600
+
+
+def _any_claude_async_poll(config) -> bool:
+    return any(
+        worker.type == "claude_code" and worker.claude_async_poll
+        for worker in config.workers.values()
+    )

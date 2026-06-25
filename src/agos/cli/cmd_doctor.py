@@ -107,7 +107,17 @@ def _run_checks() -> list[DoctorCheck]:
     try:
         reviewer_specs = configured_reviewer_specs(repo_root)
         configured_reviewer_adapters(repo_root)
-        checks.append(DoctorCheck("reviewers", "passed", f"{len(reviewer_specs)} reviewer(s) configured"))
+        dev_only_count = sum(1 for reviewer in config.reviewers.values() if reviewer.dev_only)
+        if dev_only_count:
+            checks.append(
+                DoctorCheck(
+                    "reviewers",
+                    "warning",
+                    f"{dev_only_count} dev-only reviewer(s) active; not for production",
+                )
+            )
+        else:
+            checks.append(DoctorCheck("reviewers", "passed", f"{len(reviewer_specs)} reviewer(s) configured"))
     except Exception as exc:
         checks.append(DoctorCheck("reviewers", "failed", str(exc)))
 

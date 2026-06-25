@@ -12,6 +12,7 @@ import agos.core.execution_pipeline as execution_pipeline
 from agos.adapters.reviewers import FakeReviewerAdapter
 from agos.adapters.workers import LocalWorktreeWorkerAdapter, WorkerRun
 from agos.core.adapter import ExecutorRun
+from agos.core.config import AGOSConfig
 from agos.core.execution import ExecutionPlan
 from agos.core.execution_pipeline import run_auto_execution
 from agos.core.execution_runtime import ExecutionRuntimeSnapshot
@@ -325,7 +326,7 @@ def test_run_auto_execution_passes_planner_json_to_plan_creation(monkeypatch, tm
     reviewer_adapters, reviewer_specs = _reviewers()
     captured = {}
 
-    def fake_create_execution_plan(task, config, workers, *, planner_json=None):
+    def fake_create_execution_plan(task, config, workers, *, planner_json=None, planner=None):
         captured["planner_json"] = planner_json
         return ExecutionPlan.model_validate(
             {
@@ -398,6 +399,40 @@ def test_run_prepared_plan_reports_stuck_state_when_runtime_state_repeats(monkey
 
     assert result.state == "stuck"
     assert tick_run_ids == ["auto-run-01", "auto-run-01"]
+
+
+def test_run_prepared_plan_stops_at_max_tick_iterations_when_runtime_never_settles(monkeypatch, tmp_repo):
+    _active_task(tmp_repo)
+    # Always running, with a distinct state key each tick so "stuck" never triggers.
+    call_count = {"n": 0}
+
+    def fake_tick(_runtime, _plan, *, run_id: str):
+        call_count["n"] += 1
+        return ExecutionRuntimeSnapshot(
+            run_id="auto-run-01",
+            state="running",
+            running_subtasks=(f"subtask-{call_count['n']}",),
+        )
+
+    monkeypatch.setattr(execution_pipeline.ExecutionRuntime, "tick", fake_tick)
+
+    capped_config = AGOSConfig.model_validate(
+        {
+            "executor": {"name": "multica", "agent": "Lambda"},
+            "workers": {"editing": {"type": "local_worktree"}},
+            "orchestration": {"max_parallel": 1, "max_tick_iterations": 2},
+            "workflows": {"feature": {"gates": []}},
+        }
+    )
+    monkeypatch.setattr(execution_pipeline, "load_config", lambda _root: capped_config)
+
+    result = execution_pipeline._run_prepared_plan(
+        _service(tmp_repo),
+        SimpleNamespace(id="auto-plan-01", subtasks=[]),
+    )
+
+    assert result.state == "running"
+    assert call_count["n"] == 3
 
 
 def test_acceptance_reason_records_explicit_missing_review_override():

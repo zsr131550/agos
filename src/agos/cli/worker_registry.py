@@ -32,6 +32,7 @@ def register_configured_worker_adapters(service: ExecutionService) -> None:
                     poll_interval_seconds=worker.poll_interval_seconds,
                     artifact_globs=worker.artifact_globs,
                     env=worker.env,
+                    health_probe=worker.health_probe,
                 )
             )
         elif worker.type == "claude_code":
@@ -44,6 +45,9 @@ def register_configured_worker_adapters(service: ExecutionService) -> None:
                     poll_interval_seconds=worker.poll_interval_seconds,
                     artifact_globs=worker.artifact_globs,
                     env=worker.env,
+                    health_probe=worker.health_probe,
+                    claude_async_poll=worker.claude_async_poll,
+                    claude_resume_on_complete=worker.claude_resume_on_complete,
                 )
             )
         elif worker.type == "multica":

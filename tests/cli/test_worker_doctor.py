@@ -71,7 +71,7 @@ def test_worker_doctor_returns_nonzero_for_unhealthy_worker(monkeypatch, tmp_rep
         },
     )
     monkeypatch.chdir(tmp_repo)
-    monkeypatch.setattr("agos.adapters.workers.codex_cli.shutil.which", lambda _command: None)
+    monkeypatch.setattr("agos.adapters.workers._health.shutil.which", lambda _command: None)
 
     result = runner.invoke(app, ["worker", "doctor", "--json"])
 

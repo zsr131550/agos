@@ -587,9 +587,15 @@ def test_codex_worker_adapter_collects_configured_artifacts(monkeypatch, tmp_pat
 
 def test_codex_worker_health_reports_command_availability(monkeypatch):
     from agos.adapters.workers.codex_cli import CodexWorkerAdapter
-    import agos.adapters.workers.codex_cli as codex_module
+    import agos.adapters.workers._health as health_module
 
-    monkeypatch.setattr(codex_module.shutil, "which", lambda command: f"C:/bin/{command}.exe")
+    class FakeProc:
+        returncode = 0
+        stdout = "codex 0.1.0"
+        stderr = ""
+
+    monkeypatch.setattr(health_module.shutil, "which", lambda command: f"C:/bin/{command}.exe")
+    monkeypatch.setattr(health_module, "run_command", lambda *_args, **_kwargs: FakeProc())
 
     health = CodexWorkerAdapter(
         command="codex",
@@ -607,9 +613,9 @@ def test_codex_worker_health_reports_command_availability(monkeypatch):
 
 def test_codex_worker_health_reports_missing_command(monkeypatch):
     from agos.adapters.workers.codex_cli import CodexWorkerAdapter
-    import agos.adapters.workers.codex_cli as codex_module
+    import agos.adapters.workers._health as health_module
 
-    monkeypatch.setattr(codex_module.shutil, "which", lambda _command: None)
+    monkeypatch.setattr(health_module.shutil, "which", lambda _command: None)
 
     health = CodexWorkerAdapter(command="missing-codex").health()
 

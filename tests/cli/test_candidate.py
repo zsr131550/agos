@@ -39,6 +39,7 @@ def _active_task(tmp_repo: Path):
                         "required": True,
                     }
                 },
+                "allow_fake_reviewer": True,
                 "workflows": {
                     "feature": {
                         "gates": [

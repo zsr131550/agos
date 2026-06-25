@@ -7,6 +7,8 @@ from typing import Literal
 import yaml
 from pydantic import BaseModel, Field, model_validator
 
+from agos.core.review import ReviewSeverity
+
 GateType = Literal["secret_scan", "opa", "semgrep", "trufflehog", "codeql"]
 TrustAnchorBackend = Literal["file", "git-ref"]
 
@@ -57,6 +59,12 @@ class WorkerConfig(BaseModel):
     poll_interval_seconds: int = Field(default=1, ge=1)
     artifact_globs: list[str] = Field(default_factory=list)
     env: dict[str, str] = Field(default_factory=dict)
+    health_probe: bool = Field(default=False)
+    # claude_code-only: opt into real async polling via `--bg` + `agents --json`.
+    claude_async_poll: bool = Field(default=False)
+    # claude_code-only: reserved for follow-up `--resume` turns on completion.
+    # Default off because each resumed turn incurs real cost; see P1-2.
+    claude_resume_on_complete: bool = Field(default=False)
 
 
 class ReviewerConfig(BaseModel):
@@ -66,6 +74,25 @@ class ReviewerConfig(BaseModel):
     role: str
     required: bool = True
     command: str | None = None
+    executor: Literal["codex_cli", "claude_code"] | None = None
+    timeout_seconds: int = Field(default=120, ge=1)
+    blocking_severity: ReviewSeverity = "high"
+    dev_only: bool = False
+
+    @model_validator(mode="after")
+    def _mark_fake_as_dev_only(self) -> "ReviewerConfig":
+        if self.type == "fake":
+            self.dev_only = True
+        return self
+
+
+class PlannerConfig(BaseModel):
+    """Planner LLM adapter policy."""
+
+    enabled: bool = False
+    executor: Literal["codex_cli", "claude_code"] = "codex_cli"
+    command: str | None = None
+    timeout_seconds: int = Field(default=60, ge=1)
 
 
 class OrchestrationConfig(BaseModel):
@@ -76,6 +103,11 @@ class OrchestrationConfig(BaseModel):
     max_retries: int = Field(default=0, ge=0)
     worker_timeout_seconds: int | None = Field(default=None, ge=1)
     retry_backoff_seconds: int = Field(default=0, ge=0)
+    max_tick_iterations: int = Field(default=20, ge=1)
+    fallback_write_scope: list[str] = Field(
+        default_factory=lambda: ["README.md", "src/agos", "tests", "docs"]
+    )
+    planner: PlannerConfig = Field(default_factory=PlannerConfig)
     endpoint: str | None = None
     token: str | None = None
     timeout_seconds: int = Field(default=30, ge=1)
@@ -98,6 +130,7 @@ class AGOSConfig(BaseModel):
     workflows: dict[str, WorkflowConfig] = Field(default_factory=dict)
     workers: dict[str, WorkerConfig] = Field(default_factory=dict)
     reviewers: dict[str, ReviewerConfig] = Field(default_factory=dict)
+    allow_fake_reviewer: bool = False
     orchestration: OrchestrationConfig = Field(default_factory=OrchestrationConfig)
     trust_anchor: TrustAnchorConfig = Field(default_factory=TrustAnchorConfig)
 

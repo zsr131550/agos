@@ -91,3 +91,27 @@ check at GitHub's merge button.
 The CI smoke test exercises strict `--require-anchor --anchor-backend git-ref`
 inside a temporary repository. Production enforcement needs the same trust
 anchor flow for real PRs; otherwise the merge gate should fail closed.
+
+## CI Job Behavior
+
+The `merge-gate` job in `.github/workflows/ci.yml` runs the real PR-bound
+`agos merge-gate --require-anchor --base --head --json` on pull request events,
+but only when the repository carries `.agos/` governance state. On a governed
+repository the PR head must have an active task and an anchor published by a
+prior `agos checkpoint` (set `trust_anchor.auto_publish_on_checkpoint: true`).
+On a repository without `.agos/` the real binding is skipped and the smoke test
+still proves the command; see `docs/release-install.md` for the full
+prerequisite checklist.
+
+Fail-closed outcomes:
+
+- no `.agos/agos.yaml` or no active task on the PR head: the `initialized`
+  check fails, the command exits non-zero, and the PR is blocked
+- anchor missing or not matching the current ledger/repo head: the
+  `trust_anchor` check fails and the PR is blocked
+- non-PR events (push to `main`): only the smoke test runs, so the gate does
+  not block mainstream development
+
+AGOS guarantees the command fails closed; it cannot configure GitHub branch
+protection. Require the `merge-gate` status check in branch protection
+separately.

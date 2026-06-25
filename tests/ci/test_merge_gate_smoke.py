@@ -1,6 +1,7 @@
 """CI smoke test for the strict AGOS merge-gate command."""
 from __future__ import annotations
 
+import json
 import subprocess
 import sys
 import tempfile
@@ -47,6 +48,44 @@ def test_strict_merge_gate_smoke() -> None:
             cwd=repo,
             check=True,
         )
+
+
+def test_strict_merge_gate_blocks_when_anchor_stale() -> None:
+    """A PR head whose anchor was not republished after the checkpoint blocks."""
+    with tempfile.TemporaryDirectory(prefix="agos-merge-gate-") as tmp:
+        repo = Path(tmp)
+        _init_repo(repo)
+        _write_agos_state(repo)
+        _write_anchor(repo)
+        base = _git(repo, "rev-parse", "HEAD")
+        _write_candidate_diff(repo, base)
+        head = _git(repo, "rev-parse", "HEAD")
+        # No second _write_anchor: the published anchor still points at the base
+        # ledger/repo head, so verify_merge_gate must fail closed on the anchor.
+        proc = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "agos.cli.main",
+                "merge-gate",
+                "--json",
+                "--require-anchor",
+                "--anchor-backend",
+                "git-ref",
+                "--base",
+                base,
+                "--head",
+                head,
+            ],
+            cwd=repo,
+            capture_output=True,
+            text=True,
+        )
+        assert proc.returncode != 0
+        result = json.loads(proc.stdout)
+        assert result["passed"] is False
+        trust = next(check for check in result["checks"] if check["name"] == "trust_anchor")
+        assert trust["state"] == "block"
 
 
 def _init_repo(repo: Path) -> None:

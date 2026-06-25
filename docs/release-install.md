@@ -85,3 +85,40 @@ the local smoke test only:
 ```bash
 python -m pytest tests/ci/test_merge_gate_smoke.py -q
 ```
+
+## CI Integration Prerequisites
+
+The `merge-gate` job in `.github/workflows/ci.yml` runs the real PR-bound
+`agos merge-gate --require-anchor --base "$BASE_SHA" --head "$HEAD_SHA"` on
+pull requests, but only when the repository carries AGOS governance state
+(`.agos/agos.yaml` plus an active task and a published anchor on the PR head).
+Repositories without `.agos/` skip the real binding; the smoke test still runs
+and proves the command behaves correctly. This is the fail-closed contract: a
+governed repository whose PR head lacks a matching anchor or task state blocks
+here, so the PR cannot merge.
+
+For a governed repository, ensure the PR head has governance state before the
+`merge-gate` job runs. The recommended path (the plan's option A) is a prepare
+job that runs on the PR head checkout:
+
+```bash
+agos start --title "Describe the governed change"
+agos checkpoint          # with trust_anchor.auto_publish_on_checkpoint: true
+git add .agos
+git commit -m "publish AGOS checkpoint anchor"
+```
+
+This publishes the anchor to `refs/agos/anchors/<task-id>` and commits the
+`.agos/` state so the `merge-gate` job can verify it. AGOS cannot create a task
+from nothing; the PR author (or trusted automation) must start and checkpoint
+the task first.
+
+Honest boundary: AGOS guarantees that the `merge-gate` command itself fails
+closed. It cannot guarantee that GitHub branch protection is configured. The
+following platform settings are required separately and cannot be mutated by
+AGOS (a stated design non-goal):
+
+- require status checks before merging
+- require branches to be up to date before merging
+- required check: `merge-gate`
+- disallow force pushes

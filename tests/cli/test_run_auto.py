@@ -55,6 +55,7 @@ def _active_task(tmp_repo: Path, *, reviewers: bool = True):
     }
     if reviewers:
         config["reviewers"] = {"clean": {"type": "fake", "role": "reviewer"}}
+        config["allow_fake_reviewer"] = True
     paths.agos_yaml.write_text(yaml.safe_dump(config, sort_keys=False), encoding="utf-8")
     task = Task(
         id="agos-01",

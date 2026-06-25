@@ -24,6 +24,8 @@ class ReviewRunResult:
     state: str
     findings: tuple[Finding, ...] = ()
     failed_reviewers: tuple[str, ...] = ()
+    # Refs to each reviewer's raw output (carries provenance such as dev_only).
+    raw_refs: tuple[str, ...] = ()
 
 
 class ParallelReviewOrchestrator:
@@ -53,8 +55,11 @@ class ParallelReviewOrchestrator:
 
         findings: list[Finding] = []
         failed: list[str] = []
+        raw_refs: list[str] = []
         for spec in reviewers:
             status = statuses[spec.id]
+            if status.raw_ref is not None:
+                raw_refs.append(status.raw_ref)
             if status.state == "completed":
                 findings.extend(status.findings)
             elif spec.required:
@@ -65,6 +70,7 @@ class ParallelReviewOrchestrator:
             state="failed" if failed else "completed",
             findings=tuple(findings),
             failed_reviewers=tuple(failed),
+            raw_refs=tuple(raw_refs),
         )
 
     def _run_one(

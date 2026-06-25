@@ -43,4 +43,24 @@ jobs:
           python-version: "3.12"
       - run: python -m pip install --upgrade pip
       - run: python -m pip install -e ".[dev]"
-      - run: python -m pytest tests/ci/test_merge_gate_smoke.py -q
+      # Real PR-bound merge gate. Only applies when the repository carries AGOS
+      # governance state (.agos/agos.yaml + active task + published anchor on the
+      # PR head). Repos without .agos skip this; the smoke test below still proves
+      # the command. Fail-closed: a governed repo whose PR head lacks a matching
+      # anchor/task state blocks here, so the PR cannot merge.
+      - name: verify merge gate (real PR binding)
+        if: github.event_name == 'pull_request'
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          if [ ! -d .agos ]; then
+            echo "no .agos governance state; skipping real merge-gate binding"
+            exit 0
+          fi
+          agos merge-gate \
+            --require-anchor \
+            --anchor-backend git-ref \
+            --base "$BASE_SHA" --head "$HEAD_SHA" --json
+      - name: merge-gate smoke
+        run: python -m pytest tests/ci/test_merge_gate_smoke.py -q

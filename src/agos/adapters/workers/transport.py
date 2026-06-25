@@ -57,6 +57,13 @@ def load_json_object(stdout: str, *, action: str) -> dict[str, object]:
     return payload
 
 
+def load_json_list(stdout: str, *, action: str) -> list[object]:
+    payload = load_json_object_or_list(stdout, action=action)
+    if not isinstance(payload, list):
+        raise RuntimeError(f"{action} returned non-list JSON")
+    return payload
+
+
 def load_json_object_or_list(stdout: str, *, action: str) -> dict[str, object] | list[object]:
     if not stdout.strip():
         return {}

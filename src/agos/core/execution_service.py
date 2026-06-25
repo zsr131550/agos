@@ -344,6 +344,7 @@ class ExecutionService:
         review_id: str,
         *,
         findings: Iterable[Finding],
+        raw_refs: Iterable[str] = (),
     ) -> tuple[str, ReviewReport]:
         _status, task = self._active_task()
         candidate = self.store.read_candidate(candidate_id)
@@ -377,6 +378,7 @@ class ExecutionService:
                 "completed_at": utc_now_iso(),
                 "ledger_head_at_completion": completed_event["hash"],
                 "open_blocking_count": len(report.open_blocking_findings()),
+                "raw_refs": list(raw_refs),
             }
         )
         bindings = list(candidate.review_refs)
@@ -422,6 +424,7 @@ class ExecutionService:
             candidate_id,
             packet.review_id,
             findings=result.findings,
+            raw_refs=result.raw_refs,
         )
         return report_ref, report, result
 

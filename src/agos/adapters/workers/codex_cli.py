@@ -2,9 +2,13 @@
 from __future__ import annotations
 
 import json
-import shutil
 from pathlib import Path
 
+from agos.adapters.workers._health import (
+    command_available_check,
+    probe_check,
+    version_check,
+)
 from agos.adapters.workers.artifacts import collect_artifact_refs, merge_output_refs
 from agos.adapters.workers.transport import (
     load_json_object,
@@ -16,7 +20,6 @@ from agos.core.command import run_command
 from agos.core.execution_worker import (
     WorkerAssignment,
     WorkerHealth,
-    WorkerHealthCheck,
     WorkerPreparedWorkspace,
     WorkerRun,
     WorkerRunStatus,
@@ -55,6 +58,7 @@ class CodexWorkerAdapter:
         poll_interval_seconds: int = 1,
         artifact_globs: tuple[str, ...] | list[str] = (),
         env: dict[str, str] | None = None,
+        health_probe: bool = False,
     ) -> None:
         self.command = command
         self.name = name
@@ -64,6 +68,7 @@ class CodexWorkerAdapter:
         self.poll_interval_seconds = poll_interval_seconds
         self.artifact_globs = tuple(artifact_globs)
         self.env = dict(env or {})
+        self.health_probe = health_probe
         self._subtasks_by_run_id: dict[str, str] = {}
         self._workspaces_by_run_id: dict[str, str] = {}
         self._statuses_by_run_id: dict[str, WorkerRunStatus] = {}
@@ -88,22 +93,29 @@ class CodexWorkerAdapter:
         return {"patch_bytes": patch_bytes}
 
     def health(self) -> WorkerHealth:
-        resolved = shutil.which(self.command)
-        check = WorkerHealthCheck(
-            name="command_available",
-            state="passed" if resolved else "failed",
-            detail=resolved or f"command not found: {self.command}",
-        )
+        checks = [
+            command_available_check(self.command),
+            version_check(self.command, env=self.env),
+        ]
+        if self.health_probe:
+            checks.append(
+                probe_check(
+                    self.command,
+                    ["exec", "--json", "AGOS health probe: reply ok"],
+                    env=self.env,
+                )
+            )
         return WorkerHealth(
             name=self.name,
             adapter="codex_cli",
-            checks=[check],
+            checks=checks,
             metadata={
                 "command": self.command,
                 "timeout_seconds": str(self.timeout_seconds),
                 "poll_interval_seconds": str(self.poll_interval_seconds),
                 "artifact_globs": ",".join(self.artifact_globs),
                 "env_keys": ",".join(sorted(self.env)),
+                "health_probe": str(self.health_probe),
             },
         )
 

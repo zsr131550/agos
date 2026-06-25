@@ -679,6 +679,46 @@ def test_merge_gate_passes_accepted_candidate_with_tests_and_clean_review(tmp_re
     assert _check(result, "candidate_evidence").state == "pass"
 
 
+def _stamp_dev_only_review(paths) -> None:
+    """Attach a dev_only raw output ref to the candidate's completed review."""
+    candidate = ExecutionStore(paths).read_candidate("candidate-01")
+    binding = candidate.review_refs[-1]
+    raw_ref = ReviewStore(paths).write_raw_output(
+        binding.review_id, "fake", {"dev_only": True, "findings": []}
+    )
+    updated_binding = binding.model_copy(update={"raw_refs": [raw_ref]})
+    ExecutionStore(paths).write_candidate(
+        candidate.model_copy(update={"review_refs": [updated_binding]})
+    )
+
+
+def test_merge_gate_blocks_dev_only_review_by_default(tmp_repo: Path):
+    _task, paths = _write_active_task(tmp_repo)
+    _write_candidate(paths, status="accepted", clean_review=True)
+    _stamp_dev_only_review(paths)
+
+    result = verify_merge_gate(paths)
+
+    assert result.passed is False
+    details = "; ".join(_check(result, "candidate_evidence").details)
+    assert "non-production reviewer" in details
+
+
+def test_merge_gate_allows_dev_only_review_with_flag(tmp_repo: Path):
+    _task, paths = _write_active_task(tmp_repo)
+    _write_candidate(paths, status="accepted", clean_review=True)
+    _stamp_dev_only_review(paths)
+    config = AGOSConfig.load(paths.agos_yaml).model_copy(update={"allow_fake_reviewer": True})
+    config.save(paths.agos_yaml)
+
+    result = verify_merge_gate(paths)
+
+    assert result.passed is True
+    evidence = _check(result, "candidate_evidence")
+    assert evidence.state == "pass"
+    assert "dev-only reviewer" in "; ".join(evidence.details)
+
+
 def test_merge_gate_blocks_missing_review_report_file(tmp_repo: Path):
     _task, paths = _write_active_task(tmp_repo)
     candidate = _write_candidate(paths, status="accepted", clean_review=True)
