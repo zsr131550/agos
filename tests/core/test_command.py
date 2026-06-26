@@ -100,10 +100,12 @@ def test_run_command_retries_with_resolved_executable_on_windows(monkeypatch):
     import agos.core.command as command_module
 
     monkeypatch.setattr(command_module.sys, "platform", "win32")
+    # Resolve to a .exe (not a .CMD shim) so the retry stays on the
+    # subprocess.run path; the .CMD-shim retry path is covered separately.
     monkeypatch.setattr(
         command_module.shutil,
         "which",
-        lambda name: r"C:\npm\claude.CMD" if name == "claude" else None,
+        lambda name: r"C:\npm\multica.exe" if name == "multica" else None,
     )
 
     calls = []
@@ -111,15 +113,20 @@ def test_run_command_retries_with_resolved_executable_on_windows(monkeypatch):
     def fake_run(args, **kwargs):
         calls.append(args)
         if len(calls) == 1:
-            raise FileNotFoundError(2, "shim not resolvable by CreateProcess")
+            raise FileNotFoundError(2, "not resolvable by CreateProcess")
         return subprocess.CompletedProcess(args=args, returncode=0)
 
     monkeypatch.setattr(command_module.subprocess, "run", fake_run)
+    monkeypatch.setattr(
+        command_module.subprocess,
+        "Popen",
+        lambda *a, **k: pytest.fail("Popen must not be used for a non-shim retry"),
+    )
 
-    result = run_command(["claude", "-p", "hi"], capture_output=True)
+    result = run_command(["multica", "daemon"], capture_output=True)
 
-    assert calls[0] == ["claude", "-p", "hi"]
-    assert calls[1] == [r"C:\npm\claude.CMD", "-p", "hi"]
+    assert calls[0] == ["multica", "daemon"]
+    assert calls[1] == [r"C:\npm\multica.exe", "daemon"]
     assert result.returncode == 0
 
 
@@ -153,6 +160,167 @@ def test_run_command_does_not_resolve_when_subprocess_succeeds(monkeypatch):
         lambda name: pytest.fail(
             "shutil.which must not be called when subprocess succeeds"
         ),
+    )
+
+    def fake_run(args, **kwargs):
+        return subprocess.CompletedProcess(args=args, returncode=0)
+
+    monkeypatch.setattr(command_module.subprocess, "run", fake_run)
+
+    result = run_command(["git", "status"], capture_output=True)
+
+    assert result.returncode == 0
+
+
+class _FakeProc:
+    """Stand-in for a Popen process with a controllable communicate()."""
+
+    def __init__(self, returncode=0, pid=4242, communicate=None):
+        self.returncode = returncode
+        self.pid = pid
+        self._communicate = communicate
+
+    def communicate(self, input=None, timeout=None):
+        if self._communicate is not None:
+            return self._communicate(input=input, timeout=timeout)
+        return ("out", "err")
+
+
+def _patch_popen(monkeypatch, proc, recorder):
+    import agos.core.command as command_module
+
+    def fake_popen(args, **kwargs):
+        recorder["args"] = args
+        recorder["kwargs"] = kwargs
+        return proc
+
+    monkeypatch.setattr(command_module.subprocess, "Popen", fake_popen)
+
+
+def test_run_command_uses_popen_tree_kill_for_cmd_shim_on_windows(monkeypatch):
+    from agos.core.command import run_command
+    import agos.core.command as command_module
+
+    monkeypatch.setattr(command_module.sys, "platform", "win32")
+    recorder = {}
+    _patch_popen(monkeypatch, _FakeProc(returncode=0), recorder)
+    monkeypatch.setattr(
+        command_module.subprocess,
+        "run",
+        lambda *a, **k: pytest.fail("subprocess.run must not spawn a .CMD shim"),
+    )
+
+    result = run_command(
+        [r"C:\npm\claude.CMD", "-p", "hi"], capture_output=True, encoding="utf-8"
+    )
+
+    assert recorder["args"] == [r"C:\npm\claude.CMD", "-p", "hi"]
+    assert result.returncode == 0
+
+
+def test_run_command_cmd_shim_retry_uses_popen(monkeypatch):
+    from agos.core.command import run_command
+    import agos.core.command as command_module
+
+    monkeypatch.setattr(command_module.sys, "platform", "win32")
+    monkeypatch.setattr(
+        command_module.shutil,
+        "which",
+        lambda name: r"C:\npm\claude.CMD" if name == "claude" else None,
+    )
+
+    run_calls = []
+
+    def fake_run(args, **kwargs):
+        run_calls.append(args)
+        raise FileNotFoundError(2, "bare .CMD shim not resolvable by CreateProcess")
+
+    monkeypatch.setattr(command_module.subprocess, "run", fake_run)
+    recorder = {}
+    _patch_popen(monkeypatch, _FakeProc(returncode=0), recorder)
+
+    result = run_command(["claude", "-p", "hi"], capture_output=True)
+
+    assert run_calls[0] == ["claude", "-p", "hi"]
+    assert recorder["args"] == [r"C:\npm\claude.CMD", "-p", "hi"]
+    assert result.returncode == 0
+
+
+def test_run_command_kills_tree_on_timeout_for_cmd_shim(monkeypatch):
+    from agos.core.command import run_command
+    import agos.core.command as command_module
+
+    monkeypatch.setattr(command_module.sys, "platform", "win32")
+
+    killed = {}
+    monkeypatch.setattr(command_module, "_kill_tree", lambda pid: killed.setdefault("pid", pid))
+
+    def communicate(*, input=None, timeout=None):
+        if timeout is not None:
+            raise subprocess.TimeoutExpired(cmd=["claude.CMD"], timeout=timeout)
+        return ("partial", "err")
+
+    _patch_popen(
+        monkeypatch, _FakeProc(returncode=0, pid=99, communicate=communicate), {}
+    )
+
+    with pytest.raises(subprocess.TimeoutExpired):
+        run_command([r"C:\npm\claude.CMD", "-p", "hi"], capture_output=True)
+
+    assert killed["pid"] == 99
+
+
+def test_run_command_cmd_shim_translates_capture_output(monkeypatch):
+    from agos.core.command import run_command
+    import agos.core.command as command_module
+
+    monkeypatch.setattr(command_module.sys, "platform", "win32")
+    recorder = {}
+    _patch_popen(monkeypatch, _FakeProc(returncode=0), recorder)
+
+    run_command([r"C:\npm\claude.CMD", "-p"], capture_output=True)
+
+    assert recorder["kwargs"]["stdout"] == subprocess.PIPE
+    assert recorder["kwargs"]["stderr"] == subprocess.PIPE
+    assert "capture_output" not in recorder["kwargs"]
+
+
+def test_run_command_cmd_shim_check_raises_called_process_error(monkeypatch):
+    from agos.core.command import run_command
+    import agos.core.command as command_module
+
+    monkeypatch.setattr(command_module.sys, "platform", "win32")
+    _patch_popen(monkeypatch, _FakeProc(returncode=2), {})
+
+    with pytest.raises(subprocess.CalledProcessError):
+        run_command([r"C:\npm\claude.CMD", "-p"], check=True, capture_output=True)
+
+
+def test_kill_tree_invokes_taskkill_tree_force(monkeypatch):
+    import agos.core.command as command_module
+
+    recorded = {}
+
+    def fake_run(args, **kwargs):
+        recorded["args"] = args
+        return subprocess.CompletedProcess(args=args, returncode=0)
+
+    monkeypatch.setattr(command_module.subprocess, "run", fake_run)
+
+    command_module._kill_tree(4242)
+
+    assert recorded["args"] == ["taskkill", "/T", "/F", "/PID", "4242"]
+
+
+def test_run_command_does_not_use_popen_for_non_shim_on_windows(monkeypatch):
+    from agos.core.command import run_command
+    import agos.core.command as command_module
+
+    monkeypatch.setattr(command_module.sys, "platform", "win32")
+    monkeypatch.setattr(
+        command_module.subprocess,
+        "Popen",
+        lambda *a, **k: pytest.fail("Popen must not be used for a non-shim command"),
     )
 
     def fake_run(args, **kwargs):
