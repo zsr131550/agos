@@ -1,11 +1,15 @@
 from __future__ import annotations
 
+import json
+
 import pytest
 import yaml
 
 from agos.adapters.reviewers import FakeReviewerAdapter, LlmCliReviewerAdapter
 from agos.cli.reviewer_registry import configured_reviewer_adapters, configured_reviewer_specs
 from agos.core.repo import repo_paths
+from agos.core.review import ReviewPacket
+from agos.core.review_adapter import ReviewerStartRequest
 
 
 def test_configured_reviewer_adapters_uses_agos_yaml(tmp_repo):
@@ -170,3 +174,47 @@ def test_configured_reviewer_adapters_allows_fake_with_flag(tmp_repo):
 
     assert set(adapters) == {"clean"}
     assert isinstance(adapters["clean"], FakeReviewerAdapter)
+
+
+def test_configured_fake_reviewer_stamps_dev_only_raw_output(tmp_repo):
+    # The registry-built fake must carry a review_store so its raw_output is
+    # written with the dev_only marker the merge-gate secondary check reads.
+    paths = repo_paths(tmp_repo)
+    paths.agos_dir.mkdir(parents=True, exist_ok=True)
+    paths.agos_yaml.write_text(
+        yaml.safe_dump(
+            {
+                "executor": {"name": "multica", "agent": "Lambda"},
+                "reviewers": {"clean": {"type": "fake", "role": "reviewer"}},
+                "allow_fake_reviewer": True,
+                "workflows": {},
+            },
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+
+    adapters = configured_reviewer_adapters(tmp_repo)
+    fake = adapters["clean"]
+    assert isinstance(fake, FakeReviewerAdapter)
+    assert fake.review_store is not None
+
+    request = ReviewerStartRequest(
+        run_id="review-run-01",
+        reviewer_id="clean",
+        role="reviewer",
+        packet=ReviewPacket(
+            review_id="review-01",
+            task_id="agos-01",
+            task_title="Title",
+            diff_kind="governed_repo_diff",
+            ledger_head_hash="abc123",
+        ),
+    )
+    fake.start(request)
+    status = fake.poll("review-run-01", reviewer_id="clean")
+    assert status.raw_ref is not None
+
+    raw_path = paths.current_task / status.raw_ref
+    payload = json.loads(raw_path.read_text(encoding="utf-8"))
+    assert payload.get("dev_only") is True

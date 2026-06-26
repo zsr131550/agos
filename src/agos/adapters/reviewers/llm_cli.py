@@ -44,7 +44,7 @@ class LlmCliReviewerAdapter:
         raw_ref: str | None = None
         try:
             proc = run_worker_command(
-                self._args(_prompt(request)),
+                self._args(_prompt(request, base_path=self.cwd)),
                 action=f"{self.executor} reviewer",
                 cwd=self.cwd,
                 timeout_seconds=self.timeout_seconds,
@@ -204,11 +204,11 @@ def _severity_rank(value: ReviewSeverity) -> int:
     return {"low": 0, "medium": 1, "high": 2, "critical": 3}[value]
 
 
-def _prompt(request: ReviewerStartRequest) -> str:
+def _prompt(request: ReviewerStartRequest, *, base_path: Path | None = None) -> str:
     packet = request.packet
     acceptance = "\n".join(f"- {item}" for item in packet.acceptance) or "- <none>"
     context_refs = "\n".join(f"- {ref}" for ref in packet.context_refs) or "- <none>"
-    diff_text = _read_diff_text(request)
+    diff_text = _read_diff_text(request, base_path=base_path)
     return (
         "You are an AGOS reviewer. Return JSON only.\n\n"
         f"Review id: {packet.review_id}\n"
@@ -224,23 +224,17 @@ def _prompt(request: ReviewerStartRequest) -> str:
     )
 
 
-def _read_diff_text(request: ReviewerStartRequest) -> str:
-    if request.packet.diff_evidence_ref is None:
+def _read_diff_text(request: ReviewerStartRequest, *, base_path: Path | None = None) -> str:
+    ref = request.packet.diff_evidence_ref
+    if ref is None:
         return "<no diff evidence>"
-    if request.packet.diff_kind == "candidate_patch" and request.packet.diff_evidence_ref:
-        if request.packet.diff_evidence_ref.startswith("execution/"):
-            return request.packet.diff_evidence_ref
-    if request.packet.diff_evidence_ref and request.packet.diff_evidence_ref.strip():
-        if request.packet.diff_evidence_ref.startswith("reviews/"):
-            return request.packet.diff_evidence_ref
-    if request.packet.diff_evidence_ref:
-        path = _current_task_path(request).joinpath(*request.packet.diff_evidence_ref.split("/"))
-        if path.is_file():
-            return path.read_text(encoding="utf-8")
-    return request.packet.diff_evidence_ref or "<unavailable diff evidence>"
-
-
-def _current_task_path(request: ReviewerStartRequest) -> Path:
-    if hasattr(request, "_review_store_paths"):
-        return getattr(request, "_review_store_paths").current_task
-    return Path.cwd()
+    # Resolve the evidence ref against the task store (the adapter's cwd). The
+    # ref is relative to the current task directory; without the store path we
+    # would read against the process cwd and never find the patch, silently
+    # embedding the ref string in place of the diff the reviewer must inspect.
+    base = base_path or Path.cwd()
+    path = base.joinpath(*ref.split("/"))
+    if path.is_file():
+        return path.read_text(encoding="utf-8")
+    # Degrade to the ref string rather than dropping the diff section entirely.
+    return ref

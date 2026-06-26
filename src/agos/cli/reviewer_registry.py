@@ -29,7 +29,7 @@ def configured_reviewer_adapters(repo_root) -> dict[str, ReviewerAdapter]:
                     "fake reviewer is not allowed in production config; "
                     "set allow_fake_reviewer: true for local development only"
                 )
-            adapters[name] = FakeReviewerAdapter(name=name)
+            adapters[name] = FakeReviewerAdapter(name=name, review_store=review_store)
         elif reviewer.type in _LLM_CLI_REVIEWER_TYPES:
             adapters[name] = LlmCliReviewerAdapter(
                 name=name,

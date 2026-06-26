@@ -168,3 +168,77 @@ def test_llm_cli_reviewer_partial_finding_failure_keeps_valid(monkeypatch):
     assert status.findings[0].id == "finding-01"
     assert status.detail is not None
     assert "skipped" in status.detail
+
+
+def test_llm_cli_reviewer_reads_candidate_patch_into_prompt(monkeypatch, tmp_path):
+    # The reviewer must resolve the candidate patch ref against the task store
+    # (the adapter's cwd) and embed the actual diff in its prompt, not the ref
+    # string. Regression guard for the path-resolution defect.
+    current_task = tmp_path
+    patch_ref = "evidence/candidates/cand-01.patch"
+    patch_path = current_task.joinpath(*patch_ref.split("/"))
+    patch_path.parent.mkdir(parents=True, exist_ok=True)
+    diff_content = (
+        "--- a/file.py\n+++ b/file.py\n@@ -1 +1 @@\n-print('hi')\n+print('hello')\n"
+    )
+    patch_path.write_text(diff_content, encoding="utf-8")
+
+    captured: dict[str, str] = {}
+
+    def fake_run_command(args, **kwargs):
+        captured["prompt"] = args[-1]
+        return _completed(json.dumps({"findings": []}))
+
+    monkeypatch.setattr("agos.adapters.reviewers.llm_cli.run_command", fake_run_command)
+
+    adapter = _adapter(cwd=current_task)
+    request = ReviewerStartRequest(
+        run_id="review-run-01",
+        reviewer_id="security",
+        role="security_reviewer",
+        packet=ReviewPacket(
+            review_id="review-01",
+            task_id="agos-01",
+            task_title="Title",
+            task_intent="Intent",
+            diff_kind="candidate_patch",
+            diff_evidence_ref=patch_ref,
+            ledger_head_hash="abc123",
+        ),
+    )
+    adapter.start(request)
+
+    assert diff_content in captured["prompt"]
+    # The bare ref string must not stand in for the missing diff.
+    assert "Diff:\n" + patch_ref + "\n" not in captured["prompt"]
+
+
+def test_llm_cli_reviewer_falls_back_to_ref_when_patch_missing(monkeypatch, tmp_path):
+    # When the patch file cannot be resolved, degrade to the ref string rather
+    # than crashing or silently dropping the diff section.
+    captured: dict[str, str] = {}
+
+    def fake_run_command(args, **kwargs):
+        captured["prompt"] = args[-1]
+        return _completed(json.dumps({"findings": []}))
+
+    monkeypatch.setattr("agos.adapters.reviewers.llm_cli.run_command", fake_run_command)
+
+    patch_ref = "evidence/candidates/missing.patch"
+    adapter = _adapter(cwd=tmp_path)
+    request = ReviewerStartRequest(
+        run_id="review-run-01",
+        reviewer_id="security",
+        role="security_reviewer",
+        packet=ReviewPacket(
+            review_id="review-01",
+            task_id="agos-01",
+            task_title="Title",
+            diff_kind="candidate_patch",
+            diff_evidence_ref=patch_ref,
+            ledger_head_hash="abc123",
+        ),
+    )
+    adapter.start(request)
+
+    assert patch_ref in captured["prompt"]
