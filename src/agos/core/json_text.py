@@ -21,8 +21,27 @@ def load_json_object_from_text(text: str) -> dict[str, object] | None:
         except json.JSONDecodeError:
             continue
         if isinstance(payload, dict):
+            unwrapped = _unwrap_cli_result_envelope(payload)
+            if unwrapped is not None:
+                return unwrapped
             return payload
     return None
+
+
+def _unwrap_cli_result_envelope(payload: dict[str, object]) -> dict[str, object] | None:
+    """Unwrap a CLI result envelope to the JSON object inside.
+
+    claude's ``--output-format json`` wraps the model's text in a result
+    envelope: ``{"type":"result","result":"<model text>", ...}``. The model text
+    is itself JSON (sometimes markdown-fenced). Without unwrapping, callers see
+    the envelope and miss the real payload (e.g. the ``findings`` array). Recurse
+    into ``result`` so the shared parser yields the inner object for both the
+    reviewer and the planner. Returns None when this is not such an envelope or
+    the inner text is not JSON, so the caller falls back to the original payload.
+    """
+    if payload.get("type") != "result" or not isinstance(payload.get("result"), str):
+        return None
+    return load_json_object_from_text(payload["result"])
 
 
 def _json_candidates(text: str) -> list[str]:

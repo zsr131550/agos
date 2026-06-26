@@ -254,3 +254,38 @@ def test_codex_reviewer_args_skip_git_repo_check():
     assert "--skip-git-repo-check" in args
     # The flag is an exec option and must precede the positional prompt.
     assert args.index("--skip-git-repo-check") < args.index("review this diff")
+
+
+def test_claude_reviewer_unwraps_result_envelope(monkeypatch):
+    # claude's --output-format json wraps the model's JSON in a result envelope
+    # ({"type":"result","result":"<model text>"}); the reviewer must unwrap it
+    # to reach the findings array rather than fail-close on the envelope.
+    inner = {
+        "findings": [
+            {
+                "id": "finding-01",
+                "category": "security",
+                "severity": "high",
+                "blocking": True,
+                "title": "Unsafe command",
+                "body": "Shell injection risk.",
+                "location": {"file": "src/app.py", "line": 10},
+                "suggested_fix": "Use shlex.quote.",
+            }
+        ]
+    }
+    envelope = {"type": "result", "subtype": "success", "result": json.dumps(inner)}
+
+    monkeypatch.setattr(
+        "agos.adapters.reviewers.llm_cli.run_command",
+        lambda args, **kwargs: _completed(json.dumps(envelope)),
+    )
+
+    adapter = _adapter(executor="claude_code")
+    run = adapter.start(_request())
+
+    assert run.state == "running"
+    status = adapter.poll(run.run_id, reviewer_id="security")
+    assert status.state == "completed"
+    assert len(status.findings) == 1
+    assert status.findings[0].id == "finding-01"
