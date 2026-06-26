@@ -141,7 +141,10 @@ class LlmCliReviewerAdapter:
     def _args(self, prompt: str) -> list[str]:
         command = self.command or _default_command(self.executor)
         if self.executor == "codex_cli":
-            return [command, "exec", "--json", prompt]
+            # The reviewer runs in a scratch cwd that is not a git repo and the
+            # diff is delivered in the prompt, so skip codex's git-trust check
+            # rather than refuse to start.
+            return [command, "exec", "--skip-git-repo-check", "--json", prompt]
         if self.executor == "claude_code":
             return [command, "-p", "--output-format", "json", prompt]
         raise ValueError(f"unsupported reviewer executor: {self.executor}")

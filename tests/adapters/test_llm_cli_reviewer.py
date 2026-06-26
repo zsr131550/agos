@@ -242,3 +242,15 @@ def test_llm_cli_reviewer_falls_back_to_ref_when_patch_missing(monkeypatch, tmp_
     adapter.start(request)
 
     assert patch_ref in captured["prompt"]
+
+
+def test_codex_reviewer_args_skip_git_repo_check():
+    # The reviewer runs in a scratch cwd that is not a git repo (e.g. the
+    # integration smoke's tmp_path), and the diff is delivered in the prompt,
+    # so codex must not refuse to start on the git-trust check.
+    adapter = _adapter()
+    args = adapter._args("review this diff")
+
+    assert "--skip-git-repo-check" in args
+    # The flag is an exec option and must precede the positional prompt.
+    assert args.index("--skip-git-repo-check") < args.index("review this diff")
