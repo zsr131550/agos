@@ -46,5 +46,5 @@ def test_llm_cli_reviewer_runs_real_cli(tmp_path):
 
     # Whether the CLI returned findings or failed closed, it must not crash and
     # must reach a terminal state with the run id wired through.
-    assert status.is_terminal()
+    assert status.is_terminal
     assert status.run_id == "reviewer-smoke-run-01"
