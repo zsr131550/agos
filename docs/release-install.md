@@ -75,12 +75,14 @@ plan supports protected branches.
 Strict production enforcement should run:
 
 ```bash
-agos merge-gate --require-anchor --anchor-backend git-ref --base "$BASE_SHA" --head "$HEAD_SHA" --json
+agos prepare-merge-gate --base "$BASE_SHA" --head "$HEAD_SHA" --anchor-path ".agos/tasks/current/evidence/anchors.json" --issuer "github-actions"
+agos merge-gate --require-anchor --anchor-backend file --anchor-path ".agos/tasks/current/evidence/anchors.json" --allow-missing-review --base "$BASE_SHA" --head "$HEAD_SHA" --json
 ```
 
-This requires a current active AGOS task and a trust anchor published to
-`refs/agos/anchors/<task-id>` by trusted automation. Without that workflow, use
-the local smoke test only:
+In GitHub Actions, the recommended production path is to let a prepare job
+materialize `.agos/tasks/current` plus a file-backend anchor artifact, then let
+the `merge-gate` job download and verify that artifact. Without that workflow,
+use the local smoke test only:
 
 ```bash
 python -m pytest tests/ci/test_merge_gate_smoke.py -q
@@ -88,30 +90,34 @@ python -m pytest tests/ci/test_merge_gate_smoke.py -q
 
 ## CI Integration Prerequisites
 
-The `merge-gate` job in `.github/workflows/ci.yml` runs the real PR-bound
-`agos merge-gate --require-anchor --base "$BASE_SHA" --head "$HEAD_SHA"` on
-pull requests, but only when the repository carries AGOS governance state
-(`.agos/agos.yaml` plus an active task and a published anchor on the PR head).
-Repositories without `.agos/` skip the real binding; the smoke test still runs
-and proves the command behaves correctly. This is the fail-closed contract: a
-governed repository whose PR head lacks a matching anchor or task state blocks
-here, so the PR cannot merge.
+The CI workflow now uses two pull-request jobs:
 
-For a governed repository, ensure the PR head has governance state before the
-`merge-gate` job runs. The recommended path (the plan's option A) is a prepare
-job that runs on the PR head checkout:
+1. `agos-prepare` runs `agos prepare-merge-gate` on the PR head checkout.
+   That command creates a fresh active task, binds the submitted diff into
+   candidate evidence, runs candidate gates, and writes
+   `.agos/tasks/current/evidence/anchors.json`.
+2. `merge-gate` downloads the prepared `.agos/tasks/current` artifact and runs
+   the real PR-bound `agos merge-gate --require-anchor --anchor-backend file --allow-missing-review --base "$BASE_SHA" --head "$HEAD_SHA"`.
+
+Repositories without `.agos/agos.yaml` skip the real binding; the smoke test
+still runs and proves the command behaves correctly. This is the fail-closed
+contract: a governed repository whose PR head lacks valid prepared AGOS
+evidence blocks here, so the PR cannot merge.
+
+For a governed repository, the prepare job itself is now the governance-state
+producer. It must run on the PR head checkout:
 
 ```bash
-agos start --title "Describe the governed change"
-agos checkpoint          # with trust_anchor.auto_publish_on_checkpoint: true
-git add .agos
-git commit -m "publish AGOS checkpoint anchor"
+agos prepare-merge-gate \
+  --base "$BASE_SHA" \
+  --head "$HEAD_SHA" \
+  --anchor-path ".agos/tasks/current/evidence/anchors.json" \
+  --issuer "github-actions"
 ```
 
-This publishes the anchor to `refs/agos/anchors/<task-id>` and commits the
-`.agos/` state so the `merge-gate` job can verify it. AGOS cannot create a task
-from nothing; the PR author (or trusted automation) must start and checkpoint
-the task first.
+This writes a fresh `.agos/tasks/current` tree and a file trust anchor that the
+`merge-gate` job can verify after downloading the artifact. The command is
+purpose-built for CI and does not dispatch a real executor run.
 
 Honest boundary: AGOS guarantees that the `merge-gate` command itself fails
 closed. It cannot guarantee that GitHub branch protection is configured. The

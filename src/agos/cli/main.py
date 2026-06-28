@@ -14,6 +14,7 @@ from agos.cli.cmd_doctor import doctor_command
 from agos.cli.cmd_execute_plan import execute_plan_app, run_app
 from agos.cli.cmd_init import init_command
 from agos.cli.cmd_merge_gate import merge_gate_command
+from agos.cli.cmd_prepare_merge_gate import prepare_merge_gate_command
 from agos.cli.cmd_resolve import resolve_command
 from agos.cli.cmd_review import review_app
 from agos.cli.cmd_start import start_command
@@ -48,6 +49,7 @@ app.add_typer(execute_plan_app, name="execute-plan")
 app.add_typer(run_app, name="run")
 app.command("ci")(ci_local_command)
 app.command("merge-gate")(merge_gate_command)
+app.command("prepare-merge-gate")(prepare_merge_gate_command)
 app.command("resolve")(resolve_command)
 app.command("closeout")(closeout_command)
 app.add_typer(anchor_app, name="anchor")
