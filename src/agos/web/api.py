@@ -63,6 +63,7 @@ def health_payload(repo_root: Path) -> dict[str, object]:
 
 def config_payload(repo_root: Path) -> dict[str, object]:
     paths = _require_initialized(repo_root)
+    _load_current_task(paths)
     config = load_config(paths.root)
     return {
         "ok": True,
@@ -73,6 +74,7 @@ def config_payload(repo_root: Path) -> dict[str, object]:
 
 def status_payload(repo_root: Path) -> dict[str, object]:
     paths = _require_initialized(repo_root)
+    _load_current_task(paths)
     status = load_status(paths)
     return {
         "ok": True,
@@ -121,6 +123,8 @@ def current_run_payload(repo_root: Path) -> dict[str, object]:
     execution_plan = execution.get("plan") if isinstance(execution.get("plan"), dict) else None
     candidate_rows = candidates.get("candidates", [])
 
+    task_payload = task.model_dump(mode="json")
+    status_payload_value = status.model_dump(mode="json")
     run = {
         "id": task.id,
         "title": task.title,
@@ -145,13 +149,26 @@ def current_run_payload(repo_root: Path) -> dict[str, object]:
             item.get("summary") for item in candidate_rows if isinstance(item, dict) and item.get("summary")
         ],
     }
+    run.update(
+        {
+            "task": task_payload,
+            "status": status_payload_value,
+            "ledger": ledger,
+            "execution": execution,
+            "candidates": candidates,
+            "reviews": reviews,
+            "merge_gate": merge_gate,
+            "pipeline": pipeline,
+            "distillation": distillation,
+        }
+    )
 
     return {
         "ok": True,
         "repo_root": str(paths.root),
         "run": run,
-        "task": task.model_dump(mode="json"),
-        "status": status.model_dump(mode="json"),
+        "task": task_payload,
+        "status": status_payload_value,
         "ledger": ledger,
         "execution": execution,
         "candidates": candidates,

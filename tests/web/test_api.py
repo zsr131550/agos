@@ -32,6 +32,7 @@ from agos.web.api import (
     evidence_payload,
     health_payload,
     runs_payload,
+    status_payload,
 )
 
 
@@ -70,6 +71,11 @@ def test_runs_and_current_run_payloads_include_pipeline_state(dashboard_repo: Pa
     assert current["run"]["title"] == "构建可视化控制台"
     assert current["run"]["workflow"] == "feature"
     assert current["run"]["phase"] == "executing"
+    assert current["run"]["task"]["workflow"] == "feature"
+    assert current["run"]["status"]["phase"] == "executing"
+    assert current["run"]["execution"]["plan"]["id"] == "plan-dashboard-01"
+    assert current["run"]["candidates"]["candidates"][0]["id"] == "candidate-01"
+    assert current["run"]["pipeline"]["candidates_count"] == 1
     assert current["task"]["workflow"] == "feature"
     assert current["execution"]["plan"]["id"] == "plan-dashboard-01"
     assert current["execution"]["subtasks"][0]["worker"]["adapter"] == "docs_agent"
@@ -108,6 +114,18 @@ def test_current_run_payload_is_json_serializable_and_preserves_chinese_title(
     encoded = json.dumps(payload, ensure_ascii=False)
     assert "构建可视化控制台" in encoded
     assert json.loads(encoded)["run"]["title"] == "构建可视化控制台"
+
+
+def test_config_and_status_payloads_require_active_task(tmp_repo: Path) -> None:
+    paths = repo_paths(tmp_repo)
+    paths.agos_dir.mkdir(parents=True, exist_ok=True)
+    AGOSConfig.default(agent="codex").save(paths.agos_yaml)
+
+    for payload_func in (config_payload, status_payload):
+        with pytest.raises(DashboardApiError) as err:
+            payload_func(tmp_repo)
+
+        assert err.value.code == "active_task_missing"
 
 
 @pytest.fixture
