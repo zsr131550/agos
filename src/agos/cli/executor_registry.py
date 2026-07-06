@@ -10,18 +10,24 @@ from agos.core.repo import AgosPaths
 def configured_executor_adapter(paths: AgosPaths):
     config = load_config(paths.root)
     executor = config.executor
-    if executor.name == "multica":
-        return MulticaAdapter(multica_bin=executor.command or "multica")
-    if executor.name == "codex_cli":
+    return executor_adapter_for(paths, executor.name, command=executor.command)
+
+
+def executor_adapter_for(paths: AgosPaths, adapter_name: str, *, command: str | None = None):
+    """Build an executor adapter by name without mutating agos.yaml."""
+
+    if adapter_name == "multica":
+        return MulticaAdapter(multica_bin=command or "multica")
+    if adapter_name == "codex_cli":
         return CodexCliExecutorAdapter(
-            command=executor.command or "codex",
+            command=command or "codex",
             evidence_dir=paths.evidence,
             cwd=paths.root,
         )
-    if executor.name == "claude_code":
+    if adapter_name == "claude_code":
         return ClaudeCodeExecutorAdapter(
-            command=executor.command or "claude",
+            command=command or "claude",
             evidence_dir=paths.evidence,
             cwd=paths.root,
         )
-    raise ValueError(f"Unsupported executor '{executor.name}'")
+    raise ValueError(f"Unsupported executor '{adapter_name}'")

@@ -3,17 +3,24 @@ from __future__ import annotations
 
 import json
 import re
+import shutil
 from pathlib import Path
 from typing import Any
 
 from pydantic import BaseModel
 
+from agos.adapters.reviewers import LlmCliReviewerAdapter
+from agos.cli.cmd_review import run_review
 from agos.cli.cmd_start import StartTaskError, start_task
+from agos.cli.cmd_start import ExecutorSelection
 from agos.core.config import load_config
 from agos.core.execution import ArbiterDecision, CandidatePatch, CandidateTestRun, ExecutionSubtask
 from agos.core.execution_store import ExecutionStore
 from agos.core.ledger import Ledger
 from agos.core.merge_gate import verify_merge_gate
+from agos.core.review_orchestrator import ParallelReviewOrchestrator, ReviewerSpec
+from agos.core.review_service import ReviewService
+from agos.core.review_store import ReviewStore
 from agos.core.repo import AgosPaths, git_head, repo_paths
 from agos.core.status import load_status
 from agos.core.task import load_task, task_output_ref
@@ -70,6 +77,19 @@ def config_payload(repo_root: Path) -> dict[str, object]:
         "ok": True,
         "repo_root": str(paths.root),
         "config": _redact(config.model_dump(mode="json")),
+    }
+
+
+def agents_payload(repo_root: Path) -> dict[str, object]:
+    """Return configured local task/review agents for dashboard selectors."""
+
+    paths = _require_initialized(repo_root)
+    config = load_config(paths.root)
+    return {
+        "ok": True,
+        "repo_root": str(paths.root),
+        "task_agents": _task_agent_rows(config),
+        "review_agents": _review_agent_rows(config),
     }
 
 
@@ -197,6 +217,7 @@ def start_run_payload(repo_root: Path, request_payload: dict[str, Any]) -> dict[
         if not isinstance(workflow, str):
             raise DashboardApiError("invalid_request", "workflow must be a string")
         workflow = workflow.strip() or None
+    agent_selection = _resolve_task_agent(paths.root, request_payload.get("agent"))
 
     try:
         _task, run = start_task(
@@ -205,6 +226,7 @@ def start_run_payload(repo_root: Path, request_payload: dict[str, Any]) -> dict[
             intent=intent.strip() if isinstance(intent, str) else None,
             workflow=workflow,
             gate_overrides=_parse_gate_request(request_payload.get("gates")),
+            executor_selection=agent_selection,
         )
     except StartTaskError as exc:
         raise DashboardApiError("start_failed", str(exc)) from exc
@@ -218,6 +240,27 @@ def start_run_payload(repo_root: Path, request_payload: dict[str, Any]) -> dict[
         "issue_id": run.issue_id,
         "run": current["run"],
         "current": current,
+    }
+
+
+def review_run_payload(repo_root: Path, request_payload: dict[str, Any]) -> dict[str, object]:
+    paths = _require_initialized(repo_root)
+    reviewers = _parse_reviewer_request(request_payload.get("reviewer"))
+    try:
+        review_run = (
+            _run_local_review_agent(paths, reviewers[0])
+            if len(reviewers) == 1 and _is_local_review_agent_id(reviewers[0])
+            else run_review(paths.root, reviewers=reviewers)
+        )
+    except ValueError as exc:
+        raise DashboardApiError("review_failed", str(exc)) from exc
+    except Exception as exc:
+        raise DashboardApiError("review_failed", str(exc)) from exc
+
+    return {
+        "ok": True,
+        "review_run": review_run,
+        "reviews": reviews_payload(paths.root),
     }
 
 
@@ -399,6 +442,293 @@ def _parse_gate_request(value: Any) -> list[str]:
                 gates.append(stripped)
         return gates
     raise DashboardApiError("invalid_request", "gates must be a list of strings or comma-separated string")
+
+
+def _parse_reviewer_request(value: Any) -> list[str]:
+    if value is None or value == "":
+        return []
+    if isinstance(value, str):
+        return [_normalize_reviewer_id(value)]
+    if isinstance(value, list):
+        reviewers: list[str] = []
+        for item in value:
+            if not isinstance(item, str):
+                raise DashboardApiError("invalid_request", "reviewer must contain only strings")
+            stripped = item.strip()
+            if stripped:
+                reviewers.append(_normalize_reviewer_id(stripped))
+        return reviewers
+    raise DashboardApiError("invalid_request", "reviewer must be a string or list of strings")
+
+
+def _normalize_reviewer_id(value: str) -> str:
+    stripped = value.strip()
+    if _is_local_review_agent_id(stripped):
+        return stripped
+    return stripped.removeprefix("reviewer:")
+
+
+def _is_local_review_agent_id(value: str) -> bool:
+    return value.startswith("local:reviewer:")
+
+
+def _resolve_task_agent(repo_root: Path, value: Any) -> ExecutorSelection | None:
+    if value is None or value == "":
+        return None
+    if not isinstance(value, str):
+        raise DashboardApiError("invalid_request", "agent must be a string")
+    requested = value.strip()
+    if not requested:
+        return None
+    config = load_config(repo_root)
+    selections = _task_agent_selections(config)
+    selection = selections.get(requested)
+    if selection is None:
+        raise DashboardApiError("invalid_agent", f"unknown task agent: {requested}")
+    return selection
+
+
+def _task_agent_rows(config) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    seen_ids: set[str] = set()
+    default_id = _executor_agent_id(config.executor.name, config.executor.agent)
+    seen_ids.add(default_id)
+    rows.append(
+        {
+            "id": default_id,
+            "label": config.executor.agent,
+            "adapter": config.executor.name,
+            "source": "executor",
+            "command": _command_for_adapter(config.executor.name, config.executor.command),
+            "available": _command_available(config.executor.name, config.executor.command),
+            "selected": True,
+        }
+    )
+    supported = {"multica", "codex_cli", "claude_code"}
+    for name, worker in config.workers.items():
+        if worker.type not in supported:
+            continue
+        row_id = f"worker:{name}"
+        seen_ids.add(row_id)
+        rows.append(
+            {
+                "id": row_id,
+                "label": worker.agent or name,
+                "adapter": worker.type,
+                "source": "worker",
+                "command": _command_for_adapter(worker.type, worker.command),
+                "available": _command_available(worker.type, worker.command),
+                "selected": False,
+            }
+        )
+    rows.extend(_local_task_agent_rows(config, seen_ids))
+    return rows
+
+
+def _task_agent_selections(config) -> dict[str, ExecutorSelection]:
+    selections = {
+        _executor_agent_id(config.executor.name, config.executor.agent): ExecutorSelection(
+            adapter=config.executor.name,
+            agent=config.executor.agent,
+            command=config.executor.command,
+        )
+    }
+    supported = {"multica", "codex_cli", "claude_code"}
+    for name, worker in config.workers.items():
+        if worker.type not in supported:
+            continue
+        selections[f"worker:{name}"] = ExecutorSelection(
+            adapter=worker.type,
+            agent=worker.agent or name,
+            command=worker.command,
+        )
+    for row in _local_task_agent_rows(config, set(selections)):
+        row_id = str(row["id"])
+        adapter = str(row["adapter"])
+        command = row.get("command")
+        selections[row_id] = ExecutorSelection(
+            adapter=adapter,
+            agent=str(row["agent"]),
+            command=str(command) if command else None,
+        )
+    return selections
+
+
+def _local_task_agent_rows(config, seen_ids: set[str]) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    candidates = [
+        ("codex_cli", "codex", "codex"),
+        ("claude_code", "claude", "claude"),
+        ("multica", config.executor.agent, "multica"),
+    ]
+    for adapter, agent, command in candidates:
+        resolved = shutil.which(command)
+        if resolved is None and command != f"{command}.cmd":
+            resolved = shutil.which(f"{command}.cmd")
+        if resolved is None:
+            continue
+        row_id = f"local:{adapter}:{agent}"
+        if row_id in seen_ids:
+            continue
+        seen_ids.add(row_id)
+        rows.append(
+            {
+                "id": row_id,
+                "label": agent,
+                "agent": agent,
+                "adapter": adapter,
+                "source": "local",
+                "command": resolved,
+                "available": True,
+                "selected": False,
+            }
+        )
+    return rows
+
+
+def _review_agent_rows(config) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    seen_ids: set[str] = set()
+    for name, reviewer in config.reviewers.items():
+        row_id = f"reviewer:{name}"
+        seen_ids.add(row_id)
+        command = _command_for_reviewer(reviewer.type, reviewer.command, reviewer.executor)
+        rows.append(
+            {
+                "id": row_id,
+                "label": name,
+                "type": reviewer.type,
+                "role": reviewer.role,
+                "required": reviewer.required,
+                "command": command,
+                "available": _reviewer_available(reviewer.type, command, config.allow_fake_reviewer),
+            }
+        )
+    rows.extend(_local_review_agent_rows(seen_ids))
+    return rows
+
+
+def _local_review_agent_rows(seen_ids: set[str]) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    candidates = [
+        ("codex_cli", "codex review", "codex", "codex_reviewer"),
+        ("claude_code", "claude review", "claude", "claude_reviewer"),
+    ]
+    for executor, label, command, role in candidates:
+        resolved = shutil.which(command)
+        if resolved is None:
+            resolved = shutil.which(f"{command}.cmd")
+        if resolved is None:
+            continue
+        row_id = f"local:reviewer:{executor}"
+        if row_id in seen_ids:
+            continue
+        seen_ids.add(row_id)
+        rows.append(
+            {
+                "id": row_id,
+                "label": label,
+                "type": executor,
+                "role": role,
+                "required": True,
+                "command": resolved,
+                "available": True,
+                "source": "local",
+            }
+        )
+    return rows
+
+
+def _run_local_review_agent(paths: AgosPaths, reviewer_id: str) -> dict[str, object]:
+    specs_by_id = {
+        row["id"]: row
+        for row in _local_review_agent_rows(set())
+    }
+    row = specs_by_id.get(reviewer_id)
+    if row is None:
+        raise DashboardApiError("invalid_agent", f"unknown local review agent: {reviewer_id}")
+    executor = str(row["type"])
+    adapter_id = f"local_{executor}"
+    service = ReviewService(paths)
+    packet_ref, packet = service.create_packet(diff_kind="governed_repo_diff")
+    review_store = ReviewStore(paths)
+    adapter = LlmCliReviewerAdapter(
+        name=adapter_id,
+        executor=executor,
+        command=str(row["command"]),
+        role=str(row["role"]),
+        review_store=review_store,
+    )
+    run_id = f"review-run-{packet.review_id.removeprefix('review-')}"
+    spec = ReviewerSpec(
+        id=adapter_id,
+        role=str(row["role"]),
+        adapter=adapter_id,
+        required=True,
+    )
+    result = ParallelReviewOrchestrator({adapter_id: adapter}).run(
+        run_id=run_id,
+        packet=packet,
+        reviewers=[spec],
+    )
+    if result.state != "completed":
+        failed = ", ".join(result.failed_reviewers)
+        raise DashboardApiError("review_failed", f"required reviewers failed: {failed}")
+    report_ref, report = service.ingest_findings(packet.review_id, result.findings)
+    return {
+        "backend": "local_review_agent",
+        "kind": "review_run",
+        "run_id": result.run_id,
+        "review_id": packet.review_id,
+        "packet_ref": packet_ref,
+        "report_ref": report_ref,
+        "reviewers": [spec.id],
+        "state": result.state,
+        "finding_count": len(report.findings),
+    }
+
+
+def _executor_agent_id(adapter: str, agent: str) -> str:
+    return f"executor:{adapter}:{agent}"
+
+
+def _command_for_adapter(adapter: str, command: str | None) -> str | None:
+    if command:
+        return command
+    if adapter == "multica":
+        return "multica"
+    if adapter == "codex_cli":
+        return "codex"
+    if adapter == "claude_code":
+        return "claude"
+    return None
+
+
+def _command_for_reviewer(
+    reviewer_type: str,
+    command: str | None,
+    executor: str | None,
+) -> str | None:
+    if command:
+        return command
+    if reviewer_type == "codex_cli" or executor == "codex_cli":
+        return "codex"
+    if reviewer_type == "claude_code" or executor == "claude_code":
+        return "claude"
+    return None
+
+
+def _command_available(adapter: str, command: str | None) -> bool:
+    resolved = _command_for_adapter(adapter, command)
+    return True if resolved is None else shutil.which(resolved) is not None
+
+
+def _reviewer_available(reviewer_type: str, command: str | None, allow_fake: bool) -> bool:
+    if reviewer_type == "manual":
+        return True
+    if reviewer_type == "fake":
+        return allow_fake
+    return True if command is None else shutil.which(command) is not None
 
 
 def _dump_model(value: BaseModel | None) -> dict[str, Any] | None:

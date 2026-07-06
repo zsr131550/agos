@@ -1,11 +1,12 @@
 """`agos start` command."""
 from __future__ import annotations
 
+from dataclasses import dataclass
 import shutil
 
 import typer
 
-from agos.cli.executor_registry import configured_executor_adapter
+from agos.cli.executor_registry import configured_executor_adapter, executor_adapter_for
 from agos.core.config import load_config, resolve_gates
 from agos.core.evidence import EvidenceStore
 from agos.core.gate import gates_locked_payload
@@ -24,6 +25,15 @@ from agos.core.task import ExecutorBinding, Task, new_task_id
 
 class StartTaskError(RuntimeError):
     """Raised when an AGOS task cannot be started."""
+
+
+@dataclass(frozen=True)
+class ExecutorSelection:
+    """Per-run executor override selected by an API/UI caller."""
+
+    adapter: str
+    agent: str
+    command: str | None = None
 
 
 def _parse_gate_overrides(gate_values: list[str] | None) -> list[str]:
@@ -71,6 +81,7 @@ def start_task(
     intent: str | None = None,
     workflow: str | None = None,
     gate_overrides: list[str] | None = None,
+    executor_selection: ExecutorSelection | None = None,
 ):
     """Start a new AGOS task in repo_root and dispatch it through the configured executor."""
 
@@ -94,8 +105,8 @@ def start_task(
         workflow=workflow_name,
         gates=gate_ids,
         executor=ExecutorBinding(
-            adapter=config.executor.name,
-            agent=config.executor.agent,
+            adapter=executor_selection.adapter if executor_selection else config.executor.name,
+            agent=executor_selection.agent if executor_selection else config.executor.agent,
         ),
     )
 
@@ -123,7 +134,15 @@ def start_task(
         }
     )
 
-    adapter = configured_executor_adapter(staging_paths)
+    adapter = (
+        executor_adapter_for(
+            staging_paths,
+            executor_selection.adapter,
+            command=executor_selection.command,
+        )
+        if executor_selection
+        else configured_executor_adapter(staging_paths)
+    )
     try:
         run = adapter.start(task)
     except RuntimeError as exc:

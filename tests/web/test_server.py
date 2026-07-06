@@ -64,6 +64,13 @@ def write_dashboard_config(tmp_repo) -> None:
     config = {
         "executor": {"name": "multica", "agent": "Lambda"},
         "default_workflow": "feature",
+        "workers": {
+            "codex_local": {"type": "codex_cli", "command": "codex"},
+        },
+        "reviewers": {
+            "tests": {"type": "fake", "role": "test_reviewer"},
+        },
+        "allow_fake_reviewer": True,
         "workflows": {
             "feature": {
                 "gates": [
@@ -92,6 +99,22 @@ def test_dashboard_server_serves_health_json(tmp_repo) -> None:
             payload = json.loads(response.read().decode("utf-8"))
         assert payload["ok"] is True
         assert payload["service"] == "agos-dashboard"
+
+
+def test_dashboard_server_serves_agents_json(tmp_repo) -> None:
+    write_dashboard_config(tmp_repo)
+    with running_dashboard_server(tmp_repo) as server:
+        url = f"http://127.0.0.1:{server.server_port}/api/agents"
+        with urllib.request.urlopen(url, timeout=5) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+
+    assert payload["ok"] is True
+    task_agent_ids = [agent["id"] for agent in payload["task_agents"]]
+    assert task_agent_ids[:2] == ["executor:multica:Lambda", "worker:codex_local"]
+    assert "local:codex_cli:codex" in task_agent_ids
+    review_agent_ids = [agent["id"] for agent in payload["review_agents"]]
+    assert "reviewer:tests" in review_agent_ids
+    assert "local:reviewer:codex_cli" in review_agent_ids
 
 
 def test_dashboard_server_unknown_api_returns_404_json(tmp_repo) -> None:
@@ -178,3 +201,43 @@ def test_dashboard_server_post_runs_requires_title(tmp_repo) -> None:
     assert payload["error"]["code"] == "invalid_request"
     assert payload["error"]["message"] == "title is required"
     assert not (tmp_repo / ".agos" / "tasks" / "current" / "task.yaml").exists()
+
+
+def test_dashboard_server_post_review_run_uses_selected_reviewer(tmp_repo) -> None:
+    write_dashboard_config(tmp_repo)
+    # Build a minimal active task for the review packet.
+    from agos.core.adapter import ExecutorRun
+    from agos.core.ledger import Ledger
+    from agos.core.repo import repo_paths
+    from agos.core.status import TaskStatus, save_status
+    from agos.core.task import ExecutorBinding, Task, save_task
+
+    paths = repo_paths(tmp_repo)
+    task = Task(
+        id="agos-review-web",
+        title="Review from dashboard",
+        workflow="feature",
+        gates=[],
+        executor=ExecutorBinding(adapter="multica", agent="Lambda"),
+    )
+    save_task(task, paths.task_yaml)
+    ledger = Ledger(paths.ledger)
+    started = ledger.append({"type": "task_started", "task_id": task.id, "title": task.title})
+    save_status(
+        TaskStatus.for_started_task(
+            task=task,
+            run=ExecutorRun(adapter="multica", run_id="run-review-web", issue_id=None),
+            ledger_head_hash=started["hash"],
+        ),
+        paths,
+    )
+
+    with running_dashboard_server(tmp_repo) as server:
+        status, payload = post_json(
+            f"http://127.0.0.1:{server.server_port}/api/reviews/run",
+            {"reviewer": "reviewer:tests"},
+        )
+
+    assert status == 201
+    assert payload["ok"] is True
+    assert payload["review_run"]["reviewers"] == ["tests"]

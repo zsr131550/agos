@@ -31,16 +31,18 @@ def _review_registry() -> OrchestrationRegistry:
 
 
 def _serialize_review_run(run) -> str:
-    return json.dumps(
-        {
-            "backend": run.backend,
-            "kind": run.kind,
-            "run_id": run.run_id,
-            "review_id": run.review_id,
-            "packet_ref": run.packet_ref,
-            "reviewers": run.reviewers,
-        }
-    )
+    return json.dumps(_manual_review_run_payload(run))
+
+
+def _manual_review_run_payload(run) -> dict[str, object]:
+    return {
+        "backend": run.backend,
+        "kind": run.kind,
+        "run_id": run.run_id,
+        "review_id": run.review_id,
+        "packet_ref": run.packet_ref,
+        "reviewers": run.reviewers,
+    }
 
 
 def review_command(
@@ -141,18 +143,30 @@ def review_run_command(
 ) -> None:
     try:
         repo_root = find_initialized_repo_root()
+        payload = run_review(repo_root, reviewers=reviewer)
+    except Exception as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(code=1) from exc
+
+    typer.echo(json.dumps(payload, sort_keys=True))
+
+
+def run_review(repo_root: Path, *, reviewers: list[str] | None = None) -> dict[str, object]:
+    """Run configured reviewers for repo_root and return a JSON-serializable payload."""
+
+    selected_reviewers = reviewers or []
+    try:
         adapters = configured_reviewer_adapters(repo_root)
         configured_specs = configured_reviewer_specs(repo_root)
         if not configured_specs:
             orchestrator = ReviewOrchestrator(repo_paths(repo_root), registry=_review_registry())
             run = orchestrator.start_manual_review(
                 diff_kind="governed_repo_diff",
-                reviewers=reviewer,
+                reviewers=selected_reviewers,
             )
-            typer.echo(_serialize_review_run(run))
-            return
+            return _manual_review_run_payload(run)
 
-        specs = _selected_reviewer_specs(configured_specs, reviewer)
+        specs = _selected_reviewer_specs(configured_specs, selected_reviewers)
         manual_specs, auto_specs = _partition_reviewer_specs(specs, adapters)
         if manual_specs and auto_specs:
             raise ValueError("manual and automated reviewers cannot be combined in review run")
@@ -162,8 +176,7 @@ def review_run_command(
                 diff_kind="governed_repo_diff",
                 reviewers=[spec.id for spec in manual_specs],
             )
-            typer.echo(_serialize_review_run(run))
-            return
+            return _manual_review_run_payload(run)
         if not auto_specs:
             raise ValueError("at least one configured reviewer is required")
 
@@ -179,26 +192,20 @@ def review_run_command(
             failed = ", ".join(result.failed_reviewers)
             raise ValueError(f"required reviewers failed: {failed}")
         report_ref, report = service.ingest_findings(packet.review_id, result.findings)
-    except Exception as exc:
-        typer.echo(str(exc), err=True)
-        raise typer.Exit(code=1) from exc
 
-    typer.echo(
-        json.dumps(
-            {
-                "backend": "configured_reviewers",
-                "kind": "review_run",
-                "run_id": result.run_id,
-                "review_id": packet.review_id,
-                "packet_ref": packet_ref,
-                "report_ref": report_ref,
-                "reviewers": [spec.id for spec in auto_specs],
-                "state": result.state,
-                "finding_count": len(report.findings),
-            },
-            sort_keys=True,
-        )
-    )
+        return {
+            "backend": "configured_reviewers",
+            "kind": "review_run",
+            "run_id": result.run_id,
+            "review_id": packet.review_id,
+            "packet_ref": packet_ref,
+            "report_ref": report_ref,
+            "reviewers": [spec.id for spec in auto_specs],
+            "state": result.state,
+            "finding_count": len(report.findings),
+        }
+    except Exception:
+        raise
 
 
 @review_app.command("resume")

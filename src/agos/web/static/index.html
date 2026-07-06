@@ -54,7 +54,7 @@
     .actions { display: flex; flex-wrap: wrap; gap: 10px; justify-content: flex-end; }
     form.task-form { display: grid; gap: 12px; }
     label { display: grid; gap: 6px; color: var(--muted); font-size: 13px; font-weight: 700; }
-    input, textarea {
+    input, textarea, select {
       width: 100%;
       border: 1px solid var(--line);
       border-radius: 14px;
@@ -64,8 +64,11 @@
       font: inherit;
     }
     textarea { min-height: 92px; resize: vertical; line-height: 1.55; }
+    select { min-height: 42px; }
     .form-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
     .form-status { color: var(--muted); font-size: 13px; }
+    .inline-form { display: flex; flex-wrap: wrap; align-items: end; gap: 10px; }
+    .inline-form label { min-width: min(100%, 280px); }
     button {
       border: 1px solid var(--line);
       border-radius: 999px;
@@ -240,7 +243,12 @@
           <label>任务意图 / 范围
             <textarea id="new-run-intent" name="intent" placeholder="描述要完成的目标、边界和验收标准"></textarea>
           </label>
-          <div class="grid cols-2">
+          <div class="grid cols-3">
+            <label>Agent
+              <select id="new-run-agent" name="agent">
+                <option value="">正在扫描本地 agent...</option>
+              </select>
+            </label>
             <label>Workflow
               <input id="new-run-workflow" name="workflow" placeholder="留空使用 default_workflow">
             </label>
@@ -282,7 +290,19 @@
       </section>
 
       <section class="panel" id="reviews-panel">
-        <div class="section-title"><div><h2>评审结果</h2><p>展示 reviews.reports 与 reviews.packets 的交叉检查。</p></div></div>
+        <div class="section-title">
+          <div><h2>评审结果</h2><p>展示 reviews.reports 与 reviews.packets 的交叉检查；也可以选择本地 review agent 触发评审。</p></div>
+        </div>
+        <form class="inline-form" id="review-run-form">
+          <label>Review agent
+            <select id="review-agent" name="reviewer">
+              <option value="">正在扫描 review agent...</option>
+            </select>
+          </label>
+          <button class="primary" id="review-run-submit" type="submit">启动评审</button>
+          <span class="form-status" id="review-run-status">选择 agent 后运行 review。</span>
+        </form>
+        <br>
         <div id="reviews-view"></div>
       </section>
 
@@ -309,6 +329,7 @@
   <script>
     const state = {
       health: null,
+      agents: { task_agents: [], review_agents: [] },
       runs: [],
       current: null,
       selectedRef: null,
@@ -356,6 +377,7 @@
       const intent = $('new-run-intent').value.trim();
       const workflow = $('new-run-workflow').value.trim();
       const gates = $('new-run-gates').value.split(',').map((item) => item.trim()).filter(Boolean);
+      const agent = $('new-run-agent').value.trim();
       if (!title) {
         status.textContent = '任务标题不能为空。';
         $('new-run-title').focus();
@@ -366,6 +388,7 @@
       renderError(null);
       try {
         const payload = { title, intent };
+        if (agent) payload.agent = agent;
         if (workflow) payload.workflow = workflow;
         if (gates.length) payload.gates = gates;
         const result = await fetchJson('/api/runs', {
@@ -379,6 +402,33 @@
         await refreshAll();
       } catch (error) {
         status.textContent = `创建失败：${error.message}`;
+        renderError(error);
+      } finally {
+        submit.disabled = false;
+      }
+    }
+
+    async function runReviewFromForm(event) {
+      event.preventDefault();
+      const submit = $('review-run-submit');
+      const status = $('review-run-status');
+      const reviewer = $('review-agent').value.trim();
+      submit.disabled = true;
+      status.textContent = '正在启动评审...';
+      renderError(null);
+      try {
+        const payload = {};
+        if (reviewer) payload.reviewer = reviewer;
+        const result = await fetchJson('/api/reviews/run', {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        });
+        state.current = { ...(state.current || {}), reviews: result.reviews };
+        status.textContent = `评审完成：${result.review_run?.review_id || result.review_run?.run_id || 'review run'}`;
+        await refreshSelected();
+      } catch (error) {
+        status.textContent = `评审失败：${error.message}`;
         renderError(error);
       } finally {
         submit.disabled = false;
@@ -422,6 +472,7 @@
         renderHealth();
         renderError(error);
       }
+      await refreshAgents();
       try {
         const runs = await fetchJson('/api/runs');
         state.runs = runs.runs || runs.items || runs || [];
@@ -437,6 +488,19 @@
       } finally {
         state.loading = false;
       }
+    }
+
+    async function refreshAgents() {
+      try {
+        const agents = await fetchJson('/api/agents');
+        state.agents = {
+          task_agents: agents.task_agents || [],
+          review_agents: agents.review_agents || [],
+        };
+      } catch (error) {
+        state.agents = { task_agents: [], review_agents: [] };
+      }
+      renderAgentSelectors();
     }
 
     async function refreshSelected() {
@@ -493,6 +557,40 @@
       renderMergeGate(run.merge_gate);
       renderEvidence(run);
       renderDistillation(run.distillation);
+    }
+
+    function renderAgentSelectors() {
+      renderSelectOptions(
+        $('new-run-agent'),
+        state.agents.task_agents,
+        '使用默认 executor agent',
+      );
+      renderSelectOptions(
+        $('review-agent'),
+        state.agents.review_agents,
+        '运行全部配置 reviewer',
+      );
+      $('review-run-submit').disabled = !state.agents.review_agents.length;
+      if (!state.agents.review_agents.length) {
+        $('review-run-status').textContent = '当前 agos.yaml 没有配置 review agent。';
+      }
+    }
+
+    function renderSelectOptions(select, agents, emptyLabel) {
+      const previous = select.value;
+      const rows = asArray(agents);
+      const options = [`<option value="">${escapeHtml(emptyLabel)}</option>`].concat(rows.map((agent) => {
+        const status = agent.available === false ? '（未检测到命令）' : '（可用）';
+        const label = `${agent.label || agent.id} · ${agent.adapter || agent.type || agent.role || 'agent'} ${status}`;
+        return `<option value="${escapeHtml(agent.id)}">${escapeHtml(label)}</option>`;
+      }));
+      select.innerHTML = options.join('');
+      if (previous && rows.some((agent) => agent.id === previous)) {
+        select.value = previous;
+      } else {
+        const selected = rows.find((agent) => agent.selected);
+        select.value = selected?.id || '';
+      }
     }
 
     function renderSummary(run) {
@@ -626,6 +724,7 @@
 
     $('refresh-btn').addEventListener('click', refreshAll);
     $('new-run-form').addEventListener('submit', createRunFromForm);
+    $('review-run-form').addEventListener('submit', runReviewFromForm);
     refreshAll();
     window.setInterval(refreshAll, 5000);
   </script>

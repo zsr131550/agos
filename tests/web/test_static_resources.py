@@ -37,8 +37,15 @@ def test_dashboard_static_index_is_packaged() -> None:
     assert 'id="new-run-intent"' in text
     assert 'id="new-run-workflow"' in text
     assert 'id="new-run-gates"' in text
+    assert 'id="new-run-agent"' in text
+    assert 'id="review-agent"' in text
+    assert 'id="review-run-submit"' in text
     assert "createRunFromForm" in text
+    assert "refreshAgents" in text
+    assert "runReviewFromForm" in text
     assert "fetchJson('/api/runs', {" in text
+    assert "fetchJson('/api/agents')" in text
+    assert "fetchJson('/api/reviews/run', {" in text
     assert 'method: "POST"' in text
     assert "Promise.all([fetchJson('/api/health'), fetchJson('/api/runs')])" not in text
     assert "evidence.text || JSON.stringify" in text

@@ -12,6 +12,7 @@ from urllib.parse import parse_qs, urlsplit
 
 from agos.web.api import (
     DashboardApiError,
+    agents_payload,
     candidates_payload,
     config_payload,
     current_run_payload,
@@ -21,6 +22,7 @@ from agos.web.api import (
     health_payload,
     ledger_payload,
     reviews_payload,
+    review_run_payload,
     runs_payload,
     start_run_payload,
     status_payload,
@@ -31,6 +33,7 @@ PayloadBuilder = Callable[[Path], dict[str, object]]
 
 _API_ROUTES: dict[str, PayloadBuilder] = {
     "/api/health": health_payload,
+    "/api/agents": agents_payload,
     "/api/config": config_payload,
     "/api/status": status_payload,
     "/api/runs": runs_payload,
@@ -76,6 +79,9 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
         parsed = urlsplit(self.path)
         if parsed.path == "/api/runs":
             self._serve_start_run()
+            return
+        if parsed.path == "/api/reviews/run":
+            self._serve_review_run()
             return
         if parsed.path.startswith("/api/"):
             self._write_json(
@@ -129,6 +135,22 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
         try:
             payload = self._read_json_body()
             result = start_run_payload(self.server.repo_root, payload)
+            status = HTTPStatus.CREATED
+        except DashboardApiError as exc:
+            result = error_payload(exc)
+            status = HTTPStatus.BAD_REQUEST
+        except Exception:
+            result = {
+                "ok": False,
+                "error": {"code": "internal_error", "message": "Internal dashboard server error"},
+            }
+            status = HTTPStatus.INTERNAL_SERVER_ERROR
+        self._write_json(result, status=status)
+
+    def _serve_review_run(self) -> None:
+        try:
+            payload = self._read_json_body()
+            result = review_run_payload(self.server.repo_root, payload)
             status = HTTPStatus.CREATED
         except DashboardApiError as exc:
             result = error_payload(exc)

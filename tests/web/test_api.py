@@ -5,9 +5,10 @@ import subprocess
 from pathlib import Path
 
 import pytest
+import yaml
 
 from agos.core.adapter import ExecutorRun
-from agos.core.config import AGOSConfig, WorkerConfig
+from agos.core.config import AGOSConfig, ReviewerConfig, WorkerConfig
 from agos.core.execution import (
     ArbiterDecision,
     CandidatePatch,
@@ -26,6 +27,7 @@ from agos.core.status import TaskStatus, save_status
 from agos.core.task import ExecutorBinding, Task, save_task
 from agos.web.api import (
     DashboardApiError,
+    agents_payload,
     config_payload,
     current_run_payload,
     candidates_payload,
@@ -33,7 +35,9 @@ from agos.web.api import (
     execution_payload,
     evidence_payload,
     health_payload,
+    review_run_payload,
     runs_payload,
+    start_run_payload,
     status_payload,
 )
 
@@ -55,6 +59,127 @@ def test_config_payload_redacts_sensitive_config_values(dashboard_repo: Path) ->
     assert worker["token"] == "***REDACTED***"
     assert worker["env"]["API_KEY"] == "***REDACTED***"
     assert worker["env"]["PUBLIC_NAME"] == "docs"
+
+
+def test_agents_payload_lists_configured_task_and_review_agents(monkeypatch, dashboard_repo: Path) -> None:
+    monkeypatch.setattr("agos.web.api.shutil.which", lambda _command: None)
+
+    payload = agents_payload(dashboard_repo)
+
+    assert payload["ok"] is True
+    assert [agent["id"] for agent in payload["task_agents"]] == [
+        "executor:codex_cli:codex",
+        "worker:docs_agent",
+    ]
+    assert payload["task_agents"][0]["selected"] is True
+    assert payload["task_agents"][0]["adapter"] == "codex_cli"
+    assert payload["task_agents"][1]["label"] == "docs_agent"
+    assert payload["review_agents"][0]["id"] == "reviewer:security"
+    assert payload["review_agents"][0]["role"] == "security_reviewer"
+
+
+def test_agents_payload_discovers_local_agent_commands(monkeypatch, dashboard_repo: Path) -> None:
+    commands = {
+        "codex": "C:/bin/codex.cmd",
+        "claude": "C:/bin/claude.cmd",
+        "multica": "C:/bin/multica.cmd",
+    }
+    monkeypatch.setattr("agos.web.api.shutil.which", lambda command: commands.get(command))
+
+    payload = agents_payload(dashboard_repo)
+
+    local_agents = [agent for agent in payload["task_agents"] if agent["source"] == "local"]
+    assert [agent["id"] for agent in local_agents] == [
+        "local:codex_cli:codex",
+        "local:claude_code:claude",
+        "local:multica:codex",
+    ]
+    assert all(agent["available"] is True for agent in local_agents)
+
+
+def test_agents_payload_discovers_local_review_agent_commands(monkeypatch, tmp_repo: Path) -> None:
+    paths = repo_paths(tmp_repo)
+    paths.agos_dir.mkdir(parents=True, exist_ok=True)
+    AGOSConfig.default(agent="codex").save(paths.agos_yaml)
+    commands = {
+        "codex": "C:/bin/codex.cmd",
+        "claude": "C:/bin/claude.cmd",
+    }
+    monkeypatch.setattr("agos.web.api.shutil.which", lambda command: commands.get(command))
+
+    payload = agents_payload(tmp_repo)
+
+    assert [agent["id"] for agent in payload["review_agents"]] == [
+        "local:reviewer:codex_cli",
+        "local:reviewer:claude_code",
+    ]
+    assert payload["review_agents"][0]["label"] == "codex review"
+    assert payload["review_agents"][1]["label"] == "claude review"
+
+
+def test_start_run_payload_uses_selected_task_agent(tmp_repo: Path, monkeypatch) -> None:
+    paths = repo_paths(tmp_repo)
+    paths.agos_dir.mkdir(parents=True, exist_ok=True)
+    AGOSConfig.default(
+        executor="multica",
+        agent="Lambda",
+        workers={
+            "codex_local": WorkerConfig(type="codex_cli", command="codex"),
+        },
+    ).save(paths.agos_yaml)
+    captured = {}
+
+    def fake_start(self, task):
+        captured["adapter"] = self.name
+        captured["task_executor"] = task.executor.model_dump()
+        return ExecutorRun(adapter=self.name, run_id="codex-local-run", issue_id=None)
+
+    monkeypatch.setattr("agos.adapters.local_cli_executor.CodexCliExecutorAdapter.start", fake_start)
+
+    payload = start_run_payload(
+        tmp_repo,
+        {
+            "title": "Use selected agent",
+            "agent": "worker:codex_local",
+        },
+    )
+
+    assert payload["ok"] is True
+    assert captured == {
+        "adapter": "codex_cli",
+        "task_executor": {"adapter": "codex_cli", "agent": "codex_local"},
+    }
+    task = yaml.safe_load(paths.task_yaml.read_text(encoding="utf-8"))
+    assert task["executor"] == {"adapter": "codex_cli", "agent": "codex_local"}
+
+
+def test_review_run_payload_uses_selected_review_agent(dashboard_repo: Path) -> None:
+    payload = review_run_payload(dashboard_repo, {"reviewer": "reviewer:security"})
+
+    assert payload["ok"] is True
+    assert payload["review_run"]["state"] == "completed"
+    assert payload["review_run"]["reviewers"] == ["security"]
+
+
+def test_review_run_payload_accepts_local_review_agent(dashboard_repo: Path, monkeypatch) -> None:
+    captured = {}
+
+    def fake_run(self, *, run_id, packet, reviewers, max_parallel=4):
+        captured["adapter_names"] = sorted(self._reviewers)
+        captured["reviewers"] = [reviewer.model_dump() for reviewer in reviewers]
+        from agos.core.review_orchestrator import ReviewRunResult
+
+        return ReviewRunResult(run_id=run_id, state="completed")
+
+    monkeypatch.setattr("agos.core.review_orchestrator.ParallelReviewOrchestrator.run", fake_run)
+
+    payload = review_run_payload(dashboard_repo, {"reviewer": "local:reviewer:codex_cli"})
+
+    assert payload["ok"] is True
+    assert captured["adapter_names"] == ["local_codex_cli"]
+    assert captured["reviewers"][0]["id"] == "local_codex_cli"
+    assert captured["reviewers"][0]["role"] == "codex_reviewer"
+    assert payload["review_run"]["reviewers"] == ["local_codex_cli"]
 
 
 def test_runs_and_current_run_payloads_include_pipeline_state(dashboard_repo: Path) -> None:
@@ -239,6 +364,7 @@ def dashboard_repo(tmp_repo: Path) -> Path:
     paths = repo_paths(tmp_repo)
     paths.agos_dir.mkdir(parents=True, exist_ok=True)
     config = AGOSConfig.default(
+        executor="codex_cli",
         agent="codex",
         workers={
             "docs_agent": WorkerConfig(
@@ -249,6 +375,10 @@ def dashboard_repo(tmp_repo: Path) -> Path:
             )
         },
     )
+    config.reviewers = {
+        "security": ReviewerConfig(type="fake", role="security_reviewer", required=True)
+    }
+    config.allow_fake_reviewer = True
     config.save(paths.agos_yaml)
 
     task = Task(
