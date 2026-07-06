@@ -10,6 +10,21 @@
 
 ---
 
+## Implementation Status As Of 2026-07-06
+
+The repository now contains the v1 hardening surfaces described by this plan. Checkbox state has been synchronized with the implemented files and tests; the final verification commands remain tracked in Task 8 because they are environment-specific and must be rerun before release.
+
+| Task | Status |
+|---|---|
+| Task 1: Trust Anchor | Implemented; covered by `tests/core/test_trust_anchor.py` and `tests/cli/test_anchor.py`. |
+| Task 2: Merge Gate | Implemented; covered by `tests/core/test_merge_gate.py` and `tests/cli/test_merge_gate.py`. |
+| Task 3: Typed Security Gates | Implemented; covered by config/gate/CI tests. |
+| Task 4: Automatic Execution Planner | Implemented; covered by `tests/core/test_execution_planner.py`. |
+| Task 5: Automatic Execution Pipeline | Implemented; covered by `tests/core/test_execution_pipeline.py`. |
+| Task 6: `agos run auto` | Implemented; covered by `tests/cli/test_run_auto.py`. |
+| Task 7: Doctor, CI, Release, Docs | Implemented; CI/release workflows and docs are present. |
+| Task 8: Full Verification And Integration | Verified on 2026-07-06: pytest, coverage, ruff, compileall, and build passed; code review/commit remain human workflow steps unless explicitly requested. |
+
 ## File Structure
 
 - Create: `src/agos/core/trust_anchor.py`
@@ -60,70 +75,70 @@
 
 ## Task 1: Trust Anchor
 
-- [ ] Write tests in `tests/core/test_trust_anchor.py` for canonical payload serialization, file backend publish/read, stale head detection, missing anchor failure, and Git ref name validation.
-- [ ] Run `python -m pytest tests/core/test_trust_anchor.py -q` and confirm failures are from missing implementation.
-- [ ] Implement `src/agos/core/trust_anchor.py` with `TrustAnchorPayload`, `AnchorVerification`, `FileTrustAnchorStore`, `GitRefTrustAnchorStore`, `publish_current_anchor()`, and `verify_current_anchor()`.
-- [ ] Add `tests/cli/test_anchor.py` for `agos anchor publish --backend file --path <file>` and `agos anchor verify`.
-- [ ] Implement `src/agos/cli/cmd_anchor.py` and register it in `src/agos/cli/main.py`.
-- [ ] Run `python -m pytest tests/core/test_trust_anchor.py tests/cli/test_anchor.py -q`.
+- [x] Write tests in `tests/core/test_trust_anchor.py` for canonical payload serialization, file backend publish/read, stale head detection, missing anchor failure, and Git ref name validation.
+- [x] Run `python -m pytest tests/core/test_trust_anchor.py -q` and confirm failures are from missing implementation.
+- [x] Implement `src/agos/core/trust_anchor.py` with `TrustAnchorPayload`, `AnchorVerification`, `FileTrustAnchorStore`, `GitRefTrustAnchorStore`, `publish_current_anchor()`, and `verify_current_anchor()`.
+- [x] Add `tests/cli/test_anchor.py` for `agos anchor publish --backend file --path <file>` and `agos anchor verify`.
+- [x] Implement `src/agos/cli/cmd_anchor.py` and register it in `src/agos/cli/main.py`.
+- [x] Run `python -m pytest tests/core/test_trust_anchor.py tests/cli/test_anchor.py -q`.
 
 ## Task 2: Merge Gate
 
-- [ ] Write tests in `tests/core/test_merge_gate.py` covering clean ledger pass, tampered ledger block, gate-lock drift block, required anchor mismatch block, missing accepted candidate evidence block, and passing accepted candidate evidence.
-- [ ] Write CLI tests in `tests/cli/test_merge_gate.py` for JSON output, non-zero exit on block, and `--require-anchor`.
-- [ ] Run merge-gate tests and confirm missing implementation failures.
-- [ ] Implement `src/agos/core/merge_gate.py` as a pure verifier returning structured checks.
-- [ ] Implement `src/agos/cli/cmd_merge_gate.py` and register `agos merge-gate`.
-- [ ] Run `python -m pytest tests/core/test_merge_gate.py tests/cli/test_merge_gate.py -q`.
+- [x] Write tests in `tests/core/test_merge_gate.py` covering clean ledger pass, tampered ledger block, gate-lock drift block, required anchor mismatch block, missing accepted candidate evidence block, and passing accepted candidate evidence.
+- [x] Write CLI tests in `tests/cli/test_merge_gate.py` for JSON output, non-zero exit on block, and `--require-anchor`.
+- [x] Run merge-gate tests and confirm missing implementation failures.
+- [x] Implement `src/agos/core/merge_gate.py` as a pure verifier returning structured checks.
+- [x] Implement `src/agos/cli/cmd_merge_gate.py` and register `agos merge-gate`.
+- [x] Run `python -m pytest tests/core/test_merge_gate.py tests/cli/test_merge_gate.py -q`.
 
 ## Task 3: Typed Security Gates
 
-- [ ] Add failing tests in `tests/core/test_config.py` for `GateSpec.options`, allowed security gate types, and invalid type rejection.
-- [ ] Add failing tests in `tests/core/test_gate.py` for OPA, Semgrep, TruffleHog, and CodeQL fake executables: pass, block, missing executable, evidence log, and `gates_locked` option drift.
-- [ ] Update `src/agos/core/config.py` with `options` and supported gate validation.
-- [ ] Update `src/agos/core/gate.py` with `ExternalSecurityGate` and per-type argv builders.
-- [ ] Update candidate test command display in `src/agos/core/execution_service.py`.
-- [ ] Run `python -m pytest tests/core/test_config.py tests/core/test_gate.py tests/cli/test_ci.py -q`.
+- [x] Add failing tests in `tests/core/test_config.py` for `GateSpec.options`, allowed security gate types, and invalid type rejection.
+- [x] Add failing tests in `tests/core/test_gate.py` for OPA, Semgrep, TruffleHog, and CodeQL fake executables: pass, block, missing executable, evidence log, and `gates_locked` option drift.
+- [x] Update `src/agos/core/config.py` with `options` and supported gate validation.
+- [x] Update `src/agos/core/gate.py` with `ExternalSecurityGate` and per-type argv builders.
+- [x] Update candidate test command display in `src/agos/core/execution_service.py`.
+- [x] Run `python -m pytest tests/core/test_config.py tests/core/test_gate.py tests/cli/test_ci.py -q`.
 
 ## Task 4: Automatic Execution Planner
 
-- [ ] Write tests in `tests/core/test_execution_planner.py` for deterministic fallback plan, valid JSON planner output, invalid JSON rejection with fallback, task-id normalization, default worker selection, and write-scope normalization.
-- [ ] Implement `src/agos/core/execution_planner.py`.
-- [ ] Add config models for planner/pipeline defaults in `src/agos/core/config.py`.
-- [ ] Run `python -m pytest tests/core/test_execution_planner.py tests/core/test_config.py -q`.
+- [x] Write tests in `tests/core/test_execution_planner.py` for deterministic fallback plan, valid JSON planner output, invalid JSON rejection with fallback, task-id normalization, default worker selection, and write-scope normalization.
+- [x] Implement `src/agos/core/execution_planner.py`.
+- [x] Add config models for planner/pipeline defaults in `src/agos/core/config.py`.
+- [x] Run `python -m pytest tests/core/test_execution_planner.py tests/core/test_config.py -q`.
 
 ## Task 5: Automatic Execution Pipeline
 
-- [ ] Write tests in `tests/core/test_execution_pipeline.py` using fake workers and reviewers for dry-run completion, no candidate when worker fails, no accept when tests fail, no accept with blocking review, and explicit apply success.
-- [ ] Add `execute_plan_model()` or equivalent helper in `src/agos/core/execution_service.py`.
-- [ ] Implement `src/agos/core/execution_pipeline.py` using existing `ExecutionService`, `ExecutionRuntime`, worker adapters, reviewer adapters, and candidate decision/apply APIs.
-- [ ] Run `python -m pytest tests/core/test_execution_pipeline.py tests/core/test_execution_service.py tests/core/test_execution_runtime.py -q`.
+- [x] Write tests in `tests/core/test_execution_pipeline.py` using fake workers and reviewers for dry-run completion, no candidate when worker fails, no accept when tests fail, no accept with blocking review, and explicit apply success.
+- [x] Add `execute_plan_model()` or equivalent helper in `src/agos/core/execution_service.py`.
+- [x] Implement `src/agos/core/execution_pipeline.py` using existing `ExecutionService`, `ExecutionRuntime`, worker adapters, reviewer adapters, and candidate decision/apply APIs.
+- [x] Run `python -m pytest tests/core/test_execution_pipeline.py tests/core/test_execution_service.py tests/core/test_execution_runtime.py -q`.
 
 ## Task 6: `agos run auto`
 
-- [ ] Write CLI tests in `tests/cli/test_run_auto.py` for `agos run auto --dry-run --json`, missing active task, explicit `--apply`, and failure output.
-- [ ] Modify `src/agos/cli/cmd_execute_plan.py` to expose `run auto`.
-- [ ] Register configured worker/reviewer/orchestration adapters at the CLI boundary.
-- [ ] Run `python -m pytest tests/cli/test_run_auto.py tests/cli/test_execute_plan_runtime.py -q`.
+- [x] Write CLI tests in `tests/cli/test_run_auto.py` for `agos run auto --dry-run --json`, missing active task, explicit `--apply`, and failure output.
+- [x] Modify `src/agos/cli/cmd_execute_plan.py` to expose `run auto`.
+- [x] Register configured worker/reviewer/orchestration adapters at the CLI boundary.
+- [x] Run `python -m pytest tests/cli/test_run_auto.py tests/cli/test_execute_plan_runtime.py -q`.
 
 ## Task 7: Doctor, CI, Release, Docs
 
-- [ ] Extend `tests/cli/test_doctor.py` for hook checks, Python version, console script check, worker health details, and active anchor warning.
-- [ ] Update `src/agos/cli/cmd_doctor.py` with actionable checks and stable JSON.
-- [ ] Update `.github/workflows/ci.yml` with OS/Python matrix, ruff, coverage, compileall, build, wheel install, CLI smoke, and merge-gate smoke.
-- [ ] Create `.github/workflows/release.yml` for tag/manual artifact builds.
-- [ ] Update `pyproject.toml` package metadata and dev build dependency.
-- [ ] Update `README.md` and add `docs/security-gates.md`.
-- [ ] Run docs/CLI-focused tests and `python -m build`.
+- [x] Extend `tests/cli/test_doctor.py` for hook checks, Python version, console script check, worker health details, and active anchor warning.
+- [x] Update `src/agos/cli/cmd_doctor.py` with actionable checks and stable JSON.
+- [x] Update `.github/workflows/ci.yml` with OS/Python matrix, ruff, coverage, compileall, build, wheel install, CLI smoke, and merge-gate smoke.
+- [x] Create `.github/workflows/release.yml` for tag/manual artifact builds.
+- [x] Update `pyproject.toml` package metadata and dev build dependency.
+- [x] Update `README.md` and add `docs/security-gates.md`.
+- [x] Run docs/CLI-focused tests and `python -m build`.
 
 ## Task 8: Full Verification And Integration
 
-- [ ] Run `python -m pytest -q`.
-- [ ] Run `python -m pytest --cov=agos --cov-report=term-missing -q`.
-- [ ] Run `python -m ruff check src tests`.
-- [ ] Run `python -m compileall -q src tests`.
-- [ ] Run `python -m build`.
-- [ ] Inspect `git diff --stat` and `git status -sb`.
+- [x] Run `python -m pytest -q`.
+- [x] Run `python -m pytest --cov=agos --cov-report=term-missing -q`.
+- [x] Run `python -m ruff check src tests`.
+- [x] Run `python -m compileall -q src tests`.
+- [x] Run `python -m build`.
+- [x] Inspect `git diff --stat` and `git status -sb`.
 - [ ] Request code review, fix findings, and rerun relevant tests.
 - [ ] Commit all changes.
 

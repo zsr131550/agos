@@ -21,11 +21,47 @@ def load_json_object_from_text(text: str) -> dict[str, object] | None:
         except json.JSONDecodeError:
             continue
         if isinstance(payload, dict):
+            unwrapped = _unwrap_codex_agent_message(payload)
+            if unwrapped is not None:
+                return unwrapped
             unwrapped = _unwrap_cli_result_envelope(payload)
             if unwrapped is not None:
                 return unwrapped
+            if _is_codex_protocol_event(payload):
+                continue
             return payload
     return None
+
+
+def _unwrap_codex_agent_message(payload: dict[str, object]) -> dict[str, object] | None:
+    """Unwrap Codex JSONL ``agent_message.text`` payloads.
+
+    ``codex exec --json`` emits newline-delimited protocol events. The model's
+    final text appears inside an ``item.completed`` event whose item type is
+    ``agent_message``. Recurse into that text so planner/reviewer callers see
+    the machine JSON rather than the surrounding protocol event.
+    """
+    if payload.get("type") != "item.completed":
+        return None
+    item = payload.get("item")
+    if not isinstance(item, dict):
+        return None
+    if item.get("type") != "agent_message" or not isinstance(item.get("text"), str):
+        return None
+    return load_json_object_from_text(item["text"])
+
+
+def _is_codex_protocol_event(payload: dict[str, object]) -> bool:
+    event_type = payload.get("type")
+    return isinstance(event_type, str) and event_type in {
+        "thread.started",
+        "turn.started",
+        "turn.completed",
+        "turn.failed",
+        "item.started",
+        "item.completed",
+        "error",
+    }
 
 
 def _unwrap_cli_result_envelope(payload: dict[str, object]) -> dict[str, object] | None:

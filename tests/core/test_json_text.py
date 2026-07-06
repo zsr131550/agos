@@ -53,6 +53,19 @@ def test_load_json_object_from_text_returns_envelope_when_inner_unparseable():
     assert load_json_object_from_text(json_text(envelope)) == envelope
 
 
+def test_load_json_object_from_text_unwraps_codex_jsonl_agent_message():
+    text = "\n".join(
+        [
+            '{"type":"thread.started","thread_id":"thread-01"}',
+            '{"type":"turn.started"}',
+            '{"type":"item.completed","item":{"id":"item-01","type":"agent_message","text":"{\\"subtasks\\":[{\\"id\\":\\"subtask-01\\"}]}"}}',
+            '{"type":"turn.completed"}',
+        ]
+    )
+
+    assert load_json_object_from_text(text) == {"subtasks": [{"id": "subtask-01"}]}
+
+
 def test_load_json_object_from_text_does_not_unwrap_non_result_envelope():
     # A payload that merely has a `result` string but is not a claude result
     # envelope must be returned verbatim.

@@ -109,6 +109,8 @@ Task 9 is the final documentation and verification pass.
 
 ## Task 0: Close The In-Flight Merge Bundle Work
 
+**Status:** Implemented in `c17e993` and retained in the current mainline.
+
 **Files:**
 - Modify: `src/agos/core/execution.py`
 - Modify: `src/agos/core/arbiters.py`
@@ -118,7 +120,7 @@ Task 9 is the final documentation and verification pass.
 - Test: `tests/core/test_merge_arbiter.py`
 - Test: `tests/cli/test_candidate_merge.py`
 
-- [ ] **Step 1: Confirm the working tree contains only expected Task 7 files**
+- [x] **Step 1: Confirm the working tree contains only expected Task 7 files**
 
 Run:
 
@@ -139,7 +141,7 @@ Expected output contains only:
 ?? docs/superpowers/plans/2026-06-23-agos-remaining-production-orchestration-gaps.md
 ```
 
-- [ ] **Step 2: Run merge tests with workspace-local temp**
+- [x] **Step 2: Run merge tests with workspace-local temp**
 
 Run:
 
@@ -152,7 +154,7 @@ python -m pytest tests/core/test_merge_arbiter.py tests/cli/test_candidate_merge
 
 Expected: both tests pass. A pytest cache warning is acceptable if it only references cache write permissions and the test result is passing.
 
-- [ ] **Step 3: Run candidate regressions**
+- [x] **Step 3: Run candidate regressions**
 
 Run:
 
@@ -165,7 +167,7 @@ python -m ruff check src tests
 
 Expected: tests and ruff pass.
 
-- [ ] **Step 4: Commit the merge bundle baseline**
+- [x] **Step 4: Commit the merge bundle baseline**
 
 Run:
 
@@ -180,6 +182,8 @@ Expected: commit succeeds and leaves only this plan file uncommitted if the plan
 
 ## Task 1: Production-Ready Worker Adapter Contract
 
+**Status:** Implemented in `d8eee4c` with opt-in real smoke coverage.
+
 **Files:**
 - Modify: `src/agos/core/config.py`
 - Modify: `src/agos/core/execution_worker.py`
@@ -191,7 +195,7 @@ Expected: commit succeeds and leaves only this plan file uncommitted if the plan
 - Test: `tests/cli/test_worker_registry.py`
 - Create: `tests/integration/test_worker_adapters_opt_in.py`
 
-- [ ] **Step 1: Write config tests for production worker fields**
+- [x] **Step 1: Write config tests for production worker fields**
 
 Add this test to `tests/cli/test_worker_registry.py`:
 
@@ -232,7 +236,7 @@ workflows:
     assert adapter.env == {"AGOS_WORKER_MODE": "production"}
 ```
 
-- [ ] **Step 2: Run the new registry test and verify RED**
+- [x] **Step 2: Run the new registry test and verify RED**
 
 Run:
 
@@ -242,7 +246,7 @@ python -m pytest tests/cli/test_worker_registry.py::test_worker_registry_passes_
 
 Expected: fail because `WorkerConfig` and adapters do not expose the new runtime fields.
 
-- [ ] **Step 3: Add worker config fields**
+- [x] **Step 3: Add worker config fields**
 
 Modify `WorkerConfig` in `src/agos/core/config.py`:
 
@@ -261,7 +265,7 @@ class WorkerConfig(BaseModel):
     env: dict[str, str] = Field(default_factory=dict)
 ```
 
-- [ ] **Step 4: Add adapter constructor fields**
+- [x] **Step 4: Add adapter constructor fields**
 
 Each production worker adapter constructor must accept and store:
 
@@ -289,7 +293,7 @@ env={**os.environ, **self.env}
 
 For HTTP adapters, use `timeout=self.timeout_seconds`.
 
-- [ ] **Step 5: Wire config fields in the worker registry**
+- [x] **Step 5: Wire config fields in the worker registry**
 
 In `src/agos/cli/worker_registry.py`, every adapter construction must pass:
 
@@ -302,7 +306,7 @@ env=worker.env,
 
 For `OpenHandsWorkerAdapter`, pass `timeout=worker.timeout_seconds` if the constructor keeps the existing `timeout` parameter name.
 
-- [ ] **Step 6: Add opt-in integration tests**
+- [x] **Step 6: Add opt-in integration tests**
 
 Create `tests/integration/test_worker_adapters_opt_in.py`:
 
@@ -366,7 +370,7 @@ def test_openhands_worker_smoke(tmp_path):
     assert status.run_id == run.run_id
 ```
 
-- [ ] **Step 7: Run worker adapter verification**
+- [x] **Step 7: Run worker adapter verification**
 
 Run:
 
@@ -377,7 +381,7 @@ python -m ruff check src/agos/adapters/workers.py src/agos/adapters tests/adapte
 
 Expected: unit tests pass; opt-in tests are skipped unless the corresponding `AGOS_*_SMOKE=1` environment variables are set.
 
-- [ ] **Step 8: Commit Task 1**
+- [x] **Step 8: Commit Task 1**
 
 Run:
 
@@ -390,6 +394,8 @@ git commit -m "feat: harden production worker adapter configuration"
 
 ## Task 2: Production Failure Recovery In ExecutionRuntime
 
+**Status:** Implemented in `9e5c3bd`.
+
 **Files:**
 - Modify: `src/agos/core/execution_runtime.py`
 - Modify: `src/agos/core/execution_service.py`
@@ -397,7 +403,7 @@ git commit -m "feat: harden production worker adapter configuration"
 - Test: `tests/core/test_execution_runtime_recovery.py`
 - Test: `tests/cli/test_execute_plan_runtime.py`
 
-- [ ] **Step 1: Write retry, timeout, and duplicate-start tests**
+- [x] **Step 1: Write retry, timeout, and duplicate-start tests**
 
 Create `tests/core/test_execution_runtime_recovery.py`:
 
@@ -494,7 +500,7 @@ def test_runtime_resume_does_not_duplicate_running_attempt(tmp_path):
     assert worker.starts == 1
 ```
 
-- [ ] **Step 2: Run runtime recovery tests and verify RED**
+- [x] **Step 2: Run runtime recovery tests and verify RED**
 
 Run:
 
@@ -504,7 +510,7 @@ python -m pytest tests/core/test_execution_runtime_recovery.py -q
 
 Expected: at least the retry test fails because current retry handling never restarts failed attempts correctly.
 
-- [ ] **Step 3: Extend `WorkerAttempt` state**
+- [x] **Step 3: Extend `WorkerAttempt` state**
 
 Modify `WorkerAttempt` in `src/agos/core/execution_runtime.py`:
 
@@ -523,7 +529,7 @@ class WorkerAttempt(BaseModel):
     terminal_reason: str | None = None
 ```
 
-- [ ] **Step 4: Add runtime policy constructor fields**
+- [x] **Step 4: Add runtime policy constructor fields**
 
 Update `ExecutionRuntime.__init__`:
 
@@ -546,7 +552,7 @@ def __init__(
     self.worker_timeout_seconds = worker_timeout_seconds
 ```
 
-- [ ] **Step 5: Fix retry eligibility**
+- [x] **Step 5: Fix retry eligibility**
 
 Replace the failed-attempt readiness check with this behavior:
 
@@ -557,7 +563,7 @@ def _can_retry(attempt: WorkerAttempt, max_retries: int) -> bool:
 
 In `_ready_subtasks`, allow a subtask back into ready state only when `_can_retry(previous, max_retries)` is true.
 
-- [ ] **Step 6: Persist run-level snapshots**
+- [x] **Step 6: Persist run-level snapshots**
 
 After every `tick`, `status`, and `cancel`, write:
 
@@ -577,7 +583,7 @@ with:
 }
 ```
 
-- [ ] **Step 7: Wire config policy into `ExecutionService`**
+- [x] **Step 7: Wire config policy into `ExecutionService`**
 
 In `ExecutionService._execution_runtime`, load `.agos/agos.yaml` and pass:
 
@@ -604,7 +610,7 @@ Add to `AGOSConfig`:
 orchestration: OrchestrationConfig = Field(default_factory=OrchestrationConfig)
 ```
 
-- [ ] **Step 8: Run runtime verification**
+- [x] **Step 8: Run runtime verification**
 
 Run:
 
@@ -615,7 +621,7 @@ python -m ruff check src tests
 
 Expected: pass.
 
-- [ ] **Step 9: Commit Task 2**
+- [x] **Step 9: Commit Task 2**
 
 Run:
 
@@ -628,6 +634,8 @@ git commit -m "feat: add recoverable execution runtime policy"
 
 ## Task 3: Lifecycle-Capable Graph Runtime
 
+**Status:** Implemented in `e070306`.
+
 **Files:**
 - Modify: `src/agos/core/orchestration/models.py`
 - Modify: `src/agos/core/orchestration/protocols.py`
@@ -635,7 +643,7 @@ git commit -m "feat: add recoverable execution runtime policy"
 - Modify: `src/agos/core/orchestration/graph_runtime.py`
 - Create: `tests/core/test_graph_runtime_lifecycle.py`
 
-- [ ] **Step 1: Write graph lifecycle tests**
+- [x] **Step 1: Write graph lifecycle tests**
 
 Create `tests/core/test_graph_runtime_lifecycle.py`:
 
@@ -716,7 +724,7 @@ def test_graph_runtime_polls_and_unblocks_dependent_nodes(tmp_path):
     assert backend.started == ["worker-a", "review-a", "arbiter"]
 ```
 
-- [ ] **Step 2: Run graph lifecycle tests and verify RED**
+- [x] **Step 2: Run graph lifecycle tests and verify RED**
 
 Run:
 
@@ -726,7 +734,7 @@ python -m pytest tests/core/test_graph_runtime_lifecycle.py -q
 
 Expected: fail because node backends do not yet expose `poll/cancel/collect` and `GraphRuntime.tick()` does not poll running nodes.
 
-- [ ] **Step 3: Add `NodeRunStatus`**
+- [x] **Step 3: Add `NodeRunStatus`**
 
 Modify `src/agos/core/orchestration/models.py`:
 
@@ -745,7 +753,7 @@ class NodeRunStatus:
     output_refs: dict[str, str] | None = None
 ```
 
-- [ ] **Step 4: Extend node backend protocols**
+- [x] **Step 4: Extend node backend protocols**
 
 Modify `src/agos/core/orchestration/protocols.py` so `WorkerBackend`, `ReviewerBackend`, and `ArbiterBackend` require:
 
@@ -756,7 +764,7 @@ def cancel(self, handle: AgentJobHandle) -> NodeRunStatus: ...
 def collect(self, handle: AgentJobHandle) -> dict[str, Any]: ...
 ```
 
-- [ ] **Step 5: Persist enough state to poll**
+- [x] **Step 5: Persist enough state to poll**
 
 Ensure `PersistedNodeState` already has:
 
@@ -772,7 +780,7 @@ If `output_refs` is absent or typed differently, normalize it to:
 output_refs: dict[str, str] = Field(default_factory=dict)
 ```
 
-- [ ] **Step 6: Poll running nodes before scheduling new nodes**
+- [x] **Step 6: Poll running nodes before scheduling new nodes**
 
 At the start of `GraphRuntime.tick()`, for every persisted state where `state == "running"`:
 
@@ -802,7 +810,7 @@ PersistedNodeState(
 )
 ```
 
-- [ ] **Step 7: Delegate cancellation to backends**
+- [x] **Step 7: Delegate cancellation to backends**
 
 In `GraphRuntime.cancel()`, call:
 
@@ -812,7 +820,7 @@ status = self._backend_for(node).cancel(handle)
 
 Persist the returned `status.state` and `status.output_refs`.
 
-- [ ] **Step 8: Run graph runtime verification**
+- [x] **Step 8: Run graph runtime verification**
 
 Run:
 
@@ -823,7 +831,7 @@ python -m ruff check src tests
 
 Expected: pass.
 
-- [ ] **Step 9: Commit Task 3**
+- [x] **Step 9: Commit Task 3**
 
 Run:
 
@@ -836,13 +844,15 @@ git commit -m "feat: poll lifecycle nodes in graph runtime"
 
 ## Task 4: Worker, Reviewer, And Arbiter Node Backend Wrappers
 
+**Status:** Implemented in `9c8960b`.
+
 **Files:**
 - Create: `src/agos/core/orchestration/node_backends.py`
 - Modify: `src/agos/core/orchestration/registry.py`
 - Modify: `src/agos/core/review_orchestrator.py`
 - Test: `tests/core/test_orchestration_node_backends.py`
 
-- [ ] **Step 1: Write wrapper tests**
+- [x] **Step 1: Write wrapper tests**
 
 Create `tests/core/test_orchestration_node_backends.py`:
 
@@ -899,7 +909,7 @@ def test_worker_node_backend_maps_worker_lifecycle():
     assert status.output_refs == {"worker-a": "evidence/worker.json"}
 ```
 
-- [ ] **Step 2: Run wrapper tests and verify RED**
+- [x] **Step 2: Run wrapper tests and verify RED**
 
 Run:
 
@@ -909,7 +919,7 @@ python -m pytest tests/core/test_orchestration_node_backends.py -q
 
 Expected: fail because `node_backends.py` does not exist.
 
-- [ ] **Step 3: Implement `WorkerNodeBackend`**
+- [x] **Step 3: Implement `WorkerNodeBackend`**
 
 Create `src/agos/core/orchestration/node_backends.py`:
 
@@ -971,7 +981,7 @@ class WorkerNodeBackend:
         return {"run_id": handle.run_id, "node_id": handle.node_id, "job_id": handle.job_id}
 ```
 
-- [ ] **Step 4: Add reviewer and arbiter wrappers**
+- [x] **Step 4: Add reviewer and arbiter wrappers**
 
 Add:
 
@@ -1001,7 +1011,7 @@ cancel -> cancelled NodeRunStatus
 collect -> decision refs from node metadata
 ```
 
-- [ ] **Step 5: Run wrapper verification**
+- [x] **Step 5: Run wrapper verification**
 
 Run:
 
@@ -1012,7 +1022,7 @@ python -m ruff check src tests
 
 Expected: pass.
 
-- [ ] **Step 6: Commit Task 4**
+- [x] **Step 6: Commit Task 4**
 
 Run:
 
@@ -1025,12 +1035,14 @@ git commit -m "feat: wrap agents as graph node backends"
 
 ## Task 5: Real LangGraph Backend Dispatch
 
+**Status:** Implemented in `41b5f81`.
+
 **Files:**
 - Modify: `src/agos/backends/langgraph_backend.py`
 - Modify: `tests/integration/test_langgraph_backend.py`
 - Test: `tests/core/test_backend_parity.py`
 
-- [ ] **Step 1: Add a LangGraph dispatch test**
+- [x] **Step 1: Add a LangGraph dispatch test**
 
 Add to `tests/integration/test_langgraph_backend.py`:
 
@@ -1053,7 +1065,7 @@ def test_langgraph_backend_dispatches_node_actions_when_available():
     assert snapshot["output_refs"]["arbiter-01"] == "evidence/arbiter-01.json"
 ```
 
-- [ ] **Step 2: Run LangGraph dispatch test and verify RED**
+- [x] **Step 2: Run LangGraph dispatch test and verify RED**
 
 Run:
 
@@ -1063,7 +1075,7 @@ python -m pytest tests/integration/test_langgraph_backend.py::test_langgraph_bac
 
 Expected: skip if `langgraph` is not installed; fail if installed because `LangGraphBackend` does not accept `node_dispatch`.
 
-- [ ] **Step 3: Add `node_dispatch` injection**
+- [x] **Step 3: Add `node_dispatch` injection**
 
 Modify `LangGraphBackend.__init__`:
 
@@ -1084,7 +1096,7 @@ def _default_node_dispatch(node: NodeSpec, state: dict[str, Any]) -> dict[str, A
     return {"visited_nodes": [node.id], "output_refs": {node.id: node.metadata.get("output_ref", "")}}
 ```
 
-- [ ] **Step 4: Make node actions call dispatch**
+- [x] **Step 4: Make node actions call dispatch**
 
 Change `_node_action`:
 
@@ -1098,11 +1110,11 @@ def _node_action(node: NodeSpec, dispatch):
 
 Change `_compile_run` to pass the dispatch function.
 
-- [ ] **Step 5: Merge output refs during collect**
+- [x] **Step 5: Merge output refs during collect**
 
 When `graph.invoke()` returns `{"output_refs": {...}}`, store it in `_completed_runs` and expose it from `collect()`.
 
-- [ ] **Step 6: Run LangGraph verification**
+- [x] **Step 6: Run LangGraph verification**
 
 Run:
 
@@ -1113,7 +1125,7 @@ python -m ruff check src tests
 
 Expected: pass, with LangGraph-specific tests skipped only when the optional dependency is absent.
 
-- [ ] **Step 7: Commit Task 5**
+- [x] **Step 7: Commit Task 5**
 
 Run:
 
@@ -1126,13 +1138,15 @@ git commit -m "feat: dispatch normalized nodes through langgraph backend"
 
 ## Task 6: External Backend Remote Contract
 
+**Status:** Implemented in `c4e8dfd`.
+
 **Files:**
 - Modify: `src/agos/backends/external_backend.py`
 - Modify: `README.md`
 - Test: `tests/core/test_external_backend_http.py`
 - Create: `tests/integration/test_external_backend_server.py`
 
-- [ ] **Step 1: Write fake-server integration test**
+- [x] **Step 1: Write fake-server integration test**
 
 Create `tests/integration/test_external_backend_server.py`:
 
@@ -1211,7 +1225,7 @@ def test_external_backend_talks_to_real_http_server():
         thread.join(timeout=5)
 ```
 
-- [ ] **Step 2: Run external fake-server test and verify current behavior**
+- [x] **Step 2: Run external fake-server test and verify current behavior**
 
 Run:
 
@@ -1221,7 +1235,7 @@ python -m pytest tests/integration/test_external_backend_server.py -q
 
 Expected: pass if the current HTTP path is already correct; if it fails, fix before continuing.
 
-- [ ] **Step 3: Add version and idempotency payload assertions**
+- [x] **Step 3: Add version and idempotency payload assertions**
 
 Update `ExternalBackend.start()` POST payload to include:
 
@@ -1244,7 +1258,7 @@ payload = {
 }
 ```
 
-- [ ] **Step 4: Normalize HTTP errors**
+- [x] **Step 4: Normalize HTTP errors**
 
 Wrap `_json_request` errors and raise:
 
@@ -1254,7 +1268,7 @@ RuntimeError(f"external orchestrator {method} {url} failed: {message}")
 
 The message must include HTTP status code for `HTTPError` and timeout text for `TimeoutError`.
 
-- [ ] **Step 5: Document remote contract**
+- [x] **Step 5: Document remote contract**
 
 Add to `README.md`:
 
@@ -1286,7 +1300,7 @@ Required remote endpoints:
 - `GET /runs/{run_id}/artifacts`
 ```
 
-- [ ] **Step 6: Run external verification**
+- [x] **Step 6: Run external verification**
 
 Run:
 
@@ -1297,7 +1311,7 @@ python -m ruff check src tests
 
 Expected: pass.
 
-- [ ] **Step 7: Commit Task 6**
+- [x] **Step 7: Commit Task 6**
 
 Run:
 
@@ -1310,6 +1324,8 @@ git commit -m "feat: document external orchestrator HTTP contract"
 
 ## Task 7: Ordered Patch Stack Merge Strategy
 
+**Status:** Implemented in `3cbe207`.
+
 **Files:**
 - Modify: `src/agos/core/execution.py`
 - Modify: `src/agos/core/arbiters.py`
@@ -1319,7 +1335,7 @@ git commit -m "feat: document external orchestrator HTTP contract"
 - Test: `tests/core/test_merge_arbiter.py`
 - Test: `tests/cli/test_candidate_merge.py`
 
-- [ ] **Step 1: Add ordered stack arbiter tests**
+- [x] **Step 1: Add ordered stack arbiter tests**
 
 Add to `tests/core/test_merge_arbiter.py`:
 
@@ -1351,7 +1367,7 @@ def test_merge_arbiter_rejects_overlapping_candidates_without_dependency_order()
     assert decision.conflict_candidate_ids == ("candidate-a", "candidate-b")
 ```
 
-- [ ] **Step 2: Run ordered stack tests and verify RED**
+- [x] **Step 2: Run ordered stack tests and verify RED**
 
 Run:
 
@@ -1361,7 +1377,7 @@ python -m pytest tests/core/test_merge_arbiter.py::test_merge_arbiter_selects_or
 
 Expected: fail because `decide_bundle()` does not accept `dependency_order`.
 
-- [ ] **Step 3: Extend bundle decision API**
+- [x] **Step 3: Extend bundle decision API**
 
 Change `CandidateMergeArbiter.decide_bundle()` signature:
 
@@ -1386,7 +1402,7 @@ CandidateBundleMergeDecision(
 )
 ```
 
-- [ ] **Step 4: Add merge preview model**
+- [x] **Step 4: Add merge preview model**
 
 Add to `src/agos/core/execution.py`:
 
@@ -1402,7 +1418,7 @@ class CandidateMergePreview(BaseModel):
     created_at: str = Field(default_factory=utc_now_iso)
 ```
 
-- [ ] **Step 5: Persist merge previews**
+- [x] **Step 5: Persist merge previews**
 
 Add to `ExecutionStore`:
 
@@ -1420,7 +1436,7 @@ def read_merge_preview(self, preview_id: str) -> CandidateMergePreview:
     return CandidateMergePreview.model_validate_json(path.read_text(encoding="utf-8"))
 ```
 
-- [ ] **Step 6: Implement stack dry-run before apply**
+- [x] **Step 6: Implement stack dry-run before apply**
 
 In `ExecutionService.apply_candidate_bundle()`:
 
@@ -1439,7 +1455,7 @@ The temporary stack preview must write:
 
 and persist `CandidateMergePreview(state="passed")` before governed repo mutation.
 
-- [ ] **Step 7: Add CLI stack test**
+- [x] **Step 7: Add CLI stack test**
 
 Add to `tests/cli/test_candidate_merge.py`:
 
@@ -1456,7 +1472,7 @@ def test_candidate_merge_apply_ordered_patch_stack(cli_repo):
 
 Replace the fixture names with the actual fixtures already used in `tests/cli/test_candidate_merge.py`; keep this as one concrete test in that file, not a separate helper-only test.
 
-- [ ] **Step 8: Run merge strategy verification**
+- [x] **Step 8: Run merge strategy verification**
 
 Run:
 
@@ -1470,7 +1486,7 @@ python -m ruff check src tests
 
 Expected: pass.
 
-- [ ] **Step 9: Commit Task 7**
+- [x] **Step 9: Commit Task 7**
 
 Run:
 
@@ -1483,6 +1499,8 @@ git commit -m "feat: add ordered patch stack merge strategy"
 
 ## Task 8: End-To-End Multi-Agent Runtime Wiring
 
+**Status:** Implemented in `4a8863a`.
+
 **Files:**
 - Modify: `src/agos/cli/cmd_execute_plan.py`
 - Modify: `src/agos/cli/main.py`
@@ -1490,7 +1508,7 @@ git commit -m "feat: add ordered patch stack merge strategy"
 - Modify: `src/agos/cli/worker_registry.py`
 - Create: `tests/integration/test_multi_agent_runtime.py`
 
-- [ ] **Step 1: Write end-to-end runtime test**
+- [x] **Step 1: Write end-to-end runtime test**
 
 Create `tests/integration/test_multi_agent_runtime.py`:
 
@@ -1553,7 +1571,7 @@ workflows:
 
 If the repo uses different fixture names, adapt only `cli_repo` and `run_cli` to the existing integration fixture names.
 
-- [ ] **Step 2: Run end-to-end test and verify RED or GREEN**
+- [x] **Step 2: Run end-to-end test and verify RED or GREEN**
 
 Run:
 
@@ -1563,7 +1581,7 @@ python -m pytest tests/integration/test_multi_agent_runtime.py -q
 
 Expected: fail if runtime CLI still misses config/runtime wiring; pass if Task 2 already completed the path.
 
-- [ ] **Step 3: Add `--json` status output**
+- [x] **Step 3: Add `--json` status output**
 
 In `cmd_execute_plan.py`, add `json_output: bool = typer.Option(False, "--json")` to `run`, `resume`, `status`, and `cancel`.
 
@@ -1589,7 +1607,7 @@ def _snapshot_json(snapshot: ExecutionRuntimeSnapshot) -> str:
     )
 ```
 
-- [ ] **Step 4: Ensure registries are CLI-bound only**
+- [x] **Step 4: Ensure registries are CLI-bound only**
 
 Verify these imports do not appear under `src/agos/core`:
 
@@ -1606,7 +1624,7 @@ src/agos/cli/worker_registry.py
 src/agos/cli/reviewer_registry.py
 ```
 
-- [ ] **Step 5: Run end-to-end verification**
+- [x] **Step 5: Run end-to-end verification**
 
 Run:
 
@@ -1617,7 +1635,7 @@ python -m ruff check src tests
 
 Expected: pass.
 
-- [ ] **Step 6: Commit Task 8**
+- [x] **Step 6: Commit Task 8**
 
 Run:
 
@@ -1630,13 +1648,15 @@ git commit -m "feat: wire end-to-end multi-agent runtime"
 
 ## Task 9: Documentation And Final Verification
 
+**Status:** Documentation state synchronized in the 2026-07-06 completion pass; full verification passed in this pass, while committing remains a separate user-controlled step.
+
 **Files:**
 - Modify: `README.md`
 - Modify: `docs/superpowers/specs/2026-06-22-agos-multi-agent-orchestration-design.md`
 - Modify: `docs/superpowers/plans/2026-06-23-agos-production-orchestration-runtime.md`
 - Modify: `docs/superpowers/plans/2026-06-23-agos-remaining-production-orchestration-gaps.md`
 
-- [ ] **Step 1: Document production config**
+- [x] **Step 1: Document production config**
 
 Add this example to `README.md`:
 
@@ -1674,7 +1694,7 @@ orchestration:
   retry_backoff_seconds: 5
 ```
 
-- [ ] **Step 2: Document merge strategies**
+- [x] **Step 2: Document merge strategies**
 
 Add this table to `README.md`:
 
@@ -1687,7 +1707,7 @@ Add this table to `README.md`:
 | `manual_merge_required` | No | Dirty paths, conflicts, missing review/test evidence, or ambiguous ordering require human action. |
 ```
 
-- [ ] **Step 3: Update design lifecycle interface**
+- [x] **Step 3: Update design lifecycle interface**
 
 In `docs/superpowers/specs/2026-06-22-agos-multi-agent-orchestration-design.md`, replace the old `ReviewerAdapter.review()` and backend sketches with:
 
@@ -1708,12 +1728,12 @@ class OrchestratorBackend(Protocol):
     def run(self, spec: OrchestrationRunSpec) -> OrchestratorRunHandle: ...
 ```
 
-- [ ] **Step 4: Mark completed plan tasks**
+- [x] **Step 4: Mark completed plan tasks**
 
-In `docs/superpowers/plans/2026-06-23-agos-production-orchestration-runtime.md`, mark tasks that have landed as completed by changing their task headings to include:
+In `docs/superpowers/plans/2026-06-23-agos-production-orchestration-runtime.md`, mark tasks that have landed as completed by adding actual implementation-status lines under each task heading, for example:
 
 ```markdown
-**Status:** Implemented in `<commit-sha>`.
+**Status:** Implemented in `4a8863a`.
 ```
 
 Use actual commit shas from:
@@ -1722,7 +1742,7 @@ Use actual commit shas from:
 git log --oneline -- docs/superpowers/plans/2026-06-23-agos-production-orchestration-runtime.md src/agos
 ```
 
-- [ ] **Step 5: Run full verification**
+- [x] **Step 5: Run full verification**
 
 Run:
 

@@ -17,3 +17,4 @@ venv/
 dist_test/
 .worktrees/
 .idea/
+.obsidian/
