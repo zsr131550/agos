@@ -18,6 +18,11 @@ def test_dashboard_static_index_is_packaged() -> None:
     assert "证据文件" in text
     assert "自我蒸馏" in text
     assert "fetchJson('/api/runs/current')" in text
+    assert "run.task?.title" in text
+    assert "run.status?.phase" in text
+    assert "row.title" in text
+    assert "ledger_verified" in text
+    assert "evidence.text" in text
 
 
 def test_dashboard_static_package_data_is_configured() -> None:

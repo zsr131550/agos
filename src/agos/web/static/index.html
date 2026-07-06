@@ -351,14 +351,16 @@
     function renderRuns() {
       const runs = asArray(state.runs);
       if (!runs.length) {
-        $('runs-list').innerHTML = '<div class="empty">暂无任务批次。</div>';
+        $('runs-list').innerHTML = '<div class="empty">???????</div>';
         return;
       }
       $('runs-list').innerHTML = runs.map((run, index) => {
-        const task = run.task || run.name || run.id || `run-${index + 1}`;
-        const status = run.status || run.state || 'unknown';
-        const active = state.current && (state.current.id === run.id || state.current.task === run.task) ? ' active' : '';
-        return `<article class="run-card${active}"><strong>${escapeHtml(task)}</strong><small>${statusBadge(status)}<br>${escapeHtml(run.created_at || run.updated_at || run.path || '')}</small></article>`;
+        const title = run.title || run.task?.title || run.id || `run-${index + 1}`;
+        const statusValue = typeof run.status === 'string' ? run.status : run.status?.state;
+        const phase = run.phase || run.status?.phase || statusValue || run.state || 'unknown';
+        const currentTaskId = state.current?.task?.id || state.current?.id;
+        const active = state.current && (state.current.id === run.id || currentTaskId === run.id || state.current.title === run.title) ? ' active' : '';
+        return `<article class="run-card${active}"><strong>${escapeHtml(title)}</strong><small>${statusBadge(phase)}<br>${escapeHtml(run.created_at || run.updated_at || run.path || '')}</small></article>`;
       }).join('');
     }
 
@@ -379,26 +381,37 @@
       const candidates = run.candidates?.candidates || run.candidates || [];
       const subtasks = run.execution?.subtasks || [];
       const checks = run.merge_gate?.checks || [];
+      const taskTitle = run.title || run.task?.title || run.task?.id || '???';
+      const phase = run.phase || run.status?.phase || run.status?.state || 'unknown';
+      const workflow = run.workflow || run.task?.workflow || run.pipeline?.workflow || '?? workflow';
+      const executionId = run.id || run.task?.id || run.execution?.plan?.id || 'n/a';
       $('summary-grid').innerHTML = [
-        ['任务', run.task || '未选择'],
-        ['状态', statusBadge(run.status || 'unknown')],
-        ['候选 / 节点 / 门禁', `${asArray(candidates).length} / ${asArray(subtasks).length} / ${asArray(checks).length}`],
-        ['Workflow', run.pipeline?.name || run.pipeline?.workflow || '默认 workflow'],
-        ['执行 ID', run.execution?.id || run.id || 'n/a'],
-        ['更新时间', run.updated_at || run.finished_at || run.started_at || 'n/a'],
+        ['??', taskTitle],
+        ['??', statusBadge(phase)],
+        ['?? / ?? / ??', `${asArray(candidates).length} / ${asArray(subtasks).length} / ${asArray(checks).length}`],
+        ['Workflow', workflow],
+        ['?? ID', executionId],
+        ['????', run.updated_at || run.finished_at || run.started_at || 'n/a'],
       ].map(([label, value]) => `<div class="metric"><span>${escapeHtml(label)}</span><strong>${typeof value === 'string' && value.includes('<span') ? value : escapeHtml(value)}</strong></div>`).join('');
     }
 
     function renderPipeline(pipeline) {
       const stages = pipeline?.stages || pipeline?.steps || pipeline?.nodes || [];
       if (!asArray(stages).length) {
-        $('pipeline-view').innerHTML = '<div class="empty">暂无 pipeline 阶段。</div>';
+        const summaryCards = [
+          ['Plan', pipeline?.workflow || pipeline?.phase || '?? workflow', pipeline?.phase || 'unknown'],
+          ['Workers', `${pipeline?.subtasks_count ?? 0} ? Subagent ??`, pipeline?.subtasks_count ? 'running' : 'pending'],
+          ['Candidates', `${pipeline?.candidates_count ?? 0} ?????`, pipeline?.candidates_count ? 'ok' : 'pending'],
+          ['Ledger', pipeline?.ledger_verified ? 'ledger.jsonl ???' : '?? ledger_verified', pipeline?.ledger_verified ? 'verified' : 'pending'],
+          ['Merge Gate', pipeline?.merge_gate_passed ? '???' : '???', pipeline?.merge_gate_passed ? 'passed' : 'pending'],
+        ];
+        $('pipeline-view').innerHTML = `<div class="grid cols-3">${summaryCards.map(([label, value, state]) => `<div class="metric"><span>${escapeHtml(label)}</span><strong>${escapeHtml(value)}</strong><br>${statusBadge(state)}</div>`).join('')}</div>`;
         return;
       }
       $('pipeline-view').innerHTML = asArray(stages).map((stage, index) => `
         <div class="step">
           <span class="dot"></span>
-          <div><strong>${escapeHtml(labelOf(stage, `阶段 ${index + 1}`))}</strong><div class="muted">${escapeHtml(stage.description || stage.message || stage.detail || '')}</div></div>
+          <div><strong>${escapeHtml(labelOf(stage, `?? ${index + 1}`))}</strong><div class="muted">${escapeHtml(stage.description || stage.message || stage.detail || '')}</div></div>
           ${statusBadge(stage.status || stage.state || 'pending')}
         </div>`).join('');
     }
@@ -406,11 +419,17 @@
     function renderSubagents(execution) {
       const rows = asArray(execution?.subtasks);
       if (!rows.length) {
-        $('subagents-view').innerHTML = '<div class="empty">暂无 Subagent 节点。</div>';
+        $('subagents-view').innerHTML = '<div class="empty">?? Subagent ???</div>';
         return;
       }
-      $('subagents-view').innerHTML = `<table><thead><tr><th>节点</th><th>任务</th><th>状态</th><th>输出</th></tr></thead><tbody>${rows.map((row, index) => `
-        <tr><td>${escapeHtml(labelOf(row, `subagent-${index + 1}`))}</td><td>${escapeHtml(row.task || row.prompt || row.goal || '')}</td><td>${statusBadge(row.status || row.state)}</td><td>${escapeHtml(row.output || row.result || row.summary || '')}</td></tr>`).join('')}</tbody></table>`;
+      $('subagents-view').innerHTML = `<table><thead><tr><th>??</th><th>??</th><th>??</th><th>Worker / ??</th></tr></thead><tbody>${rows.map((row, index) => {
+        const node = row.id || row.name || row.worker?.role || row.worker?.adapter || `subagent-${index + 1}`;
+        const taskValue = typeof row.task === 'string' ? row.task : row.task?.title || row.task?.id;
+        const taskTitle = row.title || taskValue || `??? ${index + 1}`;
+        const intent = row.intent ? `<br><small class="muted">${escapeHtml(row.intent)}</small>` : '';
+        const worker = [row.worker?.adapter, row.worker?.role, row.workspace_ref].filter(Boolean).join(' / ') || row.output || row.result || row.summary || 'n/a';
+        return `<tr><td>${escapeHtml(node)}</td><td>${escapeHtml(taskTitle)}${intent}</td><td>${statusBadge(row.phase || row.status || row.state)}</td><td>${escapeHtml(worker)}</td></tr>`;
+      }).join('')}</tbody></table>`;
     }
 
     function renderCandidates(candidates) {
@@ -469,7 +488,7 @@
           $('evidence-viewer').textContent = `正在加载 ${ref} ...`;
           try {
             const evidence = await fetchJson(`/api/runs/current/evidence?ref=${encodeURIComponent(ref)}`);
-            $('evidence-viewer').textContent = typeof evidence === 'string' ? evidence : JSON.stringify(evidence, null, 2);
+            $('evidence-viewer').textContent = typeof evidence === 'string' ? evidence : (evidence.text || JSON.stringify(evidence, null, 2));
           } catch (error) {
             $('evidence-viewer').textContent = `读取证据失败：${error.message}`;
           }
