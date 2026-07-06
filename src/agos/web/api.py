@@ -9,14 +9,14 @@ from typing import Any
 from pydantic import BaseModel
 
 from agos.core.config import load_config
+from agos.core.execution import ArbiterDecision, CandidatePatch, CandidateTestRun, ExecutionSubtask
 from agos.core.execution_store import ExecutionStore
 from agos.core.ledger import Ledger
 from agos.core.merge_gate import verify_merge_gate
 from agos.core.repo import AgosPaths, git_head, repo_paths
-from agos.core.review_store import ReviewStore
 from agos.core.status import load_status
 from agos.core.task import load_task
-from agos.web.evidence import EvidenceResolutionError, read_evidence_text
+from agos.web.evidence import EvidenceResolutionError, read_evidence_text, resolve_evidence_ref
 
 
 class DashboardApiError(RuntimeError):
@@ -226,44 +226,69 @@ def execution_payload(repo_root: Path) -> dict[str, object]:
 
     subtask_dir = store.execution_dir / "subtasks"
     if subtask_dir.exists():
-        subtasks = [
-            store.read_subtask(path.stem).model_dump(mode="json")
-            for path in sorted(subtask_dir.glob("*.json"))
-        ]
+        subtask_rows, subtask_errors = _read_model_dir(paths, subtask_dir, ExecutionSubtask)
+        subtasks = [*subtask_rows, *subtask_errors]
 
     return {
         "ok": True,
         "plan_present": plan is not None,
         "plan": plan,
         "subtasks": subtasks,
-        "bundle_decisions": _read_json_dir(store.execution_dir / "bundle_decisions"),
-        "merge_previews": _read_json_dir(store.execution_dir / "merge_previews"),
+        "bundle_decisions": _read_json_dir(paths, store.execution_dir / "bundle_decisions"),
+        "merge_previews": _read_json_dir(paths, store.execution_dir / "merge_previews"),
     }
 
 
 def candidates_payload(repo_root: Path) -> dict[str, object]:
     paths = _require_initialized(repo_root)
-    store = ExecutionStore(paths)
     rows: list[dict[str, Any]] = []
-    for candidate in store.read_candidates():
+    test_rows, test_errors = _read_model_dir(
+        paths, paths.current_task / "execution" / "tests", CandidateTestRun
+    )
+    decision_rows, decision_errors = _read_model_dir(
+        paths, paths.current_task / "execution" / "decisions", ArbiterDecision
+    )
+    for item in _read_json_dir(paths, paths.current_task / "execution" / "candidates"):
+        if "_error" in item:
+            rows.append(item)
+            continue
+        try:
+            candidate = CandidatePatch.model_validate(item)
+        except Exception as exc:
+            rows.append({**item, "_error": f"invalid candidate metadata: {exc}"})
+            continue
         row = candidate.model_dump(mode="json")
-        row["tests"] = [run.model_dump(mode="json") for run in store.read_test_runs(candidate.id)]
+        row["tests"] = [run for run in test_rows if run.get("candidate_id") == candidate.id]
         row["decisions"] = [
-            decision.model_dump(mode="json") for decision in store.read_decisions(candidate.id)
+            decision for decision in decision_rows if decision.get("candidate_id") == candidate.id
         ]
         try:
-            row["patch_exists"] = store.patch_path(candidate.patch_ref).is_file()
+            resolve_evidence_ref(paths, candidate.patch_ref)
+            row["patch_exists"] = True
         except Exception:
             row["patch_exists"] = False
         rows.append(row)
-    return {"ok": True, "count": len(rows), "candidates": rows}
+    return {
+        "ok": True,
+        "count": len(rows),
+        "candidates": rows,
+        "test_errors": test_errors,
+        "decision_errors": decision_errors,
+    }
 
 
 def reviews_payload(repo_root: Path) -> dict[str, object]:
     paths = _require_initialized(repo_root)
-    store = ReviewStore(paths)
-    reports = [report.model_dump(mode="json") for report in store.read_reports()]
-    packets = [_packet_summary(packet) for packet in _read_json_dir(paths.reviews, "*/packet.json")]
+    reports = [
+        report
+        for report in _read_json_dir(paths, paths.reviews, "*/findings.json")
+        if "_error" not in report
+    ]
+    packets = [
+        _packet_summary(packet)
+        for packet in _read_json_dir(paths, paths.reviews, "*/packet.json")
+        if "_error" not in packet
+    ]
     return {"ok": True, "reports": reports, "packets": packets}
 
 
@@ -309,7 +334,7 @@ def _load_current_task(paths: AgosPaths):
 
 def _merge_gate_payload(paths: AgosPaths) -> dict[str, object]:
     try:
-        result = verify_merge_gate(paths, allow_missing_review=True)
+        result = verify_merge_gate(paths)
     except Exception as exc:
         return {"ok": False, "error": str(exc), "passed": False, "checks": []}
     payload = result.model_dump(mode="json")
@@ -333,14 +358,86 @@ def _redact(value: Any, *, key: str | None = None) -> Any:
     return value
 
 
-def _read_json_dir(directory: Path, pattern: str = "*.json") -> list[dict[str, Any]]:
+def _read_json_dir(paths: AgosPaths, directory: Path, pattern: str = "*.json") -> list[dict[str, Any]]:
     if not directory.exists():
         return []
+    if _safe_task_path(paths, directory) is None:
+        return [
+            {
+                "path": _task_display_path(paths, directory),
+                "_error": "path escapes current task",
+            }
+        ]
     rows: list[dict[str, Any]] = []
     for path in sorted(directory.glob(pattern)):
-        if path.is_file():
-            rows.append(json.loads(path.read_text(encoding="utf-8")))
+        if not path.is_file():
+            continue
+        safe_path = _safe_task_path(paths, path)
+        display_path = _task_display_path(paths, path)
+        if safe_path is None:
+            rows.append({"path": display_path, "_error": "path escapes current task"})
+            continue
+        try:
+            rows.append(json.loads(safe_path.read_text(encoding="utf-8")))
+        except Exception as exc:
+            rows.append({"path": display_path, "_error": str(exc)})
     return rows
+
+
+def _read_model_dir(
+    paths: AgosPaths,
+    directory: Path,
+    model_type: type[BaseModel],
+    pattern: str = "*.json",
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    if not directory.exists():
+        return [], []
+    if _safe_task_path(paths, directory) is None:
+        return [], [
+            {
+                "path": _task_display_path(paths, directory),
+                "_error": "path escapes current task",
+            }
+        ]
+    rows: list[dict[str, Any]] = []
+    errors: list[dict[str, Any]] = []
+    for path in sorted(directory.glob(pattern)):
+        if not path.is_file():
+            continue
+        safe_path = _safe_task_path(paths, path)
+        display_path = _task_display_path(paths, path)
+        if safe_path is None:
+            errors.append({"path": display_path, "_error": "path escapes current task"})
+            continue
+        try:
+            payload = json.loads(safe_path.read_text(encoding="utf-8"))
+            rows.append(_model_row(model_type.model_validate(payload)))
+        except Exception as exc:
+            errors.append({"path": display_path, "_error": str(exc)})
+    return rows, errors
+
+
+def _safe_task_path(paths: AgosPaths, path: Path) -> Path | None:
+    try:
+        resolved = path.resolve()
+        resolved.relative_to(paths.current_task.resolve())
+    except (OSError, ValueError):
+        return None
+    return resolved
+
+
+def _task_display_path(paths: AgosPaths, path: Path) -> str:
+    try:
+        return path.resolve().relative_to(paths.current_task.resolve()).as_posix()
+    except (OSError, ValueError):
+        try:
+            return path.relative_to(paths.current_task).as_posix()
+        except ValueError:
+            return path.name
+
+
+def _model_row(value: BaseModel) -> dict[str, Any]:
+    return value.model_dump(mode="json")
 
 
 def _packet_summary(packet: dict[str, Any]) -> dict[str, Any]:

@@ -135,7 +135,8 @@ def serve_dashboard_forever(
     """Serve the AGOS dashboard until interrupted and close the server on exit."""
 
     server = create_dashboard_server(repo_root, host=host, port=port)
-    url = f"http://{host}:{server.server_port}"
+    open_host = "127.0.0.1" if host in {"0.0.0.0", "::"} else host
+    url = f"http://{open_host}:{server.server_port}"
     print(f"AGOS dashboard: {url}", flush=True)
     if open_browser:
         webbrowser.open(url)

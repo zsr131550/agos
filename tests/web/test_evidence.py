@@ -1,5 +1,7 @@
 ﻿from __future__ import annotations
 
+from dataclasses import replace
+
 import pytest
 
 from agos.core.repo import repo_paths
@@ -98,3 +100,15 @@ def test_rejects_symlink_escape_from_evidence_dir(tmp_repo) -> None:
 
     with pytest.raises(EvidenceResolutionError):
         resolve_evidence_ref(paths, "gates/escape.txt")
+
+
+def test_rejects_evidence_root_outside_current_task(tmp_repo) -> None:
+    paths = repo_paths(tmp_repo)
+    outside_evidence = tmp_repo / "outside-evidence"
+    target = outside_evidence / "gates" / "leak.log"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("secret\n", encoding="utf-8")
+    unsafe_paths = replace(paths, evidence=outside_evidence)
+
+    with pytest.raises(EvidenceResolutionError):
+        resolve_evidence_ref(unsafe_paths, "gates/leak.log")

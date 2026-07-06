@@ -28,7 +28,9 @@ from agos.web.api import (
     DashboardApiError,
     config_payload,
     current_run_payload,
+    candidates_payload,
     error_payload,
+    execution_payload,
     evidence_payload,
     health_payload,
     runs_payload,
@@ -86,6 +88,108 @@ def test_runs_and_current_run_payloads_include_pipeline_state(dashboard_repo: Pa
     assert current["candidates"]["candidates"][0]["decisions"][0]["decision"] == "accepted"
     assert current["reviews"]["packets"][0]["review_id"] == "review-01"
     assert current["reviews"]["reports"][0]["review_id"] == "review-01"
+
+
+def test_current_run_payload_uses_strict_merge_gate_for_missing_candidate_review(
+    dashboard_repo: Path,
+) -> None:
+    paths = repo_paths(dashboard_repo)
+    store = ExecutionStore(paths)
+    candidate = store.read_candidates()[0]
+    Ledger(paths.ledger).append(
+        {
+            "type": "candidate_patch_created",
+            "task_id": candidate.task_id,
+            "subtask_id": candidate.subtask_id,
+            "candidate_id": candidate.id,
+            "patch_ref": candidate.patch_ref,
+            "patch_sha256": candidate.patch_sha256,
+        }
+    )
+    store.write_test_run(
+        CandidateTestRun(
+            id="test-patch-applies",
+            candidate_id=candidate.id,
+            gate_id="patch_applies",
+            command="git apply --check",
+            state="passed",
+            evidence_ref="evidence/gates/patch_applies.log",
+            workspace_ref=candidate.workspace_ref,
+        )
+    )
+
+    payload = current_run_payload(dashboard_repo)
+
+    assert payload["merge_gate"]["passed"] is False
+    candidate_evidence = next(
+        check for check in payload["merge_gate"]["checks"] if check["name"] == "candidate_evidence"
+    )
+    assert candidate_evidence["state"] == "block"
+    assert any("completed clean" in detail for detail in candidate_evidence["details"])
+
+
+def test_candidates_payload_rejects_patch_ref_path_escape(dashboard_repo: Path) -> None:
+    paths = repo_paths(dashboard_repo)
+    store = ExecutionStore(paths)
+    candidate = store.read_candidates()[0]
+    outside_patch = paths.tasks / "outside.patch"
+    outside_patch.parent.mkdir(parents=True, exist_ok=True)
+    outside_patch.write_text("diff --git a/secret b/secret\n", encoding="utf-8")
+    candidate.patch_ref = "evidence/../../outside.patch"
+    store.write_candidate(candidate)
+
+    payload = candidates_payload(dashboard_repo)
+
+    assert payload["candidates"][0]["patch_exists"] is False
+
+
+def test_execution_payload_reports_bad_json_rows_without_failing(dashboard_repo: Path) -> None:
+    paths = repo_paths(dashboard_repo)
+    good = paths.current_task / "execution" / "bundle_decisions" / "good.json"
+    bad = paths.current_task / "execution" / "bundle_decisions" / "bad.json"
+    good.parent.mkdir(parents=True, exist_ok=True)
+    good.write_text('{"id":"good"}', encoding="utf-8")
+    bad.write_text('{', encoding="utf-8")
+
+    payload = execution_payload(dashboard_repo)
+
+    assert {row.get("id") for row in payload["bundle_decisions"]} >= {"good"}
+    errors = [row for row in payload["bundle_decisions"] if row.get("_error")]
+    assert errors
+    assert errors[0]["path"] == "execution/bundle_decisions/bad.json"
+
+
+def test_execution_payload_reports_schema_invalid_subtasks_without_failing(
+    dashboard_repo: Path,
+) -> None:
+    paths = repo_paths(dashboard_repo)
+    bad = paths.current_task / "execution" / "subtasks" / "bad.json"
+    bad.parent.mkdir(parents=True, exist_ok=True)
+    bad.write_text('{"id":"bad"}', encoding="utf-8")
+
+    payload = execution_payload(dashboard_repo)
+
+    errors = [row for row in payload["subtasks"] if row.get("_error")]
+    assert errors
+    assert errors[0]["path"] == "execution/subtasks/bad.json"
+
+
+def test_candidates_payload_reports_schema_invalid_tests_and_decisions_without_failing(
+    dashboard_repo: Path,
+) -> None:
+    paths = repo_paths(dashboard_repo)
+    bad_test = paths.current_task / "execution" / "tests" / "bad.json"
+    bad_decision = paths.current_task / "execution" / "decisions" / "bad.json"
+    bad_test.parent.mkdir(parents=True, exist_ok=True)
+    bad_decision.parent.mkdir(parents=True, exist_ok=True)
+    bad_test.write_text('{"id":"bad-test"}', encoding="utf-8")
+    bad_decision.write_text('{"id":"bad-decision"}', encoding="utf-8")
+
+    payload = candidates_payload(dashboard_repo)
+
+    assert payload["count"] == 1
+    assert payload["test_errors"][0]["path"] == "execution/tests/bad.json"
+    assert payload["decision_errors"][0]["path"] == "execution/decisions/bad.json"
 
 
 def test_evidence_payload_reads_safe_evidence_ref(dashboard_repo: Path) -> None:

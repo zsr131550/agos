@@ -27,6 +27,11 @@ def test_dashboard_static_index_is_packaged() -> None:
     assert "html: statusBadge(phase)" in text
     assert "data?.error?.message" in text
     assert "errorMessage(data" in text
+    assert "error.hint" in text
+    assert "agos init" in text
+    assert "agos start --title" in text
+    assert "fetchJson('/api/health')" in text
+    assert "Promise.all([fetchJson('/api/health'), fetchJson('/api/runs')])" not in text
     assert "evidence.text || JSON.stringify" in text
     assert "暂无任务批次。" in text
     assert "候选 / 节点 / 门禁" in text

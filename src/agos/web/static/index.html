@@ -287,10 +287,16 @@
       let data = null;
       try { data = text ? JSON.parse(text) : null; } catch (error) { data = { raw: text }; }
       if (!response.ok) {
-        throw new Error(`${path}: ${errorMessage(data, `HTTP ${response.status}`)}`);
+        const error = new Error(`${path}: ${errorMessage(data, `HTTP ${response.status}`)}`);
+        error.code = data?.error?.code;
+        error.hint = data?.error?.hint;
+        throw error;
       }
       if (data && data.ok === false) {
-        throw new Error(`${path}: ${errorMessage(data, '业务请求失败')}`);
+        const error = new Error(`${path}: ${errorMessage(data, '业务请求失败')}`);
+        error.code = data?.error?.code;
+        error.hint = data?.error?.hint;
+        throw error;
       }
       return data;
     }
@@ -325,14 +331,24 @@
       state.loading = true;
       renderError(null);
       try {
-        const [health, runs] = await Promise.all([fetchJson('/api/health'), fetchJson('/api/runs')]);
-        state.health = health;
-        state.runs = runs.runs || runs.items || runs || [];
+        state.health = await fetchJson('/api/health');
         renderHealth();
+      } catch (error) {
+        state.health = { ok: false, status: 'error' };
+        renderHealth();
+        renderError(error);
+      }
+      try {
+        const runs = await fetchJson('/api/runs');
+        state.runs = runs.runs || runs.items || runs || [];
         renderRuns();
         await refreshSelected();
       } catch (error) {
         state.error = error;
+        state.runs = [];
+        state.current = null;
+        renderRuns();
+        renderDashboard();
         renderError(error);
       } finally {
         state.loading = false;
@@ -349,11 +365,20 @@
       const box = $('error-box');
       if (!error) { box.classList.remove('show'); box.textContent = ''; return; }
       box.classList.add('show');
-      box.textContent = `控制台读取失败：${error.message}`;
+      const setupHint = error.code === 'not_initialized'
+        ? '请先在仓库根目录运行 agos init。'
+        : error.code === 'active_task_missing'
+          ? '请先运行 agos start --title "你的任务标题" 创建或恢复当前任务。'
+          : null;
+      box.textContent = [
+        `控制台读取失败：${error.message}`,
+        error.hint ? `建议：${error.hint}` : null,
+        setupHint,
+      ].filter(Boolean).join('\n');
     }
 
     function renderHealth() {
-      const status = state.health?.status || state.health?.ok || 'unknown';
+      const status = state.health?.status || (state.health?.ok ? 'connected' : 'error') || 'unknown';
       $('health-line').innerHTML = `API 状态：${statusBadge(status)}`;
     }
 

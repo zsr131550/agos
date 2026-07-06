@@ -52,8 +52,13 @@ def resolve_evidence_ref(paths: AgosPaths, ref: str) -> Path:
 
     resolved = candidate.resolve()
     base_resolved = base.resolve()
+    task_resolved = paths.current_task.resolve()
+    if not _is_relative_to(base_resolved, task_resolved):
+        raise EvidenceResolutionError("evidence root escapes current task")
     if not _is_relative_to(resolved, base_resolved):
         raise EvidenceResolutionError("evidence reference escapes allowed root")
+    if not _is_relative_to(resolved, task_resolved):
+        raise EvidenceResolutionError("evidence reference escapes current task")
     if not resolved.is_file():
         raise EvidenceResolutionError(f"evidence reference does not exist: {ref}")
     return resolved
