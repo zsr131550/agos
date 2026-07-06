@@ -10,12 +10,27 @@ def test_resolves_task_relative_evidence_ref(tmp_repo) -> None:
     paths = repo_paths(tmp_repo)
     target = paths.evidence / "gates" / "tests_pass.log"
     target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text("gate ok\n", encoding="utf-8")
+    target.write_bytes(b"gate ok\n")
 
     resolved = resolve_evidence_ref(paths, "evidence/gates/tests_pass.log")
 
     assert resolved == target.resolve()
-    assert read_evidence_text(paths, "evidence/gates/tests_pass.log")["text"] == "gate ok\n"
+    payload = read_evidence_text(paths, "evidence/gates/tests_pass.log")
+    assert payload["text"] == "gate ok\n"
+    assert payload["path"] == "evidence/gates/tests_pass.log"
+    assert ":" not in payload["path"]
+    assert not payload["path"].startswith(("/", "\\"))
+
+
+def test_read_evidence_text_preserves_original_newlines(tmp_repo) -> None:
+    paths = repo_paths(tmp_repo)
+    target = paths.evidence / "gates" / "windows.log"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_bytes(b"a\r\nb\r")
+
+    payload = read_evidence_text(paths, "evidence/gates/windows.log")
+
+    assert payload["text"] == "a\r\nb\r"
 
 
 def test_resolves_bare_evidence_ref_inside_evidence_dir(tmp_repo) -> None:
@@ -34,8 +49,11 @@ def test_resolves_bare_evidence_ref_inside_evidence_dir(tmp_repo) -> None:
     [
         "../README.md",
         "evidence/../../README.md",
+        r"evidence\..\..\README.md",
         "/tmp/secret.txt",
         "C:/Users/ZR/.ssh/id_rsa",
+        r"\\server\share\x.txt",
+        r"\absolute\rooted\x.txt",
         "reviews/../task.yaml",
         "",
     ],
@@ -54,3 +72,18 @@ def test_rejects_unknown_task_relative_root(tmp_repo) -> None:
 
     with pytest.raises(EvidenceResolutionError):
         resolve_evidence_ref(paths, "private.txt")
+
+
+def test_rejects_symlink_escape_from_evidence_dir(tmp_repo) -> None:
+    paths = repo_paths(tmp_repo)
+    outside = tmp_repo / "outside.txt"
+    outside.write_text("secret\n", encoding="utf-8")
+    link = paths.evidence / "gates" / "escape.txt"
+    link.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        link.symlink_to(outside)
+    except OSError as exc:
+        pytest.skip(f"symlink creation unavailable: {exc}")
+
+    with pytest.raises(EvidenceResolutionError):
+        resolve_evidence_ref(paths, "gates/escape.txt")

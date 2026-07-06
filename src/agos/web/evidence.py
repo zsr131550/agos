@@ -81,8 +81,8 @@ def read_evidence_text(
 
     return {
         "ref": ref,
-        "path": str(resolved),
-        "text": data.decode("utf-8", errors="replace").replace("\r\n", "\n").replace("\r", "\n"),
+        "path": resolved.relative_to(paths.current_task.resolve()).as_posix(),
+        "text": data.decode("utf-8", errors="replace"),
         "truncated": truncated,
         "size_bytes": size_bytes,
     }
