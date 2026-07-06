@@ -351,7 +351,7 @@
     function renderRuns() {
       const runs = asArray(state.runs);
       if (!runs.length) {
-        $('runs-list').innerHTML = '<div class="empty">???????</div>';
+        $('runs-list').innerHTML = '<div class="empty">暂无任务批次。</div>';
         return;
       }
       $('runs-list').innerHTML = runs.map((run, index) => {
@@ -381,17 +381,17 @@
       const candidates = run.candidates?.candidates || run.candidates || [];
       const subtasks = run.execution?.subtasks || [];
       const checks = run.merge_gate?.checks || [];
-      const taskTitle = run.title || run.task?.title || run.task?.id || '???';
+      const taskTitle = run.title || run.task?.title || run.task?.id || '未选择';
       const phase = run.phase || run.status?.phase || run.status?.state || 'unknown';
-      const workflow = run.workflow || run.task?.workflow || run.pipeline?.workflow || '?? workflow';
+      const workflow = run.workflow || run.task?.workflow || run.pipeline?.workflow || '默认 workflow';
       const executionId = run.id || run.task?.id || run.execution?.plan?.id || 'n/a';
       $('summary-grid').innerHTML = [
-        ['??', taskTitle],
-        ['??', statusBadge(phase)],
-        ['?? / ?? / ??', `${asArray(candidates).length} / ${asArray(subtasks).length} / ${asArray(checks).length}`],
+        ['任务', taskTitle],
+        ['状态', statusBadge(phase)],
+        ['候选 / 节点 / 门禁', `${asArray(candidates).length} / ${asArray(subtasks).length} / ${asArray(checks).length}`],
         ['Workflow', workflow],
-        ['?? ID', executionId],
-        ['????', run.updated_at || run.finished_at || run.started_at || 'n/a'],
+        ['执行 ID', executionId],
+        ['更新时间', run.updated_at || run.finished_at || run.started_at || 'n/a'],
       ].map(([label, value]) => `<div class="metric"><span>${escapeHtml(label)}</span><strong>${typeof value === 'string' && value.includes('<span') ? value : escapeHtml(value)}</strong></div>`).join('');
     }
 
@@ -399,11 +399,11 @@
       const stages = pipeline?.stages || pipeline?.steps || pipeline?.nodes || [];
       if (!asArray(stages).length) {
         const summaryCards = [
-          ['Plan', pipeline?.workflow || pipeline?.phase || '?? workflow', pipeline?.phase || 'unknown'],
-          ['Workers', `${pipeline?.subtasks_count ?? 0} ? Subagent ??`, pipeline?.subtasks_count ? 'running' : 'pending'],
-          ['Candidates', `${pipeline?.candidates_count ?? 0} ?????`, pipeline?.candidates_count ? 'ok' : 'pending'],
-          ['Ledger', pipeline?.ledger_verified ? 'ledger.jsonl ???' : '?? ledger_verified', pipeline?.ledger_verified ? 'verified' : 'pending'],
-          ['Merge Gate', pipeline?.merge_gate_passed ? '???' : '???', pipeline?.merge_gate_passed ? 'passed' : 'pending'],
+          ['Plan', pipeline?.workflow || pipeline?.phase || '默认 workflow', pipeline?.phase || 'unknown'],
+          ['Workers', `${pipeline?.subtasks_count ?? 0} 个 Subagent 节点`, pipeline?.subtasks_count ? 'running' : 'pending'],
+          ['Candidates', `${pipeline?.candidates_count ?? 0} 个候选方案`, pipeline?.candidates_count ? 'ok' : 'pending'],
+          ['Ledger', pipeline?.ledger_verified ? 'ledger.jsonl 已验证' : '等待 ledger_verified', pipeline?.ledger_verified ? 'verified' : 'pending'],
+          ['Merge Gate', pipeline?.merge_gate_passed ? '已通过' : '未通过', pipeline?.merge_gate_passed ? 'passed' : 'pending'],
         ];
         $('pipeline-view').innerHTML = `<div class="grid cols-3">${summaryCards.map(([label, value, state]) => `<div class="metric"><span>${escapeHtml(label)}</span><strong>${escapeHtml(value)}</strong><br>${statusBadge(state)}</div>`).join('')}</div>`;
         return;
@@ -411,7 +411,7 @@
       $('pipeline-view').innerHTML = asArray(stages).map((stage, index) => `
         <div class="step">
           <span class="dot"></span>
-          <div><strong>${escapeHtml(labelOf(stage, `?? ${index + 1}`))}</strong><div class="muted">${escapeHtml(stage.description || stage.message || stage.detail || '')}</div></div>
+          <div><strong>${escapeHtml(labelOf(stage, `阶段 ${index + 1}`))}</strong><div class="muted">${escapeHtml(stage.description || stage.message || stage.detail || '')}</div></div>
           ${statusBadge(stage.status || stage.state || 'pending')}
         </div>`).join('');
     }
@@ -419,13 +419,13 @@
     function renderSubagents(execution) {
       const rows = asArray(execution?.subtasks);
       if (!rows.length) {
-        $('subagents-view').innerHTML = '<div class="empty">?? Subagent ???</div>';
+        $('subagents-view').innerHTML = '<div class="empty">暂无 Subagent 节点。</div>';
         return;
       }
-      $('subagents-view').innerHTML = `<table><thead><tr><th>??</th><th>??</th><th>??</th><th>Worker / ??</th></tr></thead><tbody>${rows.map((row, index) => {
+      $('subagents-view').innerHTML = `<table><thead><tr><th>节点</th><th>任务</th><th>状态</th><th>Worker / 输出</th></tr></thead><tbody>${rows.map((row, index) => {
         const node = row.id || row.name || row.worker?.role || row.worker?.adapter || `subagent-${index + 1}`;
         const taskValue = typeof row.task === 'string' ? row.task : row.task?.title || row.task?.id;
-        const taskTitle = row.title || taskValue || `??? ${index + 1}`;
+        const taskTitle = row.title || taskValue || `节点 ${index + 1}`;
         const intent = row.intent ? `<br><small class="muted">${escapeHtml(row.intent)}</small>` : '';
         const worker = [row.worker?.adapter, row.worker?.role, row.workspace_ref].filter(Boolean).join(' / ') || row.output || row.result || row.summary || 'n/a';
         return `<tr><td>${escapeHtml(node)}</td><td>${escapeHtml(taskTitle)}${intent}</td><td>${statusBadge(row.phase || row.status || row.state)}</td><td>${escapeHtml(worker)}</td></tr>`;

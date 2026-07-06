@@ -23,6 +23,19 @@ def test_dashboard_static_index_is_packaged() -> None:
     assert "row.title" in text
     assert "ledger_verified" in text
     assert "evidence.text" in text
+    assert "暂无任务批次。" in text
+    assert "候选 / 节点 / 门禁" in text
+    assert "执行 ID" in text
+    assert "更新时间" in text
+    assert "暂无 Subagent 节点。" in text
+    assert "Worker / 输出" in text
+    assert "`阶段 ${index + 1}`" in text
+    assert "`节点 ${index + 1}`" in text
+    assert "???????" not in text
+    assert "?? / ?? / ??" not in text
+    assert "?? Subagent ???" not in text
+    assert "Worker / ??" not in text
+    assert "`?? ${index + 1}`" not in text
 
 
 def test_dashboard_static_package_data_is_configured() -> None:
