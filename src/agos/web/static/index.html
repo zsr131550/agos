@@ -4,11 +4,490 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>AGOS 控制台</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --bg: #f4f7fb;
+      --panel: #ffffff;
+      --panel-soft: #f8fafc;
+      --text: #172033;
+      --muted: #64748b;
+      --line: #dbe4ef;
+      --brand: #2563eb;
+      --brand-soft: #dbeafe;
+      --ok: #15803d;
+      --warn: #b45309;
+      --bad: #b91c1c;
+      --shadow: 0 18px 45px rgba(15, 23, 42, 0.08);
+      font-family: "Inter", "Segoe UI", "PingFang SC", "Microsoft YaHei", Arial, sans-serif;
+    }
+
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      background: radial-gradient(circle at top left, #e0f2fe 0, transparent 32rem), var(--bg);
+      color: var(--text);
+    }
+
+    header {
+      padding: 28px clamp(18px, 4vw, 48px) 18px;
+      border-bottom: 1px solid rgba(148, 163, 184, 0.28);
+      background: rgba(255, 255, 255, 0.78);
+      backdrop-filter: blur(14px);
+      position: sticky;
+      top: 0;
+      z-index: 10;
+    }
+
+    .topbar {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 18px;
+    }
+
+    h1, h2, h3 { margin: 0; }
+    h1 { font-size: clamp(28px, 4vw, 42px); letter-spacing: -0.04em; }
+    .subtitle { margin: 10px 0 0; color: var(--muted); line-height: 1.7; }
+
+    .actions { display: flex; flex-wrap: wrap; gap: 10px; justify-content: flex-end; }
+    button {
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      padding: 9px 14px;
+      background: var(--panel);
+      color: var(--text);
+      font-weight: 700;
+      cursor: pointer;
+      box-shadow: 0 4px 14px rgba(15, 23, 42, 0.06);
+    }
+    button.primary { background: var(--brand); border-color: var(--brand); color: #fff; }
+    button:disabled { cursor: not-allowed; opacity: 0.45; box-shadow: none; }
+
+    main#app {
+      display: grid;
+      grid-template-columns: minmax(260px, 340px) minmax(0, 1fr);
+      gap: 22px;
+      padding: 24px clamp(18px, 4vw, 48px) 42px;
+    }
+
+    aside, section.panel {
+      background: rgba(255, 255, 255, 0.92);
+      border: 1px solid rgba(219, 228, 239, 0.9);
+      border-radius: 22px;
+      box-shadow: var(--shadow);
+    }
+
+    aside { align-self: start; position: sticky; top: 132px; overflow: hidden; }
+    .panel-head { padding: 18px 18px 12px; border-bottom: 1px solid var(--line); }
+    .panel-head p { margin: 6px 0 0; color: var(--muted); font-size: 13px; }
+    .run-list { display: grid; gap: 10px; padding: 14px; max-height: calc(100vh - 230px); overflow: auto; }
+    .run-card {
+      border: 1px solid var(--line);
+      border-radius: 16px;
+      padding: 12px;
+      background: var(--panel-soft);
+    }
+    .run-card.active { border-color: var(--brand); background: var(--brand-soft); }
+    .run-card strong { display: block; margin-bottom: 6px; }
+    .run-card small { color: var(--muted); line-height: 1.5; }
+
+    .detail { display: grid; gap: 18px; min-width: 0; }
+    section.panel { padding: 18px; }
+    .section-title { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 14px; }
+    .section-title p { margin: 5px 0 0; color: var(--muted); font-size: 13px; }
+
+    .error-box {
+      display: none;
+      border: 1px solid #fecaca;
+      background: #fff1f2;
+      color: var(--bad);
+      border-radius: 16px;
+      padding: 14px 16px;
+      white-space: pre-wrap;
+    }
+    .error-box.show { display: block; }
+
+    .grid { display: grid; gap: 12px; }
+    .grid.cols-2 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .grid.cols-3 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+    .metric { background: var(--panel-soft); border: 1px solid var(--line); border-radius: 16px; padding: 13px; }
+    .metric span { display: block; color: var(--muted); font-size: 12px; margin-bottom: 6px; }
+    .metric strong { font-size: 18px; overflow-wrap: anywhere; }
+
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      border-radius: 999px;
+      padding: 5px 10px;
+      font-size: 12px;
+      font-weight: 800;
+      background: #e2e8f0;
+      color: #334155;
+      white-space: nowrap;
+    }
+    .badge.ok { background: #dcfce7; color: var(--ok); }
+    .badge.warn { background: #fef3c7; color: var(--warn); }
+    .badge.bad { background: #fee2e2; color: var(--bad); }
+    .badge.brand { background: var(--brand-soft); color: var(--brand); }
+
+    table { width: 100%; border-collapse: collapse; font-size: 14px; }
+    th, td { text-align: left; padding: 11px 10px; border-bottom: 1px solid var(--line); vertical-align: top; }
+    th { color: var(--muted); font-size: 12px; letter-spacing: 0.04em; text-transform: uppercase; }
+    td { overflow-wrap: anywhere; }
+
+    .timeline { display: grid; gap: 10px; }
+    .step {
+      display: grid;
+      grid-template-columns: auto minmax(0, 1fr) auto;
+      gap: 12px;
+      align-items: start;
+      padding: 12px;
+      border: 1px solid var(--line);
+      border-radius: 16px;
+      background: var(--panel-soft);
+    }
+    .dot { width: 12px; height: 12px; margin-top: 4px; border-radius: 999px; background: var(--brand); box-shadow: 0 0 0 5px var(--brand-soft); }
+    .muted { color: var(--muted); }
+    .empty { padding: 20px; text-align: center; color: var(--muted); border: 1px dashed var(--line); border-radius: 16px; }
+
+    .evidence-layout { display: grid; grid-template-columns: minmax(220px, 320px) minmax(0, 1fr); gap: 14px; }
+    .evidence-list { display: grid; gap: 8px; align-content: start; }
+    .evidence-ref {
+      width: 100%; text-align: left; border-radius: 14px; background: var(--panel-soft); box-shadow: none;
+    }
+    pre {
+      margin: 0;
+      min-height: 220px;
+      max-height: 460px;
+      overflow: auto;
+      padding: 14px;
+      border-radius: 16px;
+      border: 1px solid #0f172a;
+      background: #0b1220;
+      color: #dbeafe;
+      font-size: 12px;
+      line-height: 1.55;
+      white-space: pre-wrap;
+    }
+
+    @media (max-width: 980px) {
+      header { position: static; }
+      main#app { grid-template-columns: 1fr; }
+      aside { position: static; }
+      .run-list { max-height: none; }
+      .grid.cols-2, .grid.cols-3, .evidence-layout { grid-template-columns: 1fr; }
+      .topbar { flex-direction: column; }
+      .actions { justify-content: flex-start; }
+    }
+  </style>
 </head>
 <body>
+  <header>
+    <div class="topbar">
+      <div>
+        <h1>AGOS 控制台</h1>
+        <p class="subtitle">从业务 workflow → subagent 节点 → evidence → merge-gate → 自我蒸馏，实时观察一次 AGOS 运行的关键状态与证据链。</p>
+      </div>
+      <div class="actions" aria-label="控制台操作">
+        <button class="primary" id="refresh-btn" type="button">刷新</button>
+        <button type="button" disabled title="演示控制台禁止直接修改运行状态">启动新运行</button>
+        <button type="button" disabled title="请在 CLI 中执行 merge-gate">通过 merge-gate</button>
+      </div>
+    </div>
+  </header>
+
   <main id="app">
-    <h1>AGOS 控制台</h1>
-    <p id="boot-message">正在连接本地 AGOS Dashboard API。</p>
+    <aside aria-label="任务批次">
+      <div class="panel-head">
+        <h2>任务批次 / Runs</h2>
+        <p id="health-line">正在连接 API...</p>
+      </div>
+      <div class="run-list" id="runs-list"></div>
+    </aside>
+
+    <div class="detail">
+      <div class="error-box" id="error-box" role="alert"></div>
+
+      <section class="panel" id="run-header">
+        <div class="section-title">
+          <div>
+            <h2>运行概览</h2>
+            <p>当前选中任务的 task、status 与关键计数。</p>
+          </div>
+          <span class="badge brand" id="poll-state">5s 轮询</span>
+        </div>
+        <div class="grid cols-3" id="summary-grid"></div>
+      </section>
+
+      <section class="panel" id="pipeline-panel">
+        <div class="section-title"><div><h2>Pipeline</h2><p>业务 workflow 的阶段化执行进度。</p></div></div>
+        <div class="timeline" id="pipeline-view"></div>
+      </section>
+
+      <section class="panel" id="subagents-panel">
+        <div class="section-title"><div><h2>Subagent 节点</h2><p>来自 execution.subtasks 的子任务分发与回收情况。</p></div></div>
+        <div id="subagents-view"></div>
+      </section>
+
+      <section class="panel" id="candidates-panel">
+        <div class="section-title"><div><h2>候选方案</h2><p>Task 3 current-run payload 中 candidates 的候选输出。</p></div></div>
+        <div id="candidates-view"></div>
+      </section>
+
+      <section class="panel" id="reviews-panel">
+        <div class="section-title"><div><h2>评审结果</h2><p>展示 reviews.reports 与 reviews.packets 的交叉检查。</p></div></div>
+        <div id="reviews-view"></div>
+      </section>
+
+      <section class="panel" id="merge-gate-panel">
+        <div class="section-title"><div><h2>Merge-gate</h2><p>合并门禁 checks 的通过、警告与阻塞项。</p></div></div>
+        <div id="merge-gate-view"></div>
+      </section>
+
+      <section class="panel" id="evidence-panel">
+        <div class="section-title"><div><h2>证据文件</h2><p>ledger.jsonl 与 candidate patch refs，可点击加载原始 evidence。</p></div></div>
+        <div class="evidence-layout">
+          <div class="evidence-list" id="evidence-list"></div>
+          <pre id="evidence-viewer">选择左侧证据文件查看内容。</pre>
+        </div>
+      </section>
+
+      <section class="panel" id="distillation-panel">
+        <div class="section-title"><div><h2>自我蒸馏</h2><p>展示 distillation summary 与 records，沉淀复盘信号。</p></div></div>
+        <div id="distillation-view"></div>
+      </section>
+    </div>
   </main>
+
+  <script>
+    const state = {
+      health: null,
+      runs: [],
+      current: null,
+      selectedRef: null,
+      loading: false,
+      error: null,
+    };
+
+    const $ = (id) => document.getElementById(id);
+
+    async function fetchJson(path) {
+      const response = await fetch(path, { headers: { "Accept": "application/json" } });
+      const text = await response.text();
+      let data = null;
+      try { data = text ? JSON.parse(text) : null; } catch (error) { data = { raw: text }; }
+      if (!response.ok) {
+        const message = data && (data.error || data.message) ? (data.error || data.message) : `HTTP ${response.status}`;
+        throw new Error(`${path}: ${message}`);
+      }
+      return data;
+    }
+
+    function asArray(value) {
+      return Array.isArray(value) ? value : [];
+    }
+
+    function escapeHtml(value) {
+      return String(value ?? "")
+        .replaceAll("&", "&amp;")
+        .replaceAll("<", "&lt;")
+        .replaceAll(">", "&gt;")
+        .replaceAll('"', "&quot;")
+        .replaceAll("'", "&#039;");
+    }
+
+    function statusBadge(status) {
+      const text = String(status || "unknown");
+      const lower = text.toLowerCase();
+      const cls = lower.includes("pass") || lower.includes("ok") || lower.includes("success") || lower.includes("complete") ? "ok" :
+        lower.includes("fail") || lower.includes("error") || lower.includes("block") ? "bad" :
+        lower.includes("warn") || lower.includes("pending") || lower.includes("running") ? "warn" : "brand";
+      return `<span class="badge ${cls}">${escapeHtml(text)}</span>`;
+    }
+
+    function labelOf(item, fallback) {
+      return item?.name || item?.id || item?.ref || item?.path || item?.task || fallback;
+    }
+
+    async function refreshAll() {
+      state.loading = true;
+      renderError(null);
+      try {
+        const [health, runs] = await Promise.all([fetchJson('/api/health'), fetchJson('/api/runs')]);
+        state.health = health;
+        state.runs = runs.runs || runs.items || runs || [];
+        renderHealth();
+        renderRuns();
+        await refreshSelected();
+      } catch (error) {
+        state.error = error;
+        renderError(error);
+      } finally {
+        state.loading = false;
+      }
+    }
+
+    async function refreshSelected() {
+      const current = await fetchJson('/api/runs/current');
+      state.current = current.run;
+      renderDashboard();
+    }
+
+    function renderError(error) {
+      const box = $('error-box');
+      if (!error) { box.classList.remove('show'); box.textContent = ''; return; }
+      box.classList.add('show');
+      box.textContent = `控制台读取失败：${error.message}`;
+    }
+
+    function renderHealth() {
+      const status = state.health?.status || state.health?.ok || 'unknown';
+      $('health-line').innerHTML = `API 状态：${statusBadge(status)}`;
+    }
+
+    function renderRuns() {
+      const runs = asArray(state.runs);
+      if (!runs.length) {
+        $('runs-list').innerHTML = '<div class="empty">暂无任务批次。</div>';
+        return;
+      }
+      $('runs-list').innerHTML = runs.map((run, index) => {
+        const task = run.task || run.name || run.id || `run-${index + 1}`;
+        const status = run.status || run.state || 'unknown';
+        const active = state.current && (state.current.id === run.id || state.current.task === run.task) ? ' active' : '';
+        return `<article class="run-card${active}"><strong>${escapeHtml(task)}</strong><small>${statusBadge(status)}<br>${escapeHtml(run.created_at || run.updated_at || run.path || '')}</small></article>`;
+      }).join('');
+    }
+
+    function renderDashboard() {
+      const run = state.current || {};
+      renderRuns();
+      renderSummary(run);
+      renderPipeline(run.pipeline);
+      renderSubagents(run.execution);
+      renderCandidates(run.candidates);
+      renderReviews(run.reviews);
+      renderMergeGate(run.merge_gate);
+      renderEvidence(run);
+      renderDistillation(run.distillation);
+    }
+
+    function renderSummary(run) {
+      const candidates = run.candidates?.candidates || run.candidates || [];
+      const subtasks = run.execution?.subtasks || [];
+      const checks = run.merge_gate?.checks || [];
+      $('summary-grid').innerHTML = [
+        ['任务', run.task || '未选择'],
+        ['状态', statusBadge(run.status || 'unknown')],
+        ['候选 / 节点 / 门禁', `${asArray(candidates).length} / ${asArray(subtasks).length} / ${asArray(checks).length}`],
+        ['Workflow', run.pipeline?.name || run.pipeline?.workflow || '默认 workflow'],
+        ['执行 ID', run.execution?.id || run.id || 'n/a'],
+        ['更新时间', run.updated_at || run.finished_at || run.started_at || 'n/a'],
+      ].map(([label, value]) => `<div class="metric"><span>${escapeHtml(label)}</span><strong>${typeof value === 'string' && value.includes('<span') ? value : escapeHtml(value)}</strong></div>`).join('');
+    }
+
+    function renderPipeline(pipeline) {
+      const stages = pipeline?.stages || pipeline?.steps || pipeline?.nodes || [];
+      if (!asArray(stages).length) {
+        $('pipeline-view').innerHTML = '<div class="empty">暂无 pipeline 阶段。</div>';
+        return;
+      }
+      $('pipeline-view').innerHTML = asArray(stages).map((stage, index) => `
+        <div class="step">
+          <span class="dot"></span>
+          <div><strong>${escapeHtml(labelOf(stage, `阶段 ${index + 1}`))}</strong><div class="muted">${escapeHtml(stage.description || stage.message || stage.detail || '')}</div></div>
+          ${statusBadge(stage.status || stage.state || 'pending')}
+        </div>`).join('');
+    }
+
+    function renderSubagents(execution) {
+      const rows = asArray(execution?.subtasks);
+      if (!rows.length) {
+        $('subagents-view').innerHTML = '<div class="empty">暂无 Subagent 节点。</div>';
+        return;
+      }
+      $('subagents-view').innerHTML = `<table><thead><tr><th>节点</th><th>任务</th><th>状态</th><th>输出</th></tr></thead><tbody>${rows.map((row, index) => `
+        <tr><td>${escapeHtml(labelOf(row, `subagent-${index + 1}`))}</td><td>${escapeHtml(row.task || row.prompt || row.goal || '')}</td><td>${statusBadge(row.status || row.state)}</td><td>${escapeHtml(row.output || row.result || row.summary || '')}</td></tr>`).join('')}</tbody></table>`;
+    }
+
+    function renderCandidates(candidates) {
+      const rows = candidates?.candidates || candidates || [];
+      if (!asArray(rows).length) {
+        $('candidates-view').innerHTML = '<div class="empty">暂无候选方案。</div>';
+        return;
+      }
+      $('candidates-view').innerHTML = `<table><thead><tr><th>候选</th><th>状态</th><th>Patch / Ref</th><th>摘要</th></tr></thead><tbody>${asArray(rows).map((row, index) => `
+        <tr><td>${escapeHtml(labelOf(row, `candidate-${index + 1}`))}</td><td>${statusBadge(row.status || row.state || row.verdict)}</td><td>${escapeHtml(row.patch_ref || row.patch || row.ref || '')}</td><td>${escapeHtml(row.summary || row.description || row.notes || '')}</td></tr>`).join('')}</tbody></table>`;
+    }
+
+    function renderReviews(reviews) {
+      const reports = asArray(reviews?.reports);
+      const packets = asArray(reviews?.packets);
+      if (!reports.length && !packets.length) {
+        $('reviews-view').innerHTML = '<div class="empty">暂无评审结果。</div>';
+        return;
+      }
+      const reportHtml = reports.map((row, index) => `<tr><td>report</td><td>${escapeHtml(labelOf(row, `review-${index + 1}`))}</td><td>${statusBadge(row.status || row.verdict || row.result)}</td><td>${escapeHtml(row.summary || row.comment || '')}</td></tr>`).join('');
+      const packetHtml = packets.map((row, index) => `<tr><td>packet</td><td>${escapeHtml(labelOf(row, `packet-${index + 1}`))}</td><td>${statusBadge(row.status || row.verdict || row.result)}</td><td>${escapeHtml(row.summary || row.comment || '')}</td></tr>`).join('');
+      $('reviews-view').innerHTML = `<table><thead><tr><th>类型</th><th>名称</th><th>结论</th><th>说明</th></tr></thead><tbody>${reportHtml}${packetHtml}</tbody></table>`;
+    }
+
+    function renderMergeGate(mergeGate) {
+      const checks = asArray(mergeGate?.checks);
+      if (!checks.length) {
+        $('merge-gate-view').innerHTML = `<div class="grid cols-2"><div class="metric"><span>门禁状态</span><strong>${statusBadge(mergeGate?.status || 'unknown')}</strong></div><div class="metric"><span>说明</span><strong>${escapeHtml(mergeGate?.summary || '暂无 checks。')}</strong></div></div>`;
+        return;
+      }
+      $('merge-gate-view').innerHTML = `<table><thead><tr><th>检查项</th><th>状态</th><th>详情</th></tr></thead><tbody>${checks.map((check, index) => `
+        <tr><td>${escapeHtml(labelOf(check, `check-${index + 1}`))}</td><td>${statusBadge(check.status || check.result)}</td><td>${escapeHtml(check.message || check.summary || check.detail || '')}</td></tr>`).join('')}</tbody></table>`;
+    }
+
+    function collectEvidenceRefs(run) {
+      const refs = [{ ref: 'ledger.jsonl', label: 'ledger.jsonl' }];
+      const candidates = run.candidates?.candidates || run.candidates || [];
+      asArray(candidates).forEach((candidate, index) => {
+        const ref = candidate.patch_ref || candidate.patch || candidate.ref;
+        if (ref) refs.push({ ref, label: `${labelOf(candidate, `candidate-${index + 1}`)} patch` });
+      });
+      asArray(run.evidence).forEach((item, index) => {
+        const ref = item.ref || item.path || item.name;
+        if (ref && !refs.some((entry) => entry.ref === ref)) refs.push({ ref, label: item.label || `evidence-${index + 1}` });
+      });
+      return refs;
+    }
+
+    function renderEvidence(run) {
+      const refs = collectEvidenceRefs(run || {});
+      $('evidence-list').innerHTML = refs.map((item) => `<button class="evidence-ref" type="button" data-ref="${escapeHtml(item.ref)}">${escapeHtml(item.label)}<br><small class="muted">${escapeHtml(item.ref)}</small></button>`).join('');
+      document.querySelectorAll('[data-ref]').forEach((button) => {
+        button.addEventListener('click', async () => {
+          const ref = button.getAttribute('data-ref');
+          state.selectedRef = ref;
+          $('evidence-viewer').textContent = `正在加载 ${ref} ...`;
+          try {
+            const evidence = await fetchJson(`/api/runs/current/evidence?ref=${encodeURIComponent(ref)}`);
+            $('evidence-viewer').textContent = typeof evidence === 'string' ? evidence : JSON.stringify(evidence, null, 2);
+          } catch (error) {
+            $('evidence-viewer').textContent = `读取证据失败：${error.message}`;
+          }
+        });
+      });
+    }
+
+    function renderDistillation(distillation) {
+      const records = asArray(distillation?.records);
+      const summary = distillation?.summary || distillation?.message || '暂无自我蒸馏摘要。';
+      const recordHtml = records.length ? `<table><thead><tr><th>记录</th><th>信号</th><th>内容</th></tr></thead><tbody>${records.map((record, index) => `
+        <tr><td>${escapeHtml(labelOf(record, `record-${index + 1}`))}</td><td>${statusBadge(record.status || record.kind || record.type || 'note')}</td><td>${escapeHtml(record.summary || record.text || record.message || '')}</td></tr>`).join('')}</tbody></table>` : '<div class="empty">暂无蒸馏 records。</div>';
+      $('distillation-view').innerHTML = `<div class="metric"><span>Summary</span><strong>${escapeHtml(summary)}</strong></div><br>${recordHtml}`;
+    }
+
+    $('refresh-btn').addEventListener('click', refreshAll);
+    refreshAll();
+    window.setInterval(refreshAll, 5000);
+  </script>
 </body>
 </html>

@@ -13,6 +13,11 @@ def test_dashboard_static_index_is_packaged() -> None:
     assert '<main id="app">' in text
     assert "AGOS 控制台" in text
     assert "data-agos-dashboard" in text
+    assert "任务批次" in text
+    assert "Subagent 节点" in text
+    assert "证据文件" in text
+    assert "自我蒸馏" in text
+    assert "fetchJson('/api/runs/current')" in text
 
 
 def test_dashboard_static_package_data_is_configured() -> None:
