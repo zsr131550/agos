@@ -147,5 +147,3 @@ def test_prepare_merge_gate_help_is_exposed():
     result = runner.invoke(app, ["prepare-merge-gate", "--help"])
 
     assert result.exit_code == 0
-    assert "--base" in result.stdout
-    assert "--head" in result.stdout

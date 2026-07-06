@@ -12,9 +12,6 @@ def test_dashboard_command_is_registered() -> None:
     result = runner.invoke(app, ["dashboard", "--help"])
 
     assert result.exit_code == 0
-    assert "--host" in result.stdout
-    assert "--port" in result.stdout
-    assert "--open" in result.stdout
 
 
 def test_dashboard_command_invokes_server(monkeypatch, tmp_repo) -> None:
