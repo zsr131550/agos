@@ -6,7 +6,9 @@ import shutil
 
 import typer
 
+from agos.adapters.local_cli_executor import LocalCliExecutorAdapter
 from agos.cli.executor_registry import configured_executor_adapter, executor_adapter_for
+from agos.core.adapter import RunStatus
 from agos.core.config import load_config, resolve_gates
 from agos.core.evidence import EvidenceStore
 from agos.core.gate import gates_locked_payload
@@ -159,7 +161,7 @@ def start_task(
                 "issue_id": run.issue_id,
             },
         )
-        final_record = ledger.append(
+        dispatched_record = ledger.append(
             {
                 "type": "executor_dispatched",
                 "task_id": task.id,
@@ -168,7 +170,28 @@ def start_task(
                 "issue_id": run.issue_id,
             }
         )
-        status = TaskStatus.for_started_task(task=task, run=run, ledger_head_hash=final_record["hash"])
+        status = TaskStatus.for_started_task(
+            task=task,
+            run=run,
+            ledger_head_hash=dispatched_record["hash"],
+        )
+        run_status = _safe_initial_run_status(adapter, run)
+        if run_status is not None and run_status.state != "running":
+            phase = "done" if run_status.state == "completed" else "blocked"
+            terminal_record = ledger.append(
+                {
+                    "type": "executor_completed"
+                    if run_status.state == "completed"
+                    else "executor_blocked",
+                    "task_id": task.id,
+                    "run_id": run.run_id,
+                    "issue_id": run.issue_id,
+                    "state": run_status.state,
+                    "detail": run_status.detail,
+                }
+            )
+            status.phase = phase
+            status.ledger_head_hash = terminal_record["hash"]
         save_status(status, staging_paths)
 
         shutil.rmtree(published_paths.current_task, ignore_errors=True)
@@ -179,3 +202,20 @@ def start_task(
         raise
 
     return task, run
+
+
+def _safe_initial_run_status(adapter, run) -> RunStatus | None:
+    """Best-effort status snapshot for synchronous executors.
+
+    External async executors such as Multica should remain in the normal
+    executing phase after dispatch. Local CLI executors run synchronously, so
+    their terminal status is already available and should be surfaced
+    immediately.
+    """
+
+    if not isinstance(adapter, LocalCliExecutorAdapter):
+        return None
+    try:
+        return adapter.status(run.run_id, issue_id=run.issue_id)
+    except Exception:
+        return None

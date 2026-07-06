@@ -6,6 +6,7 @@ from types import SimpleNamespace
 import yaml
 from typer.testing import CliRunner
 
+from agos.core.adapter import RunStatus
 from agos.cli.main import app
 
 runner = CliRunner()
@@ -119,6 +120,42 @@ def test_start_stages_task_until_dispatch_succeeds(monkeypatch, tmp_repo):
     assert result.exit_code == 0
     assert (current_dir / "task.yaml").is_file()
     assert not staging_root.exists() or not any(staging_root.iterdir())
+
+
+def test_start_marks_terminal_executor_failure_blocked(monkeypatch, tmp_repo):
+    _write_config(tmp_repo)
+    config_path = tmp_repo / ".agos" / "agos.yaml"
+    config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    config["executor"] = {"name": "codex_cli", "agent": "codex", "command": "codex"}
+    config_path.write_text(yaml.safe_dump(config, sort_keys=False), encoding="utf-8")
+    monkeypatch.chdir(tmp_repo)
+    monkeypatch.setattr(
+        "agos.adapters.local_cli_executor.CodexCliExecutorAdapter.start",
+        lambda self, task: SimpleNamespace(adapter="codex_cli", run_id="task-empty-output", issue_id=None),
+    )
+    monkeypatch.setattr(
+        "agos.adapters.local_cli_executor.CodexCliExecutorAdapter.status",
+        lambda self, run_id, issue_id=None: RunStatus(
+            state="failed",
+            detail="Executor completed without writing files to outputs/agos-01",
+        ),
+    )
+
+    result = runner.invoke(app, ["start", "--title", "Empty output"])
+
+    assert result.exit_code == 0
+    status = json.loads((tmp_repo / ".agos" / "tasks" / "current" / "status.json").read_text(encoding="utf-8"))
+    assert status["phase"] == "blocked"
+
+    records = [
+        json.loads(line)
+        for line in (tmp_repo / ".agos" / "tasks" / "current" / "ledger.jsonl")
+        .read_text(encoding="utf-8")
+        .splitlines()
+    ]
+    assert records[-1]["type"] == "executor_blocked"
+    assert records[-1]["state"] == "failed"
+    assert "without writing files" in records[-1]["detail"]
 
 
 def test_start_cleans_up_current_task_when_dispatch_fails(monkeypatch, tmp_repo):

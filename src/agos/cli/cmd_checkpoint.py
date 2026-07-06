@@ -101,9 +101,10 @@ def _checkpoint_once(*, adapter: ExecutorAdapter, status: TaskStatus, paths) -> 
     status.ledger_head_hash = record["hash"]
     save_status(status, paths)
     if any(event.kind == "run_complete" for event in events):
+        run_status = adapter.status(run_info.run_id, issue_id=run_info.issue_id)
         completed = _record_terminal_status(
             run_info=run_info,
-            run_status=RunStatus(state="completed", detail="run_complete"),
+            run_status=run_status,
             status=status,
             paths=paths,
         )

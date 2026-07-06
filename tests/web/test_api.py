@@ -27,6 +27,7 @@ from agos.core.status import TaskStatus, save_status
 from agos.core.task import ExecutorBinding, Task, save_task
 from agos.web.api import (
     DashboardApiError,
+    archive_current_task_payload,
     agents_payload,
     config_payload,
     current_run_payload,
@@ -153,6 +154,47 @@ def test_start_run_payload_uses_selected_task_agent(tmp_repo: Path, monkeypatch)
     assert task["executor"] == {"adapter": "codex_cli", "agent": "codex_local"}
 
 
+def test_archive_current_task_payload_moves_active_task_to_archive(dashboard_repo: Path) -> None:
+    paths = repo_paths(dashboard_repo)
+
+    payload = archive_current_task_payload(dashboard_repo)
+
+    assert payload["ok"] is True
+    assert payload["archived_task_id"] == "agos-dashboard-01"
+    archive_path = Path(payload["archive_path"])
+    assert archive_path.is_dir()
+    assert archive_path.parent == paths.tasks / "archive"
+    assert (archive_path / "task.yaml").is_file()
+    assert not paths.current_task.exists()
+
+
+def test_start_run_payload_can_replace_active_task(dashboard_repo: Path, monkeypatch) -> None:
+    paths = repo_paths(dashboard_repo)
+    captured = {}
+
+    def fake_start(self, task):
+        captured["title"] = task.title
+        return ExecutorRun(adapter=self.name, run_id="replace-run", issue_id=None)
+
+    monkeypatch.setattr("agos.adapters.local_cli_executor.CodexCliExecutorAdapter.start", fake_start)
+
+    payload = start_run_payload(
+        dashboard_repo,
+        {
+            "title": "Replace active task",
+            "replace_active": True,
+            "agent": "executor:codex_cli:codex",
+        },
+    )
+
+    assert payload["ok"] is True
+    assert payload["run"]["title"] == "Replace active task"
+    assert captured["title"] == "Replace active task"
+    assert (paths.tasks / "archive").is_dir()
+    assert paths.task_yaml.is_file()
+    assert yaml.safe_load(paths.task_yaml.read_text(encoding="utf-8"))["title"] == "Replace active task"
+
+
 def test_review_run_payload_uses_selected_review_agent(dashboard_repo: Path) -> None:
     payload = review_run_payload(dashboard_repo, {"reviewer": "reviewer:security"})
 
@@ -215,6 +257,18 @@ def test_runs_and_current_run_payloads_include_pipeline_state(dashboard_repo: Pa
     assert current["candidates"]["candidates"][0]["decisions"][0]["decision"] == "accepted"
     assert current["reviews"]["packets"][0]["review_id"] == "review-01"
     assert current["reviews"]["reports"][0]["review_id"] == "review-01"
+
+
+def test_runs_payload_returns_empty_list_without_active_task(tmp_repo: Path) -> None:
+    paths = repo_paths(tmp_repo)
+    paths.agos_dir.mkdir(parents=True, exist_ok=True)
+    AGOSConfig.default(agent="codex").save(paths.agos_yaml)
+
+    payload = runs_payload(tmp_repo)
+
+    assert payload["ok"] is True
+    assert payload["current_run_id"] is None
+    assert payload["runs"] == []
 
 
 def test_current_run_payload_uses_strict_merge_gate_for_missing_candidate_review(

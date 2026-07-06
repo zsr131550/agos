@@ -38,12 +38,21 @@ def test_dashboard_static_index_is_packaged() -> None:
     assert 'id="new-run-workflow"' in text
     assert 'id="new-run-gates"' in text
     assert 'id="new-run-agent"' in text
+    assert 'id="replace-active-submit"' in text
+    assert 'id="continue-active-task"' in text
+    assert 'id="archive-active-task"' in text
     assert 'id="review-agent"' in text
     assert 'id="review-run-submit"' in text
     assert "createRunFromForm" in text
+    assert "replaceActiveTaskFromForm" in text
+    assert "archiveActiveTask" in text
+    assert "if (!runs.current_run_id || !asArray(state.runs).length)" in text
+    assert "state.current = null" in text
     assert "refreshAgents" in text
     assert "runReviewFromForm" in text
     assert "fetchJson('/api/runs', {" in text
+    assert "replace_active" in text
+    assert "fetchJson('/api/runs/current/archive', {" in text
     assert "fetchJson('/api/agents')" in text
     assert "fetchJson('/api/reviews/run', {" in text
     assert 'method: "POST"' in text

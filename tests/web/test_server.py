@@ -117,6 +117,24 @@ def test_dashboard_server_serves_agents_json(tmp_repo) -> None:
     assert "local:reviewer:codex_cli" in review_agent_ids
 
 
+def test_dashboard_server_serves_empty_runs_when_no_active_task(tmp_repo) -> None:
+    write_dashboard_config(tmp_repo)
+    current = tmp_repo / ".agos" / "tasks" / "current"
+    if current.exists():
+        import shutil
+
+        shutil.rmtree(current)
+
+    with running_dashboard_server(tmp_repo) as server:
+        url = f"http://127.0.0.1:{server.server_port}/api/runs"
+        with urllib.request.urlopen(url, timeout=5) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+
+    assert payload["ok"] is True
+    assert payload["current_run_id"] is None
+    assert payload["runs"] == []
+
+
 def test_dashboard_server_unknown_api_returns_404_json(tmp_repo) -> None:
     with running_dashboard_server(tmp_repo) as server:
         url = f"http://127.0.0.1:{server.server_port}/api/nope"
@@ -183,6 +201,51 @@ def test_dashboard_server_post_runs_starts_task(tmp_repo, monkeypatch) -> None:
     assert task_data["title"] == "Ship dashboard input"
     assert task_data["intent"] == "Create tasks from the local dashboard"
     assert task_data["gates"] == ["tests_pass"]
+
+
+def test_dashboard_server_post_runs_can_replace_active_task(tmp_repo, monkeypatch) -> None:
+    write_dashboard_config(tmp_repo)
+    current = tmp_repo / ".agos" / "tasks" / "current"
+    (current / "task.yaml").write_text(
+        "id: agos-old\ntitle: Old task\nworkflow: feature\ngates: []\nexecutor:\n  adapter: multica\n  agent: Lambda\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        "agos.cli.executor_registry.MulticaAdapter.start",
+        lambda self, task: SimpleNamespace(adapter="multica", run_id="task-web-2", issue_id="AGO-WEB-2"),
+    )
+
+    with running_dashboard_server(tmp_repo) as server:
+        status, payload = post_json(
+            f"http://127.0.0.1:{server.server_port}/api/runs",
+            {"title": "New task", "replace_active": True},
+        )
+
+    assert status == 201
+    assert payload["ok"] is True
+    assert payload["run"]["title"] == "New task"
+    assert (tmp_repo / ".agos" / "tasks" / "archive").is_dir()
+
+
+def test_dashboard_server_post_archive_current_task(tmp_repo) -> None:
+    write_dashboard_config(tmp_repo)
+    current = tmp_repo / ".agos" / "tasks" / "current"
+    (current / "task.yaml").write_text(
+        "id: agos-old\ntitle: Old task\nworkflow: feature\ngates: []\nexecutor:\n  adapter: multica\n  agent: Lambda\n",
+        encoding="utf-8",
+    )
+
+    with running_dashboard_server(tmp_repo) as server:
+        status, payload = post_json(
+            f"http://127.0.0.1:{server.server_port}/api/runs/current/archive",
+            {},
+        )
+
+    assert status == 200
+    assert payload["ok"] is True
+    assert payload["archived_task_id"] == "agos-old"
+    assert not current.exists()
+    assert (tmp_repo / ".agos" / "tasks" / "archive").is_dir()
 
 
 def test_dashboard_server_post_runs_requires_title(tmp_repo) -> None:

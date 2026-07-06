@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import re
 import shutil
+import time
 from pathlib import Path
 from typing import Any
 
@@ -107,6 +108,13 @@ def status_payload(repo_root: Path) -> dict[str, object]:
 
 def runs_payload(repo_root: Path) -> dict[str, object]:
     paths = _require_initialized(repo_root)
+    if not paths.task_yaml.is_file():
+        return {
+            "ok": True,
+            "repo_root": str(paths.root),
+            "current_run_id": None,
+            "runs": [],
+        }
     task = _load_current_task(paths)
     status = load_status(paths)
     phase = status.phase if status is not None else "unknown"
@@ -218,6 +226,9 @@ def start_run_payload(repo_root: Path, request_payload: dict[str, Any]) -> dict[
             raise DashboardApiError("invalid_request", "workflow must be a string")
         workflow = workflow.strip() or None
     agent_selection = _resolve_task_agent(paths.root, request_payload.get("agent"))
+    replace_active = bool(request_payload.get("replace_active"))
+    if replace_active:
+        archive_current_task_payload(paths.root)
 
     try:
         _task, run = start_task(
@@ -240,6 +251,28 @@ def start_run_payload(repo_root: Path, request_payload: dict[str, Any]) -> dict[
         "issue_id": run.issue_id,
         "run": current["run"],
         "current": current,
+    }
+
+
+def archive_current_task_payload(repo_root: Path) -> dict[str, object]:
+    """Archive the active current task without deleting its evidence."""
+
+    paths = _require_initialized(repo_root)
+    if not paths.current_task.exists() or not any(paths.current_task.iterdir()):
+        raise DashboardApiError("active_task_missing", "No active AGOS task is available.")
+    task_id = _archive_task_id(paths)
+    archive_root = paths.tasks / "archive"
+    archive_root.mkdir(parents=True, exist_ok=True)
+    archive_dir = archive_root / f"{_fsafe_name(task_id)}-{_archive_timestamp()}"
+    counter = 1
+    while archive_dir.exists():
+        archive_dir = archive_root / f"{_fsafe_name(task_id)}-{_archive_timestamp()}-{counter}"
+        counter += 1
+    paths.current_task.rename(archive_dir)
+    return {
+        "ok": True,
+        "archived_task_id": task_id,
+        "archive_path": str(archive_dir),
     }
 
 
@@ -415,6 +448,24 @@ def _load_current_task(paths: AgosPaths):
             hint="Start or restore an AGOS task before opening this dashboard view.",
         )
     return load_task(paths.task_yaml)
+
+
+def _archive_task_id(paths: AgosPaths) -> str:
+    if paths.task_yaml.is_file():
+        try:
+            return load_task(paths.task_yaml).id
+        except Exception:
+            pass
+    return paths.current_task.name
+
+
+def _archive_timestamp() -> str:
+    return time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
+
+
+def _fsafe_name(value: str) -> str:
+    cleaned = re.sub(r"[^A-Za-z0-9_.-]+", "-", value.strip())
+    return cleaned.strip("-") or "task"
 
 
 def _merge_gate_payload(paths: AgosPaths) -> dict[str, object]:

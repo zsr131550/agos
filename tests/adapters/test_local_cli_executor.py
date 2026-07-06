@@ -36,7 +36,9 @@ def test_local_cli_executor_records_success_events_and_status(monkeypatch, tmp_r
     calls: list[tuple[list[str], dict[str, object]]] = []
 
     def fake_run_command(args, **kwargs):
-        assert (tmp_repo / "outputs" / "agos-01").is_dir()
+        output_dir = tmp_repo / "outputs" / "agos-01"
+        assert output_dir.is_dir()
+        (output_dir / "result.txt").write_text("done", encoding="utf-8")
         calls.append((args, kwargs))
         return SimpleNamespace(returncode=0, stdout="done", stderr="")
 
@@ -105,6 +107,26 @@ def test_local_cli_executor_status_handles_missing_and_unknown_state(tmp_repo):
     assert status.detail == "123"
 
 
+def test_local_cli_executor_status_rejects_existing_completed_run_with_empty_current_output(tmp_repo):
+    task = _task()
+    current_dir = tmp_repo / ".agos" / "tasks" / "current"
+    task.save(current_dir / "task.yaml")
+    output_dir = tmp_repo / "outputs" / task.id
+    output_dir.mkdir(parents=True)
+    adapter = _TestExecutor(evidence_dir=current_dir / "evidence", cwd=tmp_repo)
+    path = adapter._state_path("empty-output-run")
+    path.parent.mkdir(parents=True)
+    path.write_text(
+        '{"state": "completed", "detail": "agent asked for approval", "events": []}',
+        encoding="utf-8",
+    )
+
+    status = adapter.status("empty-output-run")
+
+    assert status.state == "failed"
+    assert "completed without writing files to outputs/agos-01" in status.detail
+
+
 def test_codex_and_claude_executor_args(tmp_repo):
     codex = CodexCliExecutorAdapter(command="codex", evidence_dir=tmp_repo / "e", cwd=tmp_repo)
     claude = ClaudeCodeExecutorAdapter(command="claude", evidence_dir=tmp_repo / "e", cwd=tmp_repo)
@@ -128,3 +150,32 @@ def test_task_prompt_is_noninteractive_and_declares_output_directory():
     assert "Do not ask clarifying questions" in prompt
     assert "outputs/agos-01" in prompt
     assert "Report the output directory" in prompt
+
+
+def test_task_prompt_declares_background_executor_mode():
+    prompt = _task_prompt(_task())
+
+    assert "You are running as an AGOS background executor/subagent" in prompt
+    assert "Do not wait for user approval" in prompt
+    assert "Do not invoke brainstorming or design-approval gates" in prompt
+    assert "Implement immediately" in prompt
+
+
+def test_local_cli_executor_fails_when_successful_run_leaves_output_empty(monkeypatch, tmp_repo):
+    monkeypatch.setattr(
+        "agos.adapters.local_cli_executor.run_command",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            returncode=0,
+            stdout="I need approval before implementing.",
+            stderr="",
+        ),
+    )
+    adapter = _TestExecutor(evidence_dir=tmp_repo / ".agos" / "evidence", cwd=tmp_repo)
+
+    run = adapter.start(_task())
+    status = adapter.status(run.run_id)
+    events = list(adapter.stream_events(run.run_id))
+
+    assert status.state == "failed"
+    assert "completed without writing files to outputs/agos-01" in status.detail
+    assert [event.kind for event in events] == ["error", "error"]

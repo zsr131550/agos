@@ -10,7 +10,7 @@ from uuid import uuid4
 from agos.core.adapter import Event, ExecutorRun, RunStatus
 from agos.core.command import run_command
 from agos.core.execution import utc_now_iso
-from agos.core.task import Task, task_output_ref
+from agos.core.task import Task, load_task, task_output_ref
 
 
 class LocalCliExecutorAdapter:
@@ -33,7 +33,9 @@ class LocalCliExecutorAdapter:
 
     def start(self, task: Task) -> ExecutorRun:
         run_id = f"{self.name}-{uuid4().hex[:12]}"
-        (self.cwd / task_output_ref(task)).mkdir(parents=True, exist_ok=True)
+        output_ref = task_output_ref(task)
+        output_dir = self.cwd / output_ref
+        output_dir.mkdir(parents=True, exist_ok=True)
         prompt = _task_prompt(task)
         args = self._start_args(prompt)
         try:
@@ -58,6 +60,21 @@ class LocalCliExecutorAdapter:
             proc = subprocess.CompletedProcess(args, 127, stdout="", stderr=str(exc))
 
         state = "completed" if proc.returncode == 0 else "failed"
+        if state == "completed" and _output_dir_is_empty(output_dir):
+            original_output = _detail(proc)
+            message = (
+                f"Executor completed without writing files to {output_ref}. "
+                "This usually means the agent stopped for clarification or approval instead of implementing."
+            )
+            if original_output:
+                message = f"{message}\n\nAgent output:\n{original_output}"
+            proc = subprocess.CompletedProcess(
+                getattr(proc, "args", args),
+                1,
+                stdout="",
+                stderr=message,
+            )
+            state = "failed"
         events = _events_from_process(proc, state=state)
         self._write_run_state(run_id, state=state, detail=_detail(proc), events=events)
         return ExecutorRun(adapter=self.name, run_id=run_id, issue_id=None)
@@ -87,6 +104,10 @@ class LocalCliExecutorAdapter:
         if state not in {"running", "completed", "failed", "blocked"}:
             state = "failed"
         detail = payload.get("detail")
+        if state == "completed":
+            empty_output_detail = self._empty_output_detail()
+            if empty_output_detail is not None:
+                return RunStatus(state="failed", detail=empty_output_detail)
         return RunStatus(state=state, detail=str(detail) if detail is not None else None)
 
     def _start_args(self, prompt: str) -> list[str]:
@@ -123,6 +144,22 @@ class LocalCliExecutorAdapter:
     def _read_run_state(self, run_id: str) -> dict[str, object]:
         return json.loads(self._state_path(run_id).read_text(encoding="utf-8"))
 
+    def _empty_output_detail(self) -> str | None:
+        task_path = self.evidence_dir.parent / "task.yaml"
+        if not task_path.is_file():
+            return None
+        try:
+            task = load_task(task_path)
+        except Exception:
+            return None
+        output_ref = task_output_ref(task)
+        if not _output_dir_is_empty(self.cwd / output_ref):
+            return None
+        return (
+            f"Executor completed without writing files to {output_ref}. "
+            "This usually means the agent stopped for clarification or approval instead of implementing."
+        )
+
 
 class CodexCliExecutorAdapter(LocalCliExecutorAdapter):
     def __init__(self, *, command: str = "codex", evidence_dir: Path, cwd: Path) -> None:
@@ -147,7 +184,11 @@ def _task_prompt(task: Task) -> str:
         "\n".join(
             [
                 "AGOS execution contract:",
+                "- You are running as an AGOS background executor/subagent, not as an interactive assistant.",
                 "- Run non-interactively. Do not ask clarifying questions; make reasonable assumptions and implement the task.",
+                "- Do not wait for user approval, browser-companion approval, design approval, or additional confirmation.",
+                "- Do not invoke brainstorming or design-approval gates; treat this prompt as the approved implementation request.",
+                "- Implement immediately and write concrete artifacts before returning.",
                 f"- Use `{output_ref}` as the default output directory for standalone deliverables.",
                 "- If the task is a game, demo, or website, create a runnable entrypoint such as `index.html` in that output directory.",
                 "- Report the output directory and key files in the final response.",
@@ -186,3 +227,10 @@ def _detail(proc: subprocess.CompletedProcess) -> str:
     stdout = getattr(proc, "stdout", "") or ""
     stderr = getattr(proc, "stderr", "") or ""
     return str(stdout or stderr or f"exit {proc.returncode}").strip()
+
+
+def _output_dir_is_empty(output_dir: Path) -> bool:
+    try:
+        return not any(output_dir.iterdir())
+    except FileNotFoundError:
+        return True

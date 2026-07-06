@@ -13,6 +13,7 @@ from urllib.parse import parse_qs, urlsplit
 from agos.web.api import (
     DashboardApiError,
     agents_payload,
+    archive_current_task_payload,
     candidates_payload,
     config_payload,
     current_run_payload,
@@ -80,6 +81,9 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
         if parsed.path == "/api/runs":
             self._serve_start_run()
             return
+        if parsed.path == "/api/runs/current/archive":
+            self._serve_archive_current_task()
+            return
         if parsed.path == "/api/reviews/run":
             self._serve_review_run()
             return
@@ -136,6 +140,22 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
             payload = self._read_json_body()
             result = start_run_payload(self.server.repo_root, payload)
             status = HTTPStatus.CREATED
+        except DashboardApiError as exc:
+            result = error_payload(exc)
+            status = HTTPStatus.BAD_REQUEST
+        except Exception:
+            result = {
+                "ok": False,
+                "error": {"code": "internal_error", "message": "Internal dashboard server error"},
+            }
+            status = HTTPStatus.INTERNAL_SERVER_ERROR
+        self._write_json(result, status=status)
+
+    def _serve_archive_current_task(self) -> None:
+        try:
+            self._read_json_body()
+            result = archive_current_task_payload(self.server.repo_root)
+            status = HTTPStatus.OK
         except DashboardApiError as exc:
             result = error_payload(exc)
             status = HTTPStatus.BAD_REQUEST

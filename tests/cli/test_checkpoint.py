@@ -219,6 +219,10 @@ def test_checkpoint_follow_stops_after_run_complete(monkeypatch, tmp_repo):
         )
 
     monkeypatch.setattr("agos.cli.executor_registry.MulticaAdapter.stream_events", fake_stream)
+    monkeypatch.setattr(
+        "agos.cli.executor_registry.MulticaAdapter.status",
+        lambda self, run_id, issue_id=None: RunStatus(state="completed", detail="done"),
+    )
     monkeypatch.setattr("agos.cli.cmd_checkpoint.time.sleep", lambda _seconds: None)
 
     result = runner.invoke(app, ["checkpoint", "--follow"])
@@ -245,6 +249,63 @@ def test_checkpoint_follow_stops_after_run_complete(monkeypatch, tmp_repo):
     ledger_records = [json.loads(line) for line in paths.ledger.read_text(encoding="utf-8").splitlines()]
     assert ledger_records[-1]["type"] == "executor_completed"
     assert ledger_records[-1]["run_id"] == "run-123"
+
+
+def test_checkpoint_uses_adapter_status_for_run_complete_event(monkeypatch, tmp_repo):
+    paths, _task = _write_active_task(tmp_repo)
+
+    class FakeAdapter:
+        def stream_events(self, run_id: str, since: int | None = None):
+            assert run_id == "run-123"
+            assert since is None
+            return iter(
+                [
+                    Event(
+                        seq=1,
+                        ts="2026-06-21T00:00:01Z",
+                        kind="run_complete",
+                        content="completed",
+                        raw={
+                            "seq": 1,
+                            "ts": "2026-06-21T00:00:01Z",
+                            "kind": "run_complete",
+                            "content": "completed",
+                        },
+                    )
+                ]
+            )
+
+        def status(self, run_id: str, issue_id: str | None = None):
+            assert run_id == "run-123"
+            assert issue_id == "AGO-99"
+            return RunStatus(
+                state="failed",
+                detail="Executor completed without writing files to outputs/agos-01",
+            )
+
+    from agos.cli import cmd_checkpoint
+
+    monkeypatch.setattr(cmd_checkpoint, "git_head", lambda _repo: "head-sha")
+    monkeypatch.setattr(cmd_checkpoint, "git_status_porcelain", lambda _repo: "")
+
+    status = load_status(paths)
+    assert status is not None
+
+    completed, last_seq = cmd_checkpoint._checkpoint_once(
+        adapter=FakeAdapter(),
+        status=status,
+        paths=paths,
+    )
+
+    assert completed is True
+    assert last_seq == 1
+    reloaded = load_status(paths)
+    assert reloaded is not None
+    assert reloaded.phase == "blocked"
+    ledger_records = [json.loads(line) for line in paths.ledger.read_text(encoding="utf-8").splitlines()]
+    assert ledger_records[-1]["type"] == "executor_blocked"
+    assert ledger_records[-1]["state"] == "failed"
+    assert "without writing files" in ledger_records[-1]["detail"]
 
 
 def test_checkpoint_once_marks_completed_when_run_finished_without_new_events(monkeypatch, tmp_repo):
