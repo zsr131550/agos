@@ -6,9 +6,11 @@ import threading
 import urllib.error
 import urllib.request
 from collections.abc import Iterator
+from types import SimpleNamespace
 
 import agos.web.server as dashboard_server
 from agos.web.server import DashboardHTTPServer, create_dashboard_server
+import yaml
 
 
 @contextmanager
@@ -32,6 +34,47 @@ def read_json_error(url: str) -> tuple[int, dict[str, object]]:
         body = exc.read().decode("utf-8")
         return exc.code, json.loads(body)
     raise AssertionError("expected HTTPError")
+
+
+def post_json(url: str, payload: dict[str, object]) -> tuple[int, dict[str, object]]:
+    request = urllib.request.Request(
+        url,
+        data=json.dumps(payload).encode("utf-8"),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    with urllib.request.urlopen(request, timeout=5) as response:
+        body = response.read().decode("utf-8")
+        return response.status, json.loads(body)
+
+
+def read_json_request_error(request: urllib.request.Request) -> tuple[int, dict[str, object]]:
+    try:
+        urllib.request.urlopen(request, timeout=5)
+    except urllib.error.HTTPError as exc:
+        body = exc.read().decode("utf-8")
+        return exc.code, json.loads(body)
+    raise AssertionError("expected HTTPError")
+
+
+def write_dashboard_config(tmp_repo) -> None:
+    agos_dir = tmp_repo / ".agos"
+    agos_dir.mkdir()
+    (agos_dir / "tasks" / "current").mkdir(parents=True)
+    config = {
+        "executor": {"name": "multica", "agent": "Lambda"},
+        "default_workflow": "feature",
+        "workflows": {
+            "feature": {
+                "gates": [
+                    {"id": "tests_pass", "stage": ["pre-commit"], "command": "pytest -q"},
+                    {"id": "lint_clean", "stage": ["pre-push"], "command": "ruff check"},
+                ]
+            },
+            "docs_only": {"gates": []},
+        },
+    }
+    (agos_dir / "agos.yaml").write_text(yaml.safe_dump(config, sort_keys=False), encoding="utf-8")
 
 
 def test_dashboard_server_serves_static_index(tmp_repo) -> None:
@@ -84,3 +127,54 @@ def test_dashboard_server_internal_error_is_redacted(tmp_repo, monkeypatch) -> N
     }
     assert "secret path" not in body
     assert "C:/Users" not in body
+
+
+def test_dashboard_server_post_runs_starts_task(tmp_repo, monkeypatch) -> None:
+    write_dashboard_config(tmp_repo)
+    monkeypatch.setattr(
+        "agos.cli.executor_registry.MulticaAdapter.start",
+        lambda self, task: SimpleNamespace(adapter="multica", run_id="task-web-1", issue_id="AGO-WEB-1"),
+    )
+    with running_dashboard_server(tmp_repo) as server:
+        url = f"http://127.0.0.1:{server.server_port}/api/runs"
+        status, payload = post_json(
+            url,
+            {
+                "title": "Ship dashboard input",
+                "intent": "Create tasks from the local dashboard",
+                "workflow": "feature",
+                "gates": ["tests_pass"],
+            },
+        )
+
+    assert status == 201
+    assert payload["ok"] is True
+    assert payload["run"]["title"] == "Ship dashboard input"
+    assert payload["run"]["workflow"] == "feature"
+    assert payload["run"]["executor_run"]["run_id"] == "task-web-1"
+    assert payload["issue_id"] == "AGO-WEB-1"
+
+    task_data = yaml.safe_load(
+        (tmp_repo / ".agos" / "tasks" / "current" / "task.yaml").read_text(encoding="utf-8")
+    )
+    assert task_data["title"] == "Ship dashboard input"
+    assert task_data["intent"] == "Create tasks from the local dashboard"
+    assert task_data["gates"] == ["tests_pass"]
+
+
+def test_dashboard_server_post_runs_requires_title(tmp_repo) -> None:
+    write_dashboard_config(tmp_repo)
+    with running_dashboard_server(tmp_repo) as server:
+        request = urllib.request.Request(
+            f"http://127.0.0.1:{server.server_port}/api/runs",
+            data=json.dumps({"intent": "missing title"}).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        status, payload = read_json_request_error(request)
+
+    assert status == 400
+    assert payload["ok"] is False
+    assert payload["error"]["code"] == "invalid_request"
+    assert payload["error"]["message"] == "title is required"
+    assert not (tmp_repo / ".agos" / "tasks" / "current" / "task.yaml").exists()

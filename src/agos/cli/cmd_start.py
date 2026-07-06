@@ -22,6 +22,10 @@ from agos.core.status import TaskStatus, save_status
 from agos.core.task import ExecutorBinding, Task, new_task_id
 
 
+class StartTaskError(RuntimeError):
+    """Raised when an AGOS task cannot be started."""
+
+
 def _parse_gate_overrides(gate_values: list[str] | None) -> list[str]:
     overrides: list[str] = []
     for value in gate_values or []:
@@ -42,19 +46,45 @@ def start_command(
     except FileNotFoundError as exc:
         typer.echo(str(exc), err=True)
         raise typer.Exit(code=1) from exc
-    current_dir = current_task_dir(repo_root)
-    if current_task_is_active(current_dir):
-        typer.echo("Active task already exists in .agos/tasks/current", err=True)
-        raise typer.Exit(code=1)
-
-    config = load_config(repo_root)
-    workflow_name = workflow or config.default_workflow
-    overrides = _parse_gate_overrides(gate)
     try:
-        resolved_gates = resolve_gates(config, workflow_name, override=overrides or None)
+        _task, run = start_task(
+            repo_root=repo_root,
+            title=title,
+            intent=intent,
+            workflow=workflow,
+            gate_overrides=_parse_gate_overrides(gate),
+        )
+    except StartTaskError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(code=1)
     except KeyError as exc:
         typer.echo(str(exc), err=True)
         raise typer.Exit(code=1) from exc
+
+    typer.echo(run.issue_id or run.run_id)
+
+
+def start_task(
+    *,
+    repo_root,
+    title: str,
+    intent: str | None = None,
+    workflow: str | None = None,
+    gate_overrides: list[str] | None = None,
+):
+    """Start a new AGOS task in repo_root and dispatch it through the configured executor."""
+
+    current_dir = current_task_dir(repo_root)
+    if current_task_is_active(current_dir):
+        raise StartTaskError("Active task already exists in .agos/tasks/current")
+
+    config = load_config(repo_root)
+    workflow_name = workflow or config.default_workflow
+    overrides = gate_overrides or []
+    try:
+        resolved_gates = resolve_gates(config, workflow_name, override=overrides or None)
+    except KeyError as exc:
+        raise exc
 
     gate_ids = [gate_spec.id for gate_spec in resolved_gates]
     task = Task(
@@ -98,8 +128,7 @@ def start_command(
         run = adapter.start(task)
     except RuntimeError as exc:
         shutil.rmtree(staging_dir, ignore_errors=True)
-        typer.echo(str(exc), err=True)
-        raise typer.Exit(code=1) from exc
+        raise StartTaskError(str(exc)) from exc
 
     try:
         EvidenceStore(staging_paths.evidence).write_run(
@@ -130,4 +159,4 @@ def start_command(
         shutil.rmtree(staging_dir, ignore_errors=True)
         raise
 
-    typer.echo(run.issue_id or run.run_id)
+    return task, run

@@ -1,4 +1,4 @@
-﻿"""Read-only dashboard API payload builders."""
+"""Dashboard API payload builders."""
 from __future__ import annotations
 
 import json
@@ -8,6 +8,7 @@ from typing import Any
 
 from pydantic import BaseModel
 
+from agos.cli.cmd_start import StartTaskError, start_task
 from agos.core.config import load_config
 from agos.core.execution import ArbiterDecision, CandidatePatch, CandidateTestRun, ExecutionSubtask
 from agos.core.execution_store import ExecutionStore
@@ -179,6 +180,45 @@ def current_run_payload(repo_root: Path) -> dict[str, object]:
     }
 
 
+def start_run_payload(repo_root: Path, request_payload: dict[str, Any]) -> dict[str, object]:
+    paths = _require_initialized(repo_root)
+    title = request_payload.get("title")
+    if not isinstance(title, str) or not title.strip():
+        raise DashboardApiError("invalid_request", "title is required")
+
+    intent = request_payload.get("intent")
+    if intent is not None and not isinstance(intent, str):
+        raise DashboardApiError("invalid_request", "intent must be a string")
+
+    workflow = request_payload.get("workflow")
+    if workflow is not None:
+        if not isinstance(workflow, str):
+            raise DashboardApiError("invalid_request", "workflow must be a string")
+        workflow = workflow.strip() or None
+
+    try:
+        _task, run = start_task(
+            repo_root=paths.root,
+            title=title.strip(),
+            intent=intent.strip() if isinstance(intent, str) else None,
+            workflow=workflow,
+            gate_overrides=_parse_gate_request(request_payload.get("gates")),
+        )
+    except StartTaskError as exc:
+        raise DashboardApiError("start_failed", str(exc)) from exc
+    except KeyError as exc:
+        raise DashboardApiError("invalid_workflow", str(exc)) from exc
+
+    current = current_run_payload(paths.root)
+    return {
+        "ok": True,
+        "run_id": run.run_id,
+        "issue_id": run.issue_id,
+        "run": current["run"],
+        "current": current,
+    }
+
+
 def ledger_payload(repo_root: Path) -> dict[str, object]:
     paths = _require_initialized(repo_root)
     ledger = Ledger(paths.ledger)
@@ -340,6 +380,23 @@ def _merge_gate_payload(paths: AgosPaths) -> dict[str, object]:
     payload = result.model_dump(mode="json")
     payload["ok"] = True
     return payload
+
+
+def _parse_gate_request(value: Any) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        return [item.strip() for item in value.split(",") if item.strip()]
+    if isinstance(value, list):
+        gates: list[str] = []
+        for item in value:
+            if not isinstance(item, str):
+                raise DashboardApiError("invalid_request", "gates must contain only strings")
+            stripped = item.strip()
+            if stripped:
+                gates.append(stripped)
+        return gates
+    raise DashboardApiError("invalid_request", "gates must be a list of strings or comma-separated string")
 
 
 def _dump_model(value: BaseModel | None) -> dict[str, Any] | None:

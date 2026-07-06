@@ -1,4 +1,4 @@
-﻿"""Read-only local HTTP server for the AGOS dashboard."""
+"""Local HTTP server for the AGOS dashboard."""
 from __future__ import annotations
 
 import json
@@ -22,6 +22,7 @@ from agos.web.api import (
     ledger_payload,
     reviews_payload,
     runs_payload,
+    start_run_payload,
     status_payload,
 )
 
@@ -54,7 +55,7 @@ class DashboardHTTPServer(ThreadingHTTPServer):
 
 
 class DashboardRequestHandler(BaseHTTPRequestHandler):
-    """Read-only request handler for dashboard static assets and JSON APIs."""
+    """Request handler for dashboard static assets and JSON APIs."""
 
     server: DashboardHTTPServer
     server_version = "AGOSDashboardHTTP"
@@ -68,6 +69,19 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
             return
         if path.startswith("/api/"):
             self._serve_api(path, parse_qs(parsed.query, keep_blank_values=True))
+            return
+        self.send_error(HTTPStatus.NOT_FOUND)
+
+    def do_POST(self) -> None:
+        parsed = urlsplit(self.path)
+        if parsed.path == "/api/runs":
+            self._serve_start_run()
+            return
+        if parsed.path.startswith("/api/"):
+            self._write_json(
+                {"ok": False, "error": {"code": "not_found", "message": parsed.path}},
+                status=HTTPStatus.NOT_FOUND,
+            )
             return
         self.send_error(HTTPStatus.NOT_FOUND)
 
@@ -110,6 +124,40 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
             }
             status = HTTPStatus.INTERNAL_SERVER_ERROR
         self._write_json(payload, status=status)
+
+    def _serve_start_run(self) -> None:
+        try:
+            payload = self._read_json_body()
+            result = start_run_payload(self.server.repo_root, payload)
+            status = HTTPStatus.CREATED
+        except DashboardApiError as exc:
+            result = error_payload(exc)
+            status = HTTPStatus.BAD_REQUEST
+        except Exception:
+            result = {
+                "ok": False,
+                "error": {"code": "internal_error", "message": "Internal dashboard server error"},
+            }
+            status = HTTPStatus.INTERNAL_SERVER_ERROR
+        self._write_json(result, status=status)
+
+    def _read_json_body(self) -> dict[str, object]:
+        try:
+            content_length = int(self.headers.get("Content-Length", "0"))
+        except ValueError as exc:
+            raise DashboardApiError("invalid_request", "invalid Content-Length") from exc
+        if content_length <= 0:
+            raise DashboardApiError("invalid_request", "JSON body is required")
+        if content_length > 64 * 1024:
+            raise DashboardApiError("invalid_request", "JSON body is too large")
+        raw = self.rfile.read(content_length).decode("utf-8")
+        try:
+            payload = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            raise DashboardApiError("invalid_request", "invalid JSON body") from exc
+        if not isinstance(payload, dict):
+            raise DashboardApiError("invalid_request", "JSON body must be an object")
+        return payload
 
     def _write_json(
         self, payload: dict[str, object], status: HTTPStatus = HTTPStatus.OK

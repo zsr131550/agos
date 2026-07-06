@@ -31,6 +31,15 @@ def test_dashboard_static_index_is_packaged() -> None:
     assert "agos init" in text
     assert "agos start --title" in text
     assert "fetchJson('/api/health')" in text
+    assert "任务输入" in text
+    assert 'id="new-run-form"' in text
+    assert 'id="new-run-title"' in text
+    assert 'id="new-run-intent"' in text
+    assert 'id="new-run-workflow"' in text
+    assert 'id="new-run-gates"' in text
+    assert "createRunFromForm" in text
+    assert "fetchJson('/api/runs', {" in text
+    assert 'method: "POST"' in text
     assert "Promise.all([fetchJson('/api/health'), fetchJson('/api/runs')])" not in text
     assert "evidence.text || JSON.stringify" in text
     assert "暂无任务批次。" in text

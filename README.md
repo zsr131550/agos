@@ -83,7 +83,7 @@ flowchart LR
 
 ## 可视化控制台
 
-AGOS 提供本地只读 Dashboard，用浏览器展示当前 `.agos/` 治理状态：
+AGOS 提供本地 Dashboard，用浏览器提交新任务并展示当前 `.agos/` 治理状态：
 
 ```bash
 agos dashboard --port 0 --open
@@ -92,7 +92,8 @@ agos dashboard --port 0 --open
 默认行为：
 
 - 绑定 `127.0.0.1`，不对外暴露。
-- 第一版只读展示，不执行会修改仓库的 action。
+- 支持从页面输入任务标题、意图、workflow 和 gate override，创建并启动新的 AGOS task。
+- 除“创建任务并启动”外，其余控制台区域仍以读取 `.agos/` 状态和 evidence 为主。
 - 左侧展示当前 AGOS run，右侧展示 workflow、subagent 节点、candidate、review、merge-gate、ledger evidence 和自我蒸馏摘要。
 - evidence viewer 只允许读取 `.agos/tasks/current` 中被允许的 task/evidence refs，拒绝路径穿越和任意文件读取。
 

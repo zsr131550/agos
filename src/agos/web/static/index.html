@@ -52,6 +52,20 @@
     .subtitle { margin: 10px 0 0; color: var(--muted); line-height: 1.7; }
 
     .actions { display: flex; flex-wrap: wrap; gap: 10px; justify-content: flex-end; }
+    form.task-form { display: grid; gap: 12px; }
+    label { display: grid; gap: 6px; color: var(--muted); font-size: 13px; font-weight: 700; }
+    input, textarea {
+      width: 100%;
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      padding: 10px 12px;
+      background: var(--panel-soft);
+      color: var(--text);
+      font: inherit;
+    }
+    textarea { min-height: 92px; resize: vertical; line-height: 1.55; }
+    .form-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
+    .form-status { color: var(--muted); font-size: 13px; }
     button {
       border: 1px solid var(--line);
       border-radius: 999px;
@@ -193,7 +207,7 @@
       </div>
       <div class="actions" aria-label="控制台操作">
         <button class="primary" id="refresh-btn" type="button">刷新</button>
-        <button type="button" disabled title="演示控制台禁止直接修改运行状态">启动新运行</button>
+        <button type="button" onclick="$('new-run-title')?.focus()">启动新运行</button>
         <button type="button" disabled title="请在 CLI 中执行 merge-gate">通过 merge-gate</button>
       </div>
     </div>
@@ -210,6 +224,36 @@
 
     <div class="detail">
       <div class="error-box" id="error-box" role="alert"></div>
+
+      <section class="panel" id="task-input-panel">
+        <div class="section-title">
+          <div>
+            <h2>任务输入</h2>
+            <p>从 Dashboard 创建一个 AGOS task；等价于受控调用 <code>agos start</code> 的核心逻辑。</p>
+          </div>
+          <span class="badge warn">本地写入</span>
+        </div>
+        <form class="task-form" id="new-run-form">
+          <label>任务标题
+            <input id="new-run-title" name="title" autocomplete="off" placeholder="例如：Add API usage examples" required>
+          </label>
+          <label>任务意图 / 范围
+            <textarea id="new-run-intent" name="intent" placeholder="描述要完成的目标、边界和验收标准"></textarea>
+          </label>
+          <div class="grid cols-2">
+            <label>Workflow
+              <input id="new-run-workflow" name="workflow" placeholder="留空使用 default_workflow">
+            </label>
+            <label>Gate override
+              <input id="new-run-gates" name="gates" placeholder="可选，逗号分隔：tests_pass,lint_clean">
+            </label>
+          </div>
+          <div class="form-actions">
+            <button class="primary" id="new-run-submit" type="submit">创建任务并启动</button>
+            <span class="form-status" id="new-run-status">会写入 .agos/tasks/current，并调度已配置 executor。</span>
+          </div>
+        </form>
+      </section>
 
       <section class="panel" id="run-header">
         <div class="section-title">
@@ -281,8 +325,11 @@
       return fallback;
     }
 
-    async function fetchJson(path) {
-      const response = await fetch(path, { headers: { "Accept": "application/json" } });
+    async function fetchJson(path, options = {}) {
+      const response = await fetch(path, {
+        ...options,
+        headers: { "Accept": "application/json", ...(options.headers || {}) },
+      });
       const text = await response.text();
       let data = null;
       try { data = text ? JSON.parse(text) : null; } catch (error) { data = { raw: text }; }
@@ -299,6 +346,43 @@
         throw error;
       }
       return data;
+    }
+
+    async function createRunFromForm(event) {
+      event.preventDefault();
+      const submit = $('new-run-submit');
+      const status = $('new-run-status');
+      const title = $('new-run-title').value.trim();
+      const intent = $('new-run-intent').value.trim();
+      const workflow = $('new-run-workflow').value.trim();
+      const gates = $('new-run-gates').value.split(',').map((item) => item.trim()).filter(Boolean);
+      if (!title) {
+        status.textContent = '任务标题不能为空。';
+        $('new-run-title').focus();
+        return;
+      }
+      submit.disabled = true;
+      status.textContent = '正在创建任务...';
+      renderError(null);
+      try {
+        const payload = { title, intent };
+        if (workflow) payload.workflow = workflow;
+        if (gates.length) payload.gates = gates;
+        const result = await fetchJson('/api/runs', {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        });
+        state.current = result.run;
+        status.textContent = `已创建：${result.issue_id || result.run_id || result.run?.id || title}`;
+        $('new-run-form').reset();
+        await refreshAll();
+      } catch (error) {
+        status.textContent = `创建失败：${error.message}`;
+        renderError(error);
+      } finally {
+        submit.disabled = false;
+      }
     }
 
     function asArray(value) {
@@ -540,6 +624,7 @@
     }
 
     $('refresh-btn').addEventListener('click', refreshAll);
+    $('new-run-form').addEventListener('submit', createRunFromForm);
     refreshAll();
     window.setInterval(refreshAll, 5000);
   </script>
