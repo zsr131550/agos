@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import json
 import webbrowser
-from functools import partial
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from importlib import resources
@@ -12,6 +11,7 @@ from typing import Any, Callable
 from urllib.parse import parse_qs, urlsplit
 
 from agos.web.api import (
+    DashboardApiError,
     candidates_payload,
     config_payload,
     current_run_payload,
@@ -44,6 +44,8 @@ _API_ROUTES: dict[str, PayloadBuilder] = {
 class DashboardHTTPServer(ThreadingHTTPServer):
     """HTTP server carrying the repository root used by dashboard handlers."""
 
+    allow_reuse_address = True
+    daemon_threads = True
     repo_root: Path
 
     def __init__(self, server_address: tuple[str, int], repo_root: Path) -> None:
@@ -55,6 +57,8 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
     """Read-only request handler for dashboard static assets and JSON APIs."""
 
     server: DashboardHTTPServer
+    server_version = "AGOSDashboardHTTP"
+    sys_version = ""
 
     def do_GET(self) -> None:
         parsed = urlsplit(self.path)
@@ -85,21 +89,33 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
             if path == "/api/runs/current/evidence":
                 ref = query.get("ref", [""])[0]
                 payload = evidence_payload(self.server.repo_root, ref)
+                status = HTTPStatus.OK
             else:
                 builder = _API_ROUTES.get(path)
                 if builder is None:
                     payload = {"ok": False, "error": {"code": "not_found", "message": path}}
+                    status = HTTPStatus.NOT_FOUND
                 else:
                     payload = builder(self.server.repo_root)
                     if path == "/api/health":
                         payload = {**payload, "service": "agos-dashboard"}
-        except Exception as exc:  # API errors are reported as JSON payloads.
+                    status = HTTPStatus.OK
+        except DashboardApiError as exc:
             payload = error_payload(exc)
-        self._write_json(payload)
+            status = HTTPStatus.BAD_REQUEST
+        except Exception:
+            payload = {
+                "ok": False,
+                "error": {"code": "internal_error", "message": "Internal dashboard server error"},
+            }
+            status = HTTPStatus.INTERNAL_SERVER_ERROR
+        self._write_json(payload, status=status)
 
-    def _write_json(self, payload: dict[str, object]) -> None:
+    def _write_json(
+        self, payload: dict[str, object], status: HTTPStatus = HTTPStatus.OK
+    ) -> None:
         body = json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")
-        self.send_response(HTTPStatus.OK)
+        self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
