@@ -91,10 +91,13 @@ def read_evidence_text(
 def _safe_ref_parts(ref: str) -> tuple[str, ...]:
     if not ref:
         raise EvidenceResolutionError("empty evidence reference")
+    stripped = ref.strip()
+    if stripped.startswith(("/", "\\")):
+        raise EvidenceResolutionError("rooted evidence references are not allowed")
     if Path(ref).is_absolute() or PureWindowsPath(ref).is_absolute() or PureWindowsPath(ref).drive:
         raise EvidenceResolutionError("absolute evidence references are not allowed")
 
-    normalized = ref.replace("\\", "/")
+    normalized = stripped.replace("\\", "/")
     parts = tuple(part for part in normalized.split("/") if part)
     if not parts:
         raise EvidenceResolutionError("empty evidence reference")

@@ -65,6 +65,17 @@ def test_rejects_unsafe_evidence_refs(tmp_repo, ref: str) -> None:
         resolve_evidence_ref(paths, ref)
 
 
+@pytest.mark.parametrize("ref", ["/absolute/rooted/x.txt", r"\absolute\rooted\x.txt"])
+def test_rejects_rooted_refs_even_when_matching_evidence_file_exists(tmp_repo, ref: str) -> None:
+    paths = repo_paths(tmp_repo)
+    target = paths.evidence / "absolute" / "rooted" / "x.txt"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("no\n", encoding="utf-8")
+
+    with pytest.raises(EvidenceResolutionError):
+        resolve_evidence_ref(paths, ref)
+
+
 def test_rejects_unknown_task_relative_root(tmp_repo) -> None:
     paths = repo_paths(tmp_repo)
     (paths.current_task / "private.txt").parent.mkdir(parents=True, exist_ok=True)
