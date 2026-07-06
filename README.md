@@ -93,6 +93,7 @@ agos dashboard --port 0 --open
 
 - 绑定 `127.0.0.1`，不对外暴露。
 - 支持从页面输入任务标题、意图、workflow 和 gate override，创建并启动新的 AGOS task。
+- 独立小游戏、demo 或网页类产物默认要求执行器输出到 `outputs/<task-id>/`，Dashboard 的运行概览会展示该输出目录。
 - 除“创建任务并启动”外，其余控制台区域仍以读取 `.agos/` 状态和 evidence 为主。
 - 左侧展示当前 AGOS run，右侧展示 workflow、subagent 节点、candidate、review、merge-gate、ledger evidence 和自我蒸馏摘要。
 - evidence viewer 只允许读取 `.agos/tasks/current` 中被允许的 task/evidence refs，拒绝路径穿越和任意文件读取。

@@ -509,6 +509,7 @@
         { label: '候选 / 节点 / 门禁', value: `${asArray(candidates).length} / ${asArray(subtasks).length} / ${asArray(checks).length}` },
         { label: 'Workflow', value: workflow },
         { label: '执行 ID', value: executionId },
+        { label: '输出目录', value: run.output_ref || run.output_dir || 'outputs/<task-id>' },
         { label: '更新时间', value: run.updated_at || run.finished_at || run.started_at || 'n/a' },
       ];
       $('summary-grid').innerHTML = items.map((item) => `<div class="metric"><span>${escapeHtml(item.label)}</span><strong>${item.html || escapeHtml(item.value)}</strong></div>`).join('');

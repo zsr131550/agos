@@ -10,7 +10,7 @@ from uuid import uuid4
 from agos.core.adapter import Event, ExecutorRun, RunStatus
 from agos.core.command import run_command
 from agos.core.execution import utc_now_iso
-from agos.core.task import Task
+from agos.core.task import Task, task_output_ref
 
 
 class LocalCliExecutorAdapter:
@@ -33,6 +33,7 @@ class LocalCliExecutorAdapter:
 
     def start(self, task: Task) -> ExecutorRun:
         run_id = f"{self.name}-{uuid4().hex[:12]}"
+        (self.cwd / task_output_ref(task)).mkdir(parents=True, exist_ok=True)
         prompt = _task_prompt(task)
         args = self._start_args(prompt)
         try:
@@ -140,7 +141,19 @@ class ClaudeCodeExecutorAdapter(LocalCliExecutorAdapter):
 
 
 def _task_prompt(task: Task) -> str:
-    parts = [f"Task: {task.title}"]
+    output_ref = task_output_ref(task)
+    parts = [
+        f"Task: {task.title}",
+        "\n".join(
+            [
+                "AGOS execution contract:",
+                "- Run non-interactively. Do not ask clarifying questions; make reasonable assumptions and implement the task.",
+                f"- Use `{output_ref}` as the default output directory for standalone deliverables.",
+                "- If the task is a game, demo, or website, create a runnable entrypoint such as `index.html` in that output directory.",
+                "- Report the output directory and key files in the final response.",
+            ]
+        ),
+    ]
     if task.intent.strip():
         parts.append(task.intent.strip())
     if task.acceptance:

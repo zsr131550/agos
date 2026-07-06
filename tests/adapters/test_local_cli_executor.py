@@ -36,6 +36,7 @@ def test_local_cli_executor_records_success_events_and_status(monkeypatch, tmp_r
     calls: list[tuple[list[str], dict[str, object]]] = []
 
     def fake_run_command(args, **kwargs):
+        assert (tmp_repo / "outputs" / "agos-01").is_dir()
         calls.append((args, kwargs))
         return SimpleNamespace(returncode=0, stdout="done", stderr="")
 
@@ -119,3 +120,11 @@ def test_task_prompt_includes_intent_and_acceptance():
     assert "Update README" in prompt
     assert "- Tests pass" in prompt
     assert "- Docs updated" in prompt
+
+
+def test_task_prompt_is_noninteractive_and_declares_output_directory():
+    prompt = _task_prompt(_task())
+
+    assert "Do not ask clarifying questions" in prompt
+    assert "outputs/agos-01" in prompt
+    assert "Report the output directory" in prompt

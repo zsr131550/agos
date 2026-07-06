@@ -46,6 +46,12 @@ def new_task_id() -> str:
     return str(ULID())
 
 
+def task_output_ref(task: Task) -> str:
+    """Return the default workspace-relative output directory for a task."""
+
+    return f"outputs/{task.id}"
+
+
 def save_task(task: Task, path: Path) -> None:
     """Write `task.yaml` in a stable, human-readable form."""
 

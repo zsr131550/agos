@@ -73,6 +73,8 @@ def test_runs_and_current_run_payloads_include_pipeline_state(dashboard_repo: Pa
     assert current["run"]["title"] == "构建可视化控制台"
     assert current["run"]["workflow"] == "feature"
     assert current["run"]["phase"] == "executing"
+    assert Path(current["run"]["output_dir"]).parts[-2:] == ("outputs", "agos-dashboard-01")
+    assert current["run"]["output_ref"] == "outputs/agos-dashboard-01"
     assert current["run"]["task"]["workflow"] == "feature"
     assert current["run"]["status"]["phase"] == "executing"
     assert current["run"]["execution"]["plan"]["id"] == "plan-dashboard-01"

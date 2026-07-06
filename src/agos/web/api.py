@@ -16,7 +16,7 @@ from agos.core.ledger import Ledger
 from agos.core.merge_gate import verify_merge_gate
 from agos.core.repo import AgosPaths, git_head, repo_paths
 from agos.core.status import load_status
-from agos.core.task import load_task
+from agos.core.task import load_task, task_output_ref
 from agos.web.evidence import EvidenceResolutionError, read_evidence_text, resolve_evidence_ref
 
 
@@ -132,6 +132,8 @@ def current_run_payload(repo_root: Path) -> dict[str, object]:
         "workflow": task.workflow,
         "phase": status.phase,
         "executor_run": _dump_model(status.executor_run),
+        "output_ref": task_output_ref(task),
+        "output_dir": str(paths.root / task_output_ref(task)),
     }
     pipeline = {
         "task_id": task.id,
