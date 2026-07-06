@@ -23,6 +23,11 @@ def test_dashboard_static_index_is_packaged() -> None:
     assert "row.title" in text
     assert "ledger_verified" in text
     assert "evidence.text" in text
+    assert "value.includes('<span')" not in text
+    assert "html: statusBadge(phase)" in text
+    assert "data?.error?.message" in text
+    assert "errorMessage(data" in text
+    assert "evidence.text || JSON.stringify" in text
     assert "暂无任务批次。" in text
     assert "候选 / 节点 / 门禁" in text
     assert "执行 ID" in text

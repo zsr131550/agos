@@ -274,14 +274,23 @@
 
     const $ = (id) => document.getElementById(id);
 
+    function errorMessage(data, fallback) {
+      if (typeof data?.error?.message === 'string') return data.error.message;
+      if (typeof data?.error === 'string') return data.error;
+      if (typeof data?.message === 'string') return data.message;
+      return fallback;
+    }
+
     async function fetchJson(path) {
       const response = await fetch(path, { headers: { "Accept": "application/json" } });
       const text = await response.text();
       let data = null;
       try { data = text ? JSON.parse(text) : null; } catch (error) { data = { raw: text }; }
       if (!response.ok) {
-        const message = data && (data.error || data.message) ? (data.error || data.message) : `HTTP ${response.status}`;
-        throw new Error(`${path}: ${message}`);
+        throw new Error(`${path}: ${errorMessage(data, `HTTP ${response.status}`)}`);
+      }
+      if (data && data.ok === false) {
+        throw new Error(`${path}: ${errorMessage(data, '业务请求失败')}`);
       }
       return data;
     }
@@ -385,14 +394,15 @@
       const phase = run.phase || run.status?.phase || run.status?.state || 'unknown';
       const workflow = run.workflow || run.task?.workflow || run.pipeline?.workflow || '默认 workflow';
       const executionId = run.id || run.task?.id || run.execution?.plan?.id || 'n/a';
-      $('summary-grid').innerHTML = [
-        ['任务', taskTitle],
-        ['状态', statusBadge(phase)],
-        ['候选 / 节点 / 门禁', `${asArray(candidates).length} / ${asArray(subtasks).length} / ${asArray(checks).length}`],
-        ['Workflow', workflow],
-        ['执行 ID', executionId],
-        ['更新时间', run.updated_at || run.finished_at || run.started_at || 'n/a'],
-      ].map(([label, value]) => `<div class="metric"><span>${escapeHtml(label)}</span><strong>${typeof value === 'string' && value.includes('<span') ? value : escapeHtml(value)}</strong></div>`).join('');
+      const items = [
+        { label: '任务', value: taskTitle },
+        { label: '状态', html: statusBadge(phase) },
+        { label: '候选 / 节点 / 门禁', value: `${asArray(candidates).length} / ${asArray(subtasks).length} / ${asArray(checks).length}` },
+        { label: 'Workflow', value: workflow },
+        { label: '执行 ID', value: executionId },
+        { label: '更新时间', value: run.updated_at || run.finished_at || run.started_at || 'n/a' },
+      ];
+      $('summary-grid').innerHTML = items.map((item) => `<div class="metric"><span>${escapeHtml(item.label)}</span><strong>${item.html || escapeHtml(item.value)}</strong></div>`).join('');
     }
 
     function renderPipeline(pipeline) {
