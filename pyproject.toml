@@ -54,6 +54,7 @@ where = ["src"]
 
 [tool.setuptools.package-data]
 "agos.hooks.templates" = ["*.sh"]
+"agos.web" = ["static/*.html"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
