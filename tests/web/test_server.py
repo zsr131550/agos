@@ -423,3 +423,67 @@ def test_dashboard_server_post_review_run_uses_selected_reviewer(tmp_repo) -> No
     assert status == 201
     assert payload["ok"] is True
     assert payload["review_run"]["reviewers"] == ["tests"]
+
+
+def test_dashboard_server_post_select_agent_option_dispatches_executor(
+    tmp_repo,
+    monkeypatch,
+) -> None:
+    write_dashboard_config(tmp_repo)
+    from agos.core.adapter import ExecutorRun
+    from agos.core.ledger import Ledger
+    from agos.core.repo import repo_paths
+    from agos.core.status import TaskStatus, save_status
+    from agos.core.task import ExecutorBinding, Task, save_task
+
+    paths = repo_paths(tmp_repo)
+    task = Task(
+        id="agos-option-web",
+        title="Continue selected option",
+        workflow="feature",
+        gates=[],
+        executor=ExecutorBinding(adapter="multica", agent="Lambda"),
+    )
+    save_task(task, paths.task_yaml)
+    ledger = Ledger(paths.ledger)
+    started = ledger.append({"type": "task_started", "task_id": task.id, "title": task.title})
+    ledger.append(
+        {
+            "type": "executor_completed",
+            "run_id": "run-option-source",
+            "state": "completed",
+            "detail": json.dumps(
+                {
+                    "type": "item.completed",
+                    "item": {
+                        "type": "agent_message",
+                        "text": "方案 A：Implement the selected dashboard path",
+                    },
+                },
+                ensure_ascii=False,
+            ),
+        }
+    )
+    save_status(
+        TaskStatus.for_started_task(
+            task=task,
+            run=ExecutorRun(adapter="multica", run_id="run-option-source", issue_id=None),
+            ledger_head_hash=started["hash"],
+        ),
+        paths,
+    )
+    monkeypatch.setattr(
+        "agos.cli.executor_registry.MulticaAdapter.start",
+        lambda self, task: SimpleNamespace(adapter="multica", run_id="run-option-followup", issue_id="AGO-2"),
+    )
+
+    with running_dashboard_server(tmp_repo) as server:
+        status, payload = post_json(
+            f"http://127.0.0.1:{server.server_port}/api/runs/current/agent-options/select",
+            {"option_id": "option-1"},
+        )
+
+    assert status == 201
+    assert payload["ok"] is True
+    assert payload["run_id"] == "run-option-followup"
+    assert payload["selected_option"]["id"] == "option-1"

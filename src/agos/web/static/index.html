@@ -315,7 +315,7 @@
       </section>
 
       <section class="panel" id="agent-options-panel">
-        <div class="section-title"><div><h2>Agent 返回方案</h2><p>从 executor 原始返回中提取的自然语言方案，并关联到实际候选补丁。</p></div></div>
+        <div class="section-title"><div><h2>Agent 返回方案</h2><p>从 executor 原始返回中提取的自然语言方案，并关联到实际候选补丁。</p></div><span class="form-status" id="agent-options-status"></span></div>
         <div id="agent-options-view"></div>
       </section>
 
@@ -524,6 +524,32 @@
       } catch (error) {
         $('new-run-status').textContent = `继续归档任务失败：${error.message}`;
         renderError(error);
+      }
+    }
+
+    async function selectAgentOption(optionId) {
+      renderError(null);
+      const status = $('agent-options-status');
+      status.textContent = `正在返回 ${optionId} 给 Agent...`;
+      document.querySelectorAll('[data-agent-option-id]').forEach((button) => {
+        button.disabled = true;
+      });
+      try {
+        const result = await fetchJson('/api/runs/current/agent-options/select', {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ option_id: optionId }),
+        });
+        state.current = result.run;
+        status.textContent = `已返回给 Agent：${result.run_id || optionId}`;
+        await refreshAll();
+      } catch (error) {
+        status.textContent = `返回给 Agent 失败：${error.message}`;
+        renderError(error);
+      } finally {
+        document.querySelectorAll('[data-agent-option-id]').forEach((button) => {
+          button.disabled = false;
+        });
       }
     }
 
@@ -836,13 +862,18 @@
       const rows = asArray(agentOptions?.options);
       if (!rows.length) {
         $('agent-options-view').innerHTML = '<div class="empty">暂无 Agent 返回方案。</div>';
+        $('agent-options-status').textContent = '';
         return;
       }
-      $('agent-options-view').innerHTML = `<table><thead><tr><th>方案</th><th>映射状态</th><th>对应候选补丁</th><th>摘要</th></tr></thead><tbody>${rows.map((row, index) => {
+      $('agent-options-view').innerHTML = `<table><thead><tr><th>方案</th><th>映射状态</th><th>对应候选补丁</th><th>摘要</th><th>操作</th></tr></thead><tbody>${rows.map((row, index) => {
         const mapped = row.mapped_candidate_id || '';
         const mappingState = mapped ? (row.mapped_candidate_status || 'mapped') : 'unmapped';
-        return `<tr><td>${escapeHtml(row.title || `option-${index + 1}`)}</td><td>${statusBadge(mappingState)}</td><td>${escapeHtml(mapped || '未映射')}</td><td>${escapeHtml(row.summary || '')}</td></tr>`;
+        const optionId = row.id || `option-${index + 1}`;
+        return `<tr><td>${escapeHtml(row.title || optionId)}</td><td>${statusBadge(mappingState)}</td><td>${escapeHtml(mapped || '未映射')}</td><td>${escapeHtml(row.summary || '')}</td><td><button type="button" data-agent-option-id="${escapeHtml(optionId)}">返回给 Agent</button></td></tr>`;
       }).join('')}</tbody></table>`;
+      document.querySelectorAll('[data-agent-option-id]').forEach((button) => {
+        button.addEventListener('click', () => selectAgentOption(button.getAttribute('data-agent-option-id')));
+      });
     }
 
     function renderCandidates(candidates) {

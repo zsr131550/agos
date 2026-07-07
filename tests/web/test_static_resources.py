@@ -66,6 +66,10 @@ def test_dashboard_static_index_is_packaged() -> None:
     assert "Agent \u8fd4\u56de\u65b9\u6848" in text
     assert "renderAgentOptions(run.agent_options)" in text
     assert "mapped_candidate_id" in text
+    assert "selectAgentOption" in text
+    assert "/api/runs/current/agent-options/select" in text
+    assert "data-agent-option-id" in text
+    assert "\u8fd4\u56de\u7ed9 Agent" in text
     assert "fetchJson('/api/runs', {" in text
     assert "replace_active" in text
     assert "fetchJson('/api/runs/current/archive', {" in text

@@ -29,6 +29,7 @@ from agos.web.api import (
     restart_current_task_payload,
     resume_current_task_payload,
     runs_payload,
+    select_agent_option_payload,
     start_run_payload,
     status_payload,
 )
@@ -96,6 +97,9 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
             return
         if parsed.path == "/api/runs/current/restart":
             self._serve_simple_post(restart_current_task_payload)
+            return
+        if parsed.path == "/api/runs/current/agent-options/select":
+            self._serve_select_agent_option()
             return
         archive_prefix = "/api/runs/archive/"
         if parsed.path.startswith(archive_prefix) and parsed.path.endswith("/continue"):
@@ -221,6 +225,22 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
         try:
             payload = self._read_json_body()
             result = review_run_payload(self.server.repo_root, payload)
+            status = HTTPStatus.CREATED
+        except DashboardApiError as exc:
+            result = error_payload(exc)
+            status = HTTPStatus.BAD_REQUEST
+        except Exception:
+            result = {
+                "ok": False,
+                "error": {"code": "internal_error", "message": "Internal dashboard server error"},
+            }
+            status = HTTPStatus.INTERNAL_SERVER_ERROR
+        self._write_json(result, status=status)
+
+    def _serve_select_agent_option(self) -> None:
+        try:
+            payload = self._read_json_body()
+            result = select_agent_option_payload(self.server.repo_root, payload)
             status = HTTPStatus.CREATED
         except DashboardApiError as exc:
             result = error_payload(exc)

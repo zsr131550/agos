@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-from agos.core.adapter import ExecutorRun
+from agos.core.adapter import ExecutorRun, RunStatus
 from agos.core.config import AGOSConfig, ReviewerConfig, WorkerConfig
 from agos.core.execution import (
     ArbiterDecision,
@@ -43,6 +43,7 @@ from agos.web.api import (
     restart_current_task_payload,
     resume_current_task_payload,
     runs_payload,
+    select_agent_option_payload,
     start_run_payload,
     status_payload,
 )
@@ -477,6 +478,69 @@ def test_current_run_payload_maps_agent_returned_options_to_candidates(
     assert options[0]["mapped_candidate_status"] == "accepted"
     assert options[1]["mapped_candidate_id"] is None
     assert payload["agent_options"]["options"][0]["mapped_candidate_id"] == "candidate-01"
+
+
+def test_select_agent_option_payload_dispatches_followup_executor(
+    dashboard_repo: Path,
+    monkeypatch,
+) -> None:
+    paths = repo_paths(dashboard_repo)
+    ledger = Ledger(paths.ledger)
+    ledger.append(
+        {
+            "type": "executor_completed",
+            "run_id": "run-01",
+            "state": "completed",
+            "detail": json.dumps(
+                {
+                    "type": "item.completed",
+                    "item": {
+                        "type": "agent_message",
+                        "text": "方案 A：Add read-only dashboard API payloads",
+                    },
+                },
+                ensure_ascii=False,
+            ),
+        }
+    )
+    captured: dict[str, Task] = {}
+
+    def fake_start(self, task: Task) -> ExecutorRun:
+        captured["task"] = task
+        return ExecutorRun(adapter=self.name, run_id="followup-run-01", issue_id=None)
+
+    monkeypatch.setattr("agos.adapters.local_cli_executor.CodexCliExecutorAdapter.start", fake_start)
+    monkeypatch.setattr(
+        "agos.adapters.local_cli_executor.CodexCliExecutorAdapter.status",
+        lambda *_args, **_kwargs: RunStatus(state="running"),
+    )
+
+    payload = select_agent_option_payload(dashboard_repo, {"option_id": "option-1"})
+
+    assert payload["ok"] is True
+    assert payload["selected_option"]["id"] == "option-1"
+    assert payload["selected_option"]["mapped_candidate_id"] == "candidate-01"
+    assert payload["run_id"] == "followup-run-01"
+    assert captured["task"].id == "agos-dashboard-01"
+    assert captured["task"].title == "构建可视化控制台"
+    assert "Dashboard selected Agent option" in captured["task"].intent
+    assert "方案 A" in captured["task"].intent
+    assert "candidate-01" in captured["task"].intent
+
+    records = [record for record in Ledger(paths.ledger).read_all() if record["type"] in {
+        "agent_option_selected",
+        "executor_dispatched",
+    }]
+    assert records[-2]["type"] == "agent_option_selected"
+    assert records[-2]["option_id"] == "option-1"
+    assert records[-2]["mapped_candidate_id"] == "candidate-01"
+    assert records[-1]["type"] == "executor_dispatched"
+    assert records[-1]["triggered_by"] == "agent_option_selected"
+    status = load_status(paths)
+    assert status is not None
+    assert status.phase == "executing"
+    assert status.executor_run is not None
+    assert status.executor_run.run_id == "followup-run-01"
 
 
 def test_runs_payload_returns_empty_list_without_active_task(tmp_repo: Path) -> None:

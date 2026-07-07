@@ -16,12 +16,15 @@ from typing import Any
 
 from pydantic import BaseModel
 
+from agos.adapters.local_cli_executor import LocalCliExecutorAdapter
 from agos.adapters.reviewers import LlmCliReviewerAdapter
+from agos.cli.executor_registry import executor_adapter_for
 from agos.cli.cmd_review import run_review
 from agos.cli.cmd_start import StartTaskError, start_task
 from agos.cli.cmd_start import ExecutorSelection
-from agos.core.adapter import ExecutorRun
+from agos.core.adapter import ExecutorRun, RunStatus
 from agos.core.config import load_config
+from agos.core.evidence import EvidenceStore
 from agos.core.execution import ArbiterDecision, CandidatePatch, CandidateTestRun, ExecutionSubtask
 from agos.core.execution_store import ExecutionStore
 from agos.core.ledger import Ledger
@@ -31,7 +34,7 @@ from agos.core.review_service import ReviewService
 from agos.core.review_store import ReviewStore
 from agos.core.repo import AgosPaths, git_head, repo_paths, task_paths
 from agos.core.status import TaskStatus, load_status, save_status
-from agos.core.task import load_task, task_output_ref
+from agos.core.task import Task, load_task, task_output_ref
 from agos.web.evidence import EvidenceResolutionError, read_evidence_text, resolve_evidence_ref
 
 
@@ -344,6 +347,117 @@ def restart_current_task_payload(repo_root: Path) -> dict[str, object]:
     )
 
 
+def select_agent_option_payload(repo_root: Path, request_payload: dict[str, Any]) -> dict[str, object]:
+    """Send a selected agent-returned option back through the active task executor."""
+
+    paths = _require_initialized(repo_root)
+    task = _load_current_task(paths)
+    status = load_status(paths)
+    if status is None:
+        raise DashboardApiError(
+            "status_missing",
+            "Current AGOS task status is missing.",
+            hint="Run AGOS task start/status recovery before selecting an agent option.",
+        )
+    option_id = request_payload.get("option_id")
+    if not isinstance(option_id, str) or not option_id.strip():
+        raise DashboardApiError("invalid_request", "option_id is required")
+    selected = _find_agent_option(paths, option_id.strip())
+    ledger = Ledger(paths.ledger)
+    selection_record = ledger.append(
+        {
+            "type": "agent_option_selected",
+            "task_id": task.id,
+            "option_id": selected["id"],
+            "title": selected["title"],
+            "summary": selected["summary"],
+            "source_run_id": selected.get("source_run_id"),
+            "mapped_candidate_id": selected.get("mapped_candidate_id"),
+        }
+    )
+
+    task_for_executor = task.model_copy(
+        update={"intent": _agent_option_followup_intent(task, selected)}
+    )
+    adapter = _executor_adapter_for_task(paths, task)
+    try:
+        run = adapter.start(task_for_executor)
+    except Exception as exc:
+        failed_record = ledger.append(
+            {
+                "type": "agent_option_dispatch_failed",
+                "task_id": task.id,
+                "option_id": selected["id"],
+                "error": str(exc),
+                "selected_event_hash": selection_record["hash"],
+            }
+        )
+        status.phase = "blocked"
+        status.ledger_head_hash = failed_record["hash"]
+        save_status(status, paths)
+        raise DashboardApiError("agent_option_dispatch_failed", str(exc)) from exc
+
+    EvidenceStore(paths.evidence).write_run(
+        run.run_id,
+        {
+            "task_id": task.id,
+            "adapter": run.adapter,
+            "run_id": run.run_id,
+            "issue_id": run.issue_id,
+            "triggered_by": "agent_option_selected",
+            "selected_option_id": selected["id"],
+            "mapped_candidate_id": selected.get("mapped_candidate_id"),
+        },
+    )
+    dispatched_record = ledger.append(
+        {
+            "type": "executor_dispatched",
+            "task_id": task.id,
+            "adapter": run.adapter,
+            "run_id": run.run_id,
+            "issue_id": run.issue_id,
+            "triggered_by": "agent_option_selected",
+            "selected_option_id": selected["id"],
+            "mapped_candidate_id": selected.get("mapped_candidate_id"),
+            "selected_event_hash": selection_record["hash"],
+        }
+    )
+    next_status = TaskStatus.for_started_task(
+        task=task,
+        run=run,
+        ledger_head_hash=dispatched_record["hash"],
+    )
+    next_status.gates = status.gates
+    terminal_status = _safe_dashboard_initial_run_status(adapter, run)
+    if terminal_status is not None and terminal_status.state != "running":
+        terminal_record = ledger.append(
+            {
+                "type": "executor_completed"
+                if terminal_status.state == "completed"
+                else "executor_blocked",
+                "task_id": task.id,
+                "run_id": run.run_id,
+                "issue_id": run.issue_id,
+                "state": terminal_status.state,
+                "detail": terminal_status.detail,
+                "triggered_by": "agent_option_selected",
+                "selected_option_id": selected["id"],
+            }
+        )
+        next_status.phase = "done" if terminal_status.state == "completed" else "blocked"
+        next_status.ledger_head_hash = terminal_record["hash"]
+    save_status(next_status, paths)
+    current = current_run_payload(paths.root)
+    return {
+        "ok": True,
+        "selected_option": selected,
+        "run_id": run.run_id,
+        "issue_id": run.issue_id,
+        "run": current["run"],
+        "current": current,
+    }
+
+
 def review_run_payload(repo_root: Path, request_payload: dict[str, Any]) -> dict[str, object]:
     paths = _require_initialized(repo_root)
     reviewers = _parse_reviewer_request(request_payload.get("reviewer"))
@@ -537,6 +651,62 @@ def _candidate_for_agent_option(
 
 def _normalize_option_text(value: str) -> str:
     return re.sub(r"\s+", " ", value.strip().lower())
+
+
+def _find_agent_option(paths: AgosPaths, option_id: str) -> dict[str, object]:
+    current = current_run_payload(paths.root)
+    agent_options = current.get("agent_options")
+    options = agent_options.get("options") if isinstance(agent_options, dict) else []
+    if isinstance(options, list):
+        for option in options:
+            if isinstance(option, dict) and option.get("id") == option_id:
+                return option
+    raise DashboardApiError("agent_option_not_found", f"Agent option not found: {option_id}")
+
+
+def _agent_option_followup_intent(task: Task, option: dict[str, object]) -> str:
+    lines = [
+        task.intent.strip(),
+        "Dashboard selected Agent option:",
+        f"- Option ID: {option.get('id')}",
+        f"- Title: {option.get('title')}",
+        f"- Summary: {option.get('summary')}",
+        f"- Source run: {option.get('source_run_id') or 'n/a'}",
+        f"- Mapped candidate patch: {option.get('mapped_candidate_id') or 'none'}",
+        "",
+        "Continue non-interactively using this selected option. "
+        "Implement concrete artifacts or update the mapped candidate patch evidence as appropriate.",
+    ]
+    return "\n".join(line for line in lines if line is not None).strip()
+
+
+def _executor_adapter_for_task(paths: AgosPaths, task: Task):
+    return executor_adapter_for(
+        paths,
+        task.executor.adapter,
+        command=_command_for_task_executor(paths, task),
+    )
+
+
+def _command_for_task_executor(paths: AgosPaths, task: Task) -> str | None:
+    config = load_config(paths.root)
+    if config.executor.name == task.executor.adapter and config.executor.agent == task.executor.agent:
+        return config.executor.command
+    for name, worker in config.workers.items():
+        if worker.type != task.executor.adapter:
+            continue
+        if worker.agent == task.executor.agent or name == task.executor.agent:
+            return worker.command
+    return None
+
+
+def _safe_dashboard_initial_run_status(adapter: object, run: ExecutorRun) -> RunStatus | None:
+    if not isinstance(adapter, LocalCliExecutorAdapter):
+        return None
+    try:
+        return adapter.status(run.run_id, issue_id=run.issue_id)
+    except Exception:
+        return None
 
 
 def reviews_payload(repo_root: Path) -> dict[str, object]:
