@@ -226,8 +226,9 @@ def test_runs_payload_uses_completed_executor_evidence_for_current_phase(dashboa
     assert load_status(paths).phase == "done"
 
 
-def test_restart_payload_keeps_explicit_restarted_phase_for_completed_output(
+def test_restart_payload_dispatches_new_executor_for_completed_output(
     dashboard_repo: Path,
+    monkeypatch,
 ) -> None:
     paths = repo_paths(dashboard_repo)
     run_id = "run-01"
@@ -238,16 +239,32 @@ def test_restart_payload_keeps_explicit_restarted_phase_for_completed_output(
         encoding="utf-8",
     )
     assert current_run_payload(dashboard_repo)["run"]["phase"] == "done"
+    captured: dict[str, Task] = {}
+
+    def fake_start(self, task: Task) -> ExecutorRun:
+        captured["task"] = task
+        return ExecutorRun(adapter=self.name, run_id="run-restarted-01", issue_id=None)
+
+    monkeypatch.setattr("agos.adapters.local_cli_executor.CodexCliExecutorAdapter.start", fake_start)
+    monkeypatch.setattr(
+        "agos.adapters.local_cli_executor.CodexCliExecutorAdapter.status",
+        lambda *_args, **_kwargs: RunStatus(state="running"),
+    )
 
     restarted = restart_current_task_payload(dashboard_repo)
     current = current_run_payload(dashboard_repo)
 
     assert restarted["run"]["phase"] == "executing"
+    assert restarted["run"]["executor_run"]["run_id"] == "run-restarted-01"
     assert current["run"]["phase"] == "executing"
+    assert current["run"]["executor_run"]["run_id"] == "run-restarted-01"
+    assert captured["task"].id == "agos-dashboard-01"
     status = load_status(paths)
     assert status is not None
     assert status.phase == "executing"
-    assert status.last_event_seq is not None
+    assert status.executor_run is not None
+    assert status.executor_run.run_id == "run-restarted-01"
+    assert status.last_event_seq is None
 
 
 def test_completed_executor_without_outputs_is_blocked_not_done(dashboard_repo: Path) -> None:
@@ -269,8 +286,9 @@ def test_completed_executor_without_outputs_is_blocked_not_done(dashboard_repo: 
     assert load_status(paths).phase == "blocked"
 
 
-def test_completed_executor_without_outputs_stays_blocked_after_lifecycle_actions(
+def test_completed_executor_without_outputs_lifecycle_actions_dispatch_new_executor(
     dashboard_repo: Path,
+    monkeypatch,
 ) -> None:
     paths = repo_paths(dashboard_repo)
     shutil.rmtree(paths.current_task / "execution")
@@ -284,28 +302,54 @@ def test_completed_executor_without_outputs_stays_blocked_after_lifecycle_action
         encoding="utf-8",
     )
     assert current_run_payload(dashboard_repo)["run"]["phase"] == "blocked"
+    dispatched: list[Task] = []
+
+    def fake_start(self, task: Task) -> ExecutorRun:
+        dispatched.append(task)
+        return ExecutorRun(adapter=self.name, run_id=f"run-lifecycle-{len(dispatched)}", issue_id=None)
+
+    monkeypatch.setattr("agos.adapters.local_cli_executor.CodexCliExecutorAdapter.start", fake_start)
+    monkeypatch.setattr(
+        "agos.adapters.local_cli_executor.CodexCliExecutorAdapter.status",
+        lambda *_args, **_kwargs: RunStatus(state="running"),
+    )
 
     resumed = resume_current_task_payload(dashboard_repo)
     restarted = restart_current_task_payload(dashboard_repo)
     current = current_run_payload(dashboard_repo)
 
-    assert resumed["run"]["phase"] == "blocked"
-    assert restarted["run"]["phase"] == "blocked"
-    assert current["run"]["phase"] == "blocked"
+    assert [task.id for task in dispatched] == ["agos-dashboard-01", "agos-dashboard-01"]
+    assert resumed["run"]["phase"] == "executing"
+    assert resumed["run"]["executor_run"]["run_id"] == "run-lifecycle-1"
+    assert restarted["run"]["phase"] == "executing"
+    assert restarted["run"]["executor_run"]["run_id"] == "run-lifecycle-2"
+    assert current["run"]["phase"] == "executing"
+    assert current["run"]["executor_run"]["run_id"] == "run-lifecycle-2"
     status = load_status(paths)
     assert status is not None
-    assert status.phase == "blocked"
+    assert status.phase == "executing"
+    assert status.executor_run is not None
+    assert status.executor_run.run_id == "run-lifecycle-2"
     assert status.last_event_seq is None
     records = Ledger(paths.ledger).read_all()
-    lifecycle_records = [
+    lifecycle_records = [record for record in records if record["type"] in {
+        "dashboard_resumed",
+        "dashboard_restarted",
+    }]
+    dispatch_records = [
         record
         for record in records
-        if record["type"] in {"dashboard_resumed", "dashboard_restarted"}
+        if record["type"] == "executor_dispatched"
+        and record.get("triggered_by") in {"dashboard_resumed", "dashboard_restarted"}
     ]
-    assert [record["phase"] for record in lifecycle_records[-2:]] == ["blocked", "blocked"]
-    assert [record["requested_phase"] for record in lifecycle_records[-2:]] == [
-        "executing",
-        "executing",
+    assert [record["phase"] for record in lifecycle_records[-2:]] == ["executing", "executing"]
+    assert [record["triggered_by"] for record in dispatch_records[-2:]] == [
+        "dashboard_resumed",
+        "dashboard_restarted",
+    ]
+    assert [record["run_id"] for record in dispatch_records[-2:]] == [
+        "run-lifecycle-1",
+        "run-lifecycle-2",
     ]
 
 
@@ -322,8 +366,22 @@ def test_continue_archived_task_payload_restores_archive_as_current(dashboard_re
     assert not Path(archived["archive_path"]).exists()
 
 
-def test_current_task_lifecycle_payloads_update_phase(dashboard_repo: Path) -> None:
+def test_current_task_lifecycle_payloads_dispatch_executor_runs(
+    dashboard_repo: Path,
+    monkeypatch,
+) -> None:
     paths = repo_paths(dashboard_repo)
+    dispatched: list[Task] = []
+
+    def fake_start(self, task: Task) -> ExecutorRun:
+        dispatched.append(task)
+        return ExecutorRun(adapter=self.name, run_id=f"run-dashboard-{len(dispatched)}", issue_id=None)
+
+    monkeypatch.setattr("agos.adapters.local_cli_executor.CodexCliExecutorAdapter.start", fake_start)
+    monkeypatch.setattr(
+        "agos.adapters.local_cli_executor.CodexCliExecutorAdapter.status",
+        lambda *_args, **_kwargs: RunStatus(state="running"),
+    )
 
     paused = pause_current_task_payload(dashboard_repo)
     assert paused["run"]["phase"] == "blocked"
@@ -331,16 +389,42 @@ def test_current_task_lifecycle_payloads_update_phase(dashboard_repo: Path) -> N
 
     resumed = resume_current_task_payload(dashboard_repo)
     assert resumed["run"]["phase"] == "executing"
-    assert load_status(paths).phase == "executing"
+    assert resumed["run"]["executor_run"]["run_id"] == "run-dashboard-1"
+    status = load_status(paths)
+    assert status is not None
+    assert status.phase == "executing"
+    assert status.executor_run is not None
+    assert status.executor_run.run_id == "run-dashboard-1"
 
     restarted = restart_current_task_payload(dashboard_repo)
     assert restarted["run"]["phase"] == "executing"
-    assert load_status(paths).phase == "executing"
+    assert restarted["run"]["executor_run"]["run_id"] == "run-dashboard-2"
+    status = load_status(paths)
+    assert status is not None
+    assert status.phase == "executing"
+    assert status.executor_run is not None
+    assert status.executor_run.run_id == "run-dashboard-2"
+    assert [task.id for task in dispatched] == ["agos-dashboard-01", "agos-dashboard-01"]
     records = Ledger(paths.ledger).read_all()
-    assert [record["type"] for record in records[-3:]] == [
+    lifecycle_records = [record for record in records if record["type"] in {
         "dashboard_paused",
         "dashboard_resumed",
         "dashboard_restarted",
+    }]
+    assert [record["type"] for record in lifecycle_records[-3:]] == [
+        "dashboard_paused",
+        "dashboard_resumed",
+        "dashboard_restarted",
+    ]
+    dispatch_records = [
+        record
+        for record in records
+        if record["type"] == "executor_dispatched"
+        and record.get("triggered_by") in {"dashboard_resumed", "dashboard_restarted"}
+    ]
+    assert [record["run_id"] for record in dispatch_records[-2:]] == [
+        "run-dashboard-1",
+        "run-dashboard-2",
     ]
 
 

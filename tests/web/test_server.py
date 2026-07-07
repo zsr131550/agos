@@ -274,7 +274,7 @@ def test_dashboard_server_post_continue_archived_task(tmp_repo) -> None:
     assert (current / "task.yaml").is_file()
 
 
-def test_dashboard_server_post_current_lifecycle_actions(tmp_repo) -> None:
+def test_dashboard_server_post_current_lifecycle_actions(tmp_repo, monkeypatch) -> None:
     write_dashboard_config(tmp_repo)
     from agos.core.adapter import ExecutorRun
     from agos.core.ledger import Ledger
@@ -301,6 +301,13 @@ def test_dashboard_server_post_current_lifecycle_actions(tmp_repo) -> None:
         ),
         paths,
     )
+    dispatches: list[Task] = []
+
+    def fake_start(self, task: Task) -> ExecutorRun:
+        dispatches.append(task)
+        return ExecutorRun(adapter="multica", run_id=f"run-life-web-{len(dispatches)}", issue_id=None)
+
+    monkeypatch.setattr("agos.cli.executor_registry.MulticaAdapter.start", fake_start)
 
     with running_dashboard_server(tmp_repo) as server:
         base = f"http://127.0.0.1:{server.server_port}"
@@ -311,11 +318,14 @@ def test_dashboard_server_post_current_lifecycle_actions(tmp_repo) -> None:
     assert status_pause == status_resume == status_restart == 200
     assert paused["run"]["phase"] == "blocked"
     assert resumed["run"]["phase"] == "executing"
+    assert resumed["run"]["executor_run"]["run_id"] == "run-life-web-1"
     assert restarted["run"]["phase"] == "executing"
+    assert restarted["run"]["executor_run"]["run_id"] == "run-life-web-2"
+    assert [task.id for task in dispatches] == ["agos-life-web", "agos-life-web"]
     assert load_status(paths).phase == "executing"
 
 
-def test_dashboard_server_serializes_concurrent_lifecycle_posts(tmp_repo) -> None:
+def test_dashboard_server_serializes_concurrent_lifecycle_posts(tmp_repo, monkeypatch) -> None:
     write_dashboard_config(tmp_repo)
     from agos.core.adapter import ExecutorRun
     from agos.core.ledger import Ledger
@@ -342,6 +352,18 @@ def test_dashboard_server_serializes_concurrent_lifecycle_posts(tmp_repo) -> Non
         ),
         paths,
     )
+    dispatch_count = 0
+    dispatch_lock = threading.Lock()
+
+    def fake_start(self, task: Task) -> ExecutorRun:
+        nonlocal dispatch_count
+        del self, task
+        with dispatch_lock:
+            dispatch_count += 1
+            run_id = f"run-life-concurrent-{dispatch_count}"
+        return ExecutorRun(adapter="multica", run_id=run_id, issue_id=None)
+
+    monkeypatch.setattr("agos.cli.executor_registry.MulticaAdapter.start", fake_start)
 
     def post_action(base: str, action: str) -> tuple[int, dict[str, object]]:
         return post_json(f"{base}/api/runs/current/{action}", {})
@@ -361,7 +383,10 @@ def test_dashboard_server_serializes_concurrent_lifecycle_posts(tmp_repo) -> Non
     assert all(payload["ok"] is True for _status, payload in results)
     assert ledger_payload["verified"] is True
     assert ledger_payload["error"] is None
-    assert ledger_payload["count"] == 1 + len(actions)
+    assert dispatch_count == actions.count("resume") + actions.count("restart")
+    assert ledger_payload["count"] == 1 + actions.count("pause") + (
+        actions.count("resume") + actions.count("restart")
+    ) * 2
     Ledger(paths.ledger).verify_chain()
     assert load_status(paths).ledger_head_hash == Ledger(paths.ledger).head_hash()
     assert current_payload["ok"] is True

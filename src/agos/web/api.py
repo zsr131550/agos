@@ -335,16 +335,11 @@ def pause_current_task_payload(repo_root: Path) -> dict[str, object]:
 
 
 def resume_current_task_payload(repo_root: Path) -> dict[str, object]:
-    return _set_current_phase(repo_root, "executing", "dashboard_resumed")
+    return _redispatch_current_task_payload(repo_root, "dashboard_resumed")
 
 
 def restart_current_task_payload(repo_root: Path) -> dict[str, object]:
-    return _set_current_phase(
-        repo_root,
-        "executing",
-        "dashboard_restarted",
-        mark_manual_event=True,
-    )
+    return _redispatch_current_task_payload(repo_root, "dashboard_restarted")
 
 
 def select_agent_option_payload(repo_root: Path, request_payload: dict[str, Any]) -> dict[str, object]:
@@ -376,77 +371,26 @@ def select_agent_option_payload(repo_root: Path, request_payload: dict[str, Any]
         }
     )
 
-    task_for_executor = task.model_copy(
-        update={"intent": _agent_option_followup_intent(task, selected)}
-    )
-    adapter = _executor_adapter_for_task(paths, task)
-    try:
-        run = adapter.start(task_for_executor)
-    except Exception as exc:
-        failed_record = ledger.append(
-            {
-                "type": "agent_option_dispatch_failed",
-                "task_id": task.id,
-                "option_id": selected["id"],
-                "error": str(exc),
-                "selected_event_hash": selection_record["hash"],
-            }
-        )
-        status.phase = "blocked"
-        status.ledger_head_hash = failed_record["hash"]
-        save_status(status, paths)
-        raise DashboardApiError("agent_option_dispatch_failed", str(exc)) from exc
-
-    EvidenceStore(paths.evidence).write_run(
-        run.run_id,
-        {
-            "task_id": task.id,
-            "adapter": run.adapter,
-            "run_id": run.run_id,
-            "issue_id": run.issue_id,
-            "triggered_by": "agent_option_selected",
-            "selected_option_id": selected["id"],
-            "mapped_candidate_id": selected.get("mapped_candidate_id"),
-        },
-    )
-    dispatched_record = ledger.append(
-        {
-            "type": "executor_dispatched",
-            "task_id": task.id,
-            "adapter": run.adapter,
-            "run_id": run.run_id,
-            "issue_id": run.issue_id,
-            "triggered_by": "agent_option_selected",
+    task_for_executor = task.model_copy(update={"intent": _agent_option_followup_intent(task, selected)})
+    run = _dispatch_dashboard_executor(
+        paths,
+        task,
+        status,
+        triggered_by="agent_option_selected",
+        task_for_executor=task_for_executor,
+        failure_code="agent_option_dispatch_failed",
+        failure_event_type="agent_option_dispatch_failed",
+        extra={
             "selected_option_id": selected["id"],
             "mapped_candidate_id": selected.get("mapped_candidate_id"),
             "selected_event_hash": selection_record["hash"],
-        }
+        },
+        failure_extra={
+            "option_id": selected["id"],
+            "selected_event_hash": selection_record["hash"],
+        },
+        terminal_extra={"selected_option_id": selected["id"]},
     )
-    next_status = TaskStatus.for_started_task(
-        task=task,
-        run=run,
-        ledger_head_hash=dispatched_record["hash"],
-    )
-    next_status.gates = status.gates
-    terminal_status = _safe_dashboard_initial_run_status(adapter, run)
-    if terminal_status is not None and terminal_status.state != "running":
-        terminal_record = ledger.append(
-            {
-                "type": "executor_completed"
-                if terminal_status.state == "completed"
-                else "executor_blocked",
-                "task_id": task.id,
-                "run_id": run.run_id,
-                "issue_id": run.issue_id,
-                "state": terminal_status.state,
-                "detail": terminal_status.detail,
-                "triggered_by": "agent_option_selected",
-                "selected_option_id": selected["id"],
-            }
-        )
-        next_status.phase = "done" if terminal_status.state == "completed" else "blocked"
-        next_status.ledger_head_hash = terminal_record["hash"]
-    save_status(next_status, paths)
     current = current_run_payload(paths.root)
     return {
         "ok": True,
@@ -864,6 +808,128 @@ def _set_current_phase(
             status.last_event_seq = None
         save_status(status, paths)
         return {"ok": True, "run": current_run_payload(paths.root)["run"]}
+
+
+def _redispatch_current_task_payload(repo_root: Path, event_type: str) -> dict[str, object]:
+    paths = _require_initialized(repo_root)
+    with _locked_task_state(paths):
+        task = _load_current_task(paths)
+        status = load_status(paths)
+        if status is None:
+            raise DashboardApiError("status_missing", "Current AGOS task status is missing.")
+        ledger = Ledger(paths.ledger)
+        lifecycle_record = ledger.append(
+            {
+                "type": event_type,
+                "task_id": task.id,
+                "phase": "executing",
+            }
+        )
+        status.phase = "executing"
+        status.ledger_head_hash = lifecycle_record["hash"]
+        status.last_event_seq = None
+        run = _dispatch_dashboard_executor(
+            paths,
+            task,
+            status,
+            triggered_by=event_type,
+            failure_code="executor_dispatch_failed",
+            failure_event_type="dashboard_executor_dispatch_failed",
+            extra={"dashboard_event_hash": lifecycle_record["hash"]},
+            failure_extra={"dashboard_event_hash": lifecycle_record["hash"]},
+        )
+        current = current_run_payload(paths.root)
+        return {
+            "ok": True,
+            "run_id": run.run_id,
+            "issue_id": run.issue_id,
+            "run": current["run"],
+            "current": current,
+        }
+
+
+def _dispatch_dashboard_executor(
+    paths: AgosPaths,
+    task: Task,
+    status: TaskStatus,
+    *,
+    triggered_by: str,
+    task_for_executor: Task | None = None,
+    failure_code: str,
+    failure_event_type: str,
+    extra: dict[str, object] | None = None,
+    failure_extra: dict[str, object] | None = None,
+    terminal_extra: dict[str, object] | None = None,
+) -> ExecutorRun:
+    ledger = Ledger(paths.ledger)
+    adapter = _executor_adapter_for_task(paths, task)
+    dispatch_extra = dict(extra or {})
+    try:
+        run = adapter.start(task_for_executor or task)
+    except Exception as exc:
+        failed_record = ledger.append(
+            {
+                "type": failure_event_type,
+                "task_id": task.id,
+                "triggered_by": triggered_by,
+                "error": str(exc),
+                **dict(failure_extra or {}),
+            }
+        )
+        status.phase = "blocked"
+        status.ledger_head_hash = failed_record["hash"]
+        status.last_event_seq = None
+        save_status(status, paths)
+        raise DashboardApiError(failure_code, str(exc)) from exc
+
+    EvidenceStore(paths.evidence).write_run(
+        run.run_id,
+        {
+            "task_id": task.id,
+            "adapter": run.adapter,
+            "run_id": run.run_id,
+            "issue_id": run.issue_id,
+            "triggered_by": triggered_by,
+            **dispatch_extra,
+        },
+    )
+    dispatched_record = ledger.append(
+        {
+            "type": "executor_dispatched",
+            "task_id": task.id,
+            "adapter": run.adapter,
+            "run_id": run.run_id,
+            "issue_id": run.issue_id,
+            "triggered_by": triggered_by,
+            **dispatch_extra,
+        }
+    )
+    next_status = TaskStatus.for_started_task(
+        task=task,
+        run=run,
+        ledger_head_hash=dispatched_record["hash"],
+    )
+    next_status.gates = status.gates
+    terminal_status = _safe_dashboard_initial_run_status(adapter, run)
+    if terminal_status is not None and terminal_status.state != "running":
+        terminal_record = ledger.append(
+            {
+                "type": "executor_completed"
+                if terminal_status.state == "completed"
+                else "executor_blocked",
+                "task_id": task.id,
+                "run_id": run.run_id,
+                "issue_id": run.issue_id,
+                "state": terminal_status.state,
+                "detail": terminal_status.detail,
+                "triggered_by": triggered_by,
+                **dict(terminal_extra or {}),
+            }
+        )
+        next_status.phase = "done" if terminal_status.state == "completed" else "blocked"
+        next_status.ledger_head_hash = terminal_record["hash"]
+    save_status(next_status, paths)
+    return run
 
 
 def _mark_task_done(paths: AgosPaths, *, event_type: str) -> None:
