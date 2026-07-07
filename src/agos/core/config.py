@@ -21,6 +21,7 @@ class GateSpec(BaseModel):
     command: str | None = None
     argv: list[str] | None = None
     type: GateType | None = None
+    timeout_seconds: int | None = Field(default=None, ge=1)
     options: dict[str, object] = Field(default_factory=dict)
 
     @model_validator(mode="after")
@@ -189,6 +190,7 @@ def default_config(
                             "id": "tests_pass",
                             "stage": ["pre-commit", "pre-push"],
                             "argv": ["pytest", "-q"],
+                            "timeout_seconds": 300,
                         },
                         {
                             "id": "no_secrets_in_diff",

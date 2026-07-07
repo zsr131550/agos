@@ -87,6 +87,100 @@ def test_command_gate_supports_structured_argv(tmp_repo: Path):
     assert "argv:" in log
 
 
+def test_command_gate_passes_configured_timeout(tmp_repo: Path, monkeypatch: pytest.MonkeyPatch):
+    captured = {}
+
+    def fake_run_command(args, **kwargs):
+        captured["args"] = args
+        captured["kwargs"] = kwargs
+
+        class Proc:
+            returncode = 0
+            stdout = "ok"
+            stderr = ""
+
+        return Proc()
+
+    monkeypatch.setattr("agos.core.gate.run_command", fake_run_command)
+    spec = GateSpec(
+        id="argv_timeout",
+        stage=["pre-commit"],
+        argv=[sys.executable, "-c", "raise SystemExit(0)"],
+        timeout_seconds=123,
+    )
+
+    res = CommandGate(spec).evaluate(ctx(tmp_repo))
+
+    assert res.state == "pass"
+    assert captured["kwargs"]["timeout"] == 123
+
+
+def test_command_gate_strips_git_hook_local_env(tmp_repo: Path, monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv("GIT_DIR", "outer/.git")
+    monkeypatch.setenv("GIT_WORK_TREE", "outer")
+    monkeypatch.setenv("GIT_INDEX_FILE", "outer/index")
+    monkeypatch.setenv("GIT_CONFIG_COUNT", "1")
+    monkeypatch.setenv("AGOS_TEST_KEEP", "kept")
+    captured = {}
+
+    def fake_run_command(args, **kwargs):
+        captured["args"] = args
+        captured["kwargs"] = kwargs
+
+        class Proc:
+            returncode = 0
+            stdout = "ok"
+            stderr = ""
+
+        return Proc()
+
+    monkeypatch.setattr("agos.core.gate.run_command", fake_run_command)
+    spec = GateSpec(id="hook_env", stage=["pre-commit"], argv=["pytest", "-q"])
+
+    res = CommandGate(spec).evaluate(ctx(tmp_repo))
+
+    assert res.state == "pass"
+    env = captured["kwargs"]["env"]
+    assert "GIT_DIR" not in env
+    assert "GIT_WORK_TREE" not in env
+    assert "GIT_INDEX_FILE" not in env
+    assert "GIT_CONFIG_COUNT" not in env
+    assert env["AGOS_TEST_KEEP"] == "kept"
+
+
+def test_external_security_gate_passes_configured_timeout(
+    tmp_repo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    captured = {}
+
+    def fake_run_command(args, **kwargs):
+        captured["args"] = args
+        captured["kwargs"] = kwargs
+
+        class Proc:
+            returncode = 0
+            stdout = "ok"
+            stderr = ""
+
+        return Proc()
+
+    monkeypatch.setattr("agos.core.gate.run_command", fake_run_command)
+    monkeypatch.setattr("agos.core.gate.shutil.which", lambda command: command)
+    spec = GateSpec(
+        id="semgrep_timeout",
+        stage=["pre-commit"],
+        type="semgrep",
+        options={"command": "semgrep"},
+        timeout_seconds=456,
+    )
+
+    res = ExternalSecurityGate(spec).evaluate(ctx(tmp_repo))
+
+    assert res.state == "pass"
+    assert captured["kwargs"]["timeout"] == 456
+
+
 def test_secret_scan_clear(tmp_repo: Path):
     spec = GateSpec(id="no_secrets", stage=["pre-commit"], type="secret_scan")
     res = SecretScanGate(spec).evaluate(ctx(tmp_repo, diff="print('hello world')\n"))
@@ -168,6 +262,50 @@ def test_gates_match_false_when_options_changed():
     specs = [GateSpec(id="a", stage=["pre-commit"], type="opa", options={"policy": "p.rego"})]
     locked = gates_locked_payload(specs)
     assert gates_match(locked, [GateSpec(id="a", stage=["pre-commit"], type="opa", options={"policy": "q.rego"})]) is False
+
+
+def test_gates_match_accepts_legacy_lock_without_timeout_seconds():
+    locked = [
+        {
+            "id": "tests_pass",
+            "stage": ["pre-commit"],
+            "command": None,
+            "argv": ["pytest", "-q"],
+            "type": None,
+            "options": {},
+        }
+    ]
+    current = [
+        GateSpec(
+            id="tests_pass",
+            stage=["pre-commit"],
+            argv=["pytest", "-q"],
+            timeout_seconds=300,
+        )
+    ]
+
+    assert gates_match(locked, current) is True
+
+
+def test_gates_match_false_when_locked_timeout_changed():
+    locked = gates_locked_payload(
+        [GateSpec(id="tests_pass", stage=["pre-commit"], argv=["pytest", "-q"], timeout_seconds=300)]
+    )
+
+    assert (
+        gates_match(
+            locked,
+            [
+                GateSpec(
+                    id="tests_pass",
+                    stage=["pre-commit"],
+                    argv=["pytest", "-q"],
+                    timeout_seconds=120,
+                )
+            ],
+        )
+        is False
+    )
 
 
 def test_external_security_gate_builds_structured_argv(tmp_repo: Path, monkeypatch: pytest.MonkeyPatch):

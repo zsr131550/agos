@@ -104,5 +104,6 @@ def test_default_config_has_feature_workflow():
     tests_gate = next(g for g in cfg.workflows["feature"].gates if g.id == "tests_pass")
     assert tests_gate.argv == ["pytest", "-q"]
     assert tests_gate.command is None
+    assert tests_gate.timeout_seconds == 300
     assert cfg.trust_anchor.backend == "git-ref"
     assert cfg.trust_anchor.auto_publish_on_checkpoint is False

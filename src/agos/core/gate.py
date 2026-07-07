@@ -5,6 +5,7 @@ Gates only inspect the governed working tree and the human developer's diff.
 """
 from __future__ import annotations
 
+import os
 import re
 import json
 import shlex
@@ -26,6 +27,27 @@ BUILTIN_SECRET_PATTERNS: list[str] = [
     r"AIza[0-9A-Za-z_\-]{35}",
     r"sk-[0-9A-Za-z]{20,}",
 ]
+
+GIT_LOCAL_ENV_KEYS = {
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    "GIT_COMMON_DIR",
+    "GIT_CONFIG",
+    "GIT_CONFIG_COUNT",
+    "GIT_CONFIG_PARAMETERS",
+    "GIT_DIR",
+    "GIT_GRAFT_FILE",
+    "GIT_IMPLICIT_WORK_TREE",
+    "GIT_INDEX_FILE",
+    "GIT_NO_REPLACE_OBJECTS",
+    "GIT_NAMESPACE",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_PREFIX",
+    "GIT_QUARANTINE_PATH",
+    "GIT_REPLACE_REF_BASE",
+    "GIT_SHALLOW_FILE",
+    "GIT_SUPER_PREFIX",
+    "GIT_WORK_TREE",
+}
 
 
 @dataclass(frozen=True)
@@ -67,13 +89,19 @@ class CommandGate:
         log_path = log_dir / f"{self.id}-{_fsafe_ts()}.log"
         command_text = self.spec.command or ""
         argv = self.spec.argv
+        command_kwargs = {
+            "shell": argv is None,
+            "cwd": ctx.repo_root,
+            "capture_output": True,
+            "text": True,
+            "env": _gate_command_env(),
+        }
+        if self.spec.timeout_seconds is not None:
+            command_kwargs["timeout"] = self.spec.timeout_seconds
         try:
             proc = run_command(
                 argv if argv is not None else command_text,
-                shell=argv is None,
-                cwd=ctx.repo_root,
-                capture_output=True,
-                text=True,
+                **command_kwargs,
             )
         except subprocess.TimeoutExpired as exc:
             log_path.write_text(
@@ -179,13 +207,19 @@ class ExternalSecurityGate:
                 evidence_path=str(log_path),
             )
 
+        command_kwargs = {
+            "shell": False,
+            "cwd": ctx.repo_root,
+            "capture_output": True,
+            "text": True,
+            "env": _gate_command_env(),
+        }
+        if self.spec.timeout_seconds is not None:
+            command_kwargs["timeout"] = self.spec.timeout_seconds
         try:
             proc = run_command(
                 argv,
-                shell=False,
-                cwd=ctx.repo_root,
-                capture_output=True,
-                text=True,
+                **command_kwargs,
             )
         except subprocess.TimeoutExpired as exc:
             log_path.write_text(
@@ -319,6 +353,7 @@ def gates_locked_payload(gates: list[GateSpec]) -> list[dict]:
             "command": gate.command,
             "argv": gate.argv,
             "type": gate.type,
+            "timeout_seconds": gate.timeout_seconds,
             "options": gate.options,
         }
         for gate in gates
@@ -326,7 +361,7 @@ def gates_locked_payload(gates: list[GateSpec]) -> list[dict]:
 
 
 def gates_match(locked: list[dict], current: list[GateSpec]) -> bool:
-    return sorted(
+    locked_without_timeout = sorted(
         (
             entry["id"],
             tuple(entry["stage"]),
@@ -336,7 +371,8 @@ def gates_match(locked: list[dict], current: list[GateSpec]) -> bool:
             _canonical_options(entry.get("options") or {}),
         )
         for entry in locked
-    ) == sorted(
+    )
+    current_without_timeout = sorted(
         (
             gate.id,
             tuple(sorted(gate.stage)),
@@ -347,7 +383,59 @@ def gates_match(locked: list[dict], current: list[GateSpec]) -> bool:
         )
         for gate in current
     )
+    if locked_without_timeout != current_without_timeout:
+        return False
+
+    current_timeout_by_key = {
+        (
+            gate.id,
+            tuple(sorted(gate.stage)),
+            gate.command,
+            tuple(gate.argv or []),
+            gate.type,
+            _canonical_options(gate.options),
+        ): gate.timeout_seconds
+        for gate in current
+    }
+    for entry in locked:
+        if "timeout_seconds" not in entry:
+            continue
+        key = (
+            entry["id"],
+            tuple(entry["stage"]),
+            entry.get("command"),
+            tuple(entry.get("argv") or []),
+            entry["type"],
+            _canonical_options(entry.get("options") or {}),
+        )
+        if current_timeout_by_key.get(key) != entry.get("timeout_seconds"):
+            return False
+    return True
 
 
 def _canonical_options(options: dict) -> str:
     return json.dumps(options, sort_keys=True, separators=(",", ":"))
+
+
+def _gate_command_env() -> dict[str, str]:
+    """Return an environment safe for nested git commands run from hooks."""
+
+    env = dict(os.environ)
+    for key in _git_local_env_keys():
+        env.pop(key, None)
+    return env
+
+
+def _git_local_env_keys() -> set[str]:
+    try:
+        proc = subprocess.run(
+            ["git", "rev-parse", "--local-env-vars"],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except Exception:
+        return GIT_LOCAL_ENV_KEYS
+    keys = {line.strip() for line in proc.stdout.splitlines() if line.strip()}
+    return keys or GIT_LOCAL_ENV_KEYS

@@ -591,12 +591,28 @@ def _set_current_phase(
         status = load_status(paths)
         if status is None:
             raise DashboardApiError("status_missing", "Current AGOS task status is missing.")
+        effective_phase = phase
+        supersedes_executor_completion = mark_manual_event
+        record_payload: dict[str, object] = {
+            "type": event_type,
+            "task_id": task.id,
+            "phase": effective_phase,
+        }
+        if _completed_executor_without_business_output(paths, status):
+            effective_phase = "blocked"
+            supersedes_executor_completion = False
+            record_payload["phase"] = effective_phase
+            if phase != effective_phase:
+                record_payload["requested_phase"] = phase
+                record_payload["reason"] = "executor completed without business output"
         ledger = Ledger(paths.ledger)
-        record = ledger.append({"type": event_type, "task_id": task.id, "phase": phase})
-        status.phase = phase  # type: ignore[assignment]
+        record = ledger.append(record_payload)
+        status.phase = effective_phase  # type: ignore[assignment]
         status.ledger_head_hash = record["hash"]
-        if mark_manual_event:
+        if supersedes_executor_completion:
             status.last_event_seq = int(record["seq"])
+        elif _completed_executor_without_business_output(paths, status):
+            status.last_event_seq = None
         save_status(status, paths)
         return {"ok": True, "run": current_run_payload(paths.root)["run"]}
 
@@ -623,13 +639,14 @@ def _task_phase_from_status_or_evidence(
     if status is not None and status.executor_run is not None:
         run_state = _executor_run_state(paths, status.executor_run.run_id)
         if run_state == "completed":
-            if _has_manual_phase_after_executor_completion(paths, status):
-                return status.phase
             if not _task_has_business_output(paths):
-                if status.phase != "blocked":
+                if status.phase != "blocked" or status.last_event_seq is not None:
                     status.phase = "blocked"
+                    status.last_event_seq = None
                     save_status(status, paths)
                 return "blocked"
+            if _has_manual_phase_after_executor_completion(paths, status):
+                return status.phase
             if status.phase != "done":
                 status.phase = "done"
                 save_status(status, paths)
@@ -639,6 +656,15 @@ def _task_phase_from_status_or_evidence(
     if status is not None:
         return status.phase
     return "archived" if archived else "unknown"
+
+
+def _completed_executor_without_business_output(paths: AgosPaths, status: TaskStatus) -> bool:
+    if status.executor_run is None:
+        return False
+    return (
+        _executor_run_state(paths, status.executor_run.run_id) == "completed"
+        and not _task_has_business_output(paths)
+    )
 
 
 def _has_manual_phase_after_executor_completion(paths: AgosPaths, status: TaskStatus) -> bool:

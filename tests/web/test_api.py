@@ -268,6 +268,46 @@ def test_completed_executor_without_outputs_is_blocked_not_done(dashboard_repo: 
     assert load_status(paths).phase == "blocked"
 
 
+def test_completed_executor_without_outputs_stays_blocked_after_lifecycle_actions(
+    dashboard_repo: Path,
+) -> None:
+    paths = repo_paths(dashboard_repo)
+    shutil.rmtree(paths.current_task / "execution")
+    output_dir = paths.root / "outputs" / "agos-dashboard-01"
+    shutil.rmtree(output_dir, ignore_errors=True)
+    run_id = "run-01"
+    run_state = paths.evidence / "executor_runs" / f"{run_id}.json"
+    run_state.parent.mkdir(parents=True, exist_ok=True)
+    run_state.write_text(
+        json.dumps({"run_id": run_id, "adapter": "codex_cli", "state": "completed"}),
+        encoding="utf-8",
+    )
+    assert current_run_payload(dashboard_repo)["run"]["phase"] == "blocked"
+
+    resumed = resume_current_task_payload(dashboard_repo)
+    restarted = restart_current_task_payload(dashboard_repo)
+    current = current_run_payload(dashboard_repo)
+
+    assert resumed["run"]["phase"] == "blocked"
+    assert restarted["run"]["phase"] == "blocked"
+    assert current["run"]["phase"] == "blocked"
+    status = load_status(paths)
+    assert status is not None
+    assert status.phase == "blocked"
+    assert status.last_event_seq is None
+    records = Ledger(paths.ledger).read_all()
+    lifecycle_records = [
+        record
+        for record in records
+        if record["type"] in {"dashboard_resumed", "dashboard_restarted"}
+    ]
+    assert [record["phase"] for record in lifecycle_records[-2:]] == ["blocked", "blocked"]
+    assert [record["requested_phase"] for record in lifecycle_records[-2:]] == [
+        "executing",
+        "executing",
+    ]
+
+
 def test_continue_archived_task_payload_restores_archive_as_current(dashboard_repo: Path) -> None:
     paths = repo_paths(dashboard_repo)
     archived = archive_current_task_payload(dashboard_repo)
