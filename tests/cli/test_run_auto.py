@@ -115,6 +115,9 @@ def test_run_auto_dry_run_json(monkeypatch, tmp_repo):
     payload = json.loads(result.stdout)
     assert payload["dry_run"] is True
     assert payload["plan_id"] == "auto-plan-agos-01"
+    assert payload["planner_source"] == "fallback"
+    assert payload["subtask_worker_assignments"] == {"auto-subtask-agos-01": "fake_worker"}
+    assert payload["reviewer_ids"] == ["clean"]
     assert payload["candidate_ids"]
     assert payload["accepted_candidate_ids"] == payload["candidate_ids"]
     assert payload["applied_candidate_ids"] == []
@@ -133,6 +136,20 @@ def test_run_auto_apply_json(monkeypatch, tmp_repo):
     assert payload["dry_run"] is False
     assert payload["applied_candidate_ids"] == payload["candidate_ids"]
     assert (tmp_repo / "README.md").read_text(encoding="utf-8") == "# changed\n"
+
+
+def test_run_auto_human_output_reports_autonomous_loop_stages(monkeypatch, tmp_repo):
+    _active_task(tmp_repo)
+    monkeypatch.chdir(tmp_repo)
+    monkeypatch.setattr("agos.cli.cmd_execute_plan.register_configured_worker_adapters", _register_fake_worker)
+
+    result = runner.invoke(app, ["run", "auto", "--dry-run"])
+
+    assert result.exit_code == 0, result.stderr
+    assert "planner: fallback" in result.stdout
+    assert "workers: auto-subtask-agos-01=fake_worker" in result.stdout
+    assert "reviewers: clean" in result.stdout
+    assert "blocked: -" in result.stdout
 
 
 def test_run_auto_missing_active_task(monkeypatch, tmp_repo):

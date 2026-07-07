@@ -5,6 +5,8 @@ import json
 import agos.adapters.planner_cli as planner_cli_module
 from agos.adapters.planner_cli import CliPlannerAdapter
 from agos.adapters.planner_cli import _planner_prompt
+from agos.core.config import AGOSConfig
+from agos.core.execution_planner import create_execution_plan_with_provenance
 from agos.core.task import ExecutorBinding, Task
 
 
@@ -37,7 +39,7 @@ def test_planner_prompt_uses_machine_json_template():
     assert '"write_scope":["README.md"]' in prompt
 
 
-def test_plan_json_falls_back_when_cli_returns_non_execution_plan(monkeypatch, tmp_path):
+def test_plan_json_preserves_structured_non_execution_plan_output(monkeypatch, tmp_path):
     class FakeProc:
         returncode = 0
         stdout = json.dumps({"plan": [{"step": "not an ExecutionPlan"}]})
@@ -55,6 +57,34 @@ def test_plan_json_falls_back_when_cli_returns_non_execution_plan(monkeypatch, t
 
     payload = json.loads(adapter.plan_json(task, ["local_worktree"]))
 
-    assert payload["task_id"] == "planner-smoke-01"
-    assert payload["subtasks"][0]["worker"]["adapter"] == "local_worktree"
-    assert payload["subtasks"][0]["write_scope"] == ["README.md"]
+    assert payload == {"plan": [{"step": "not an ExecutionPlan"}]}
+
+
+def test_cli_planner_no_json_reports_fallback_provenance(monkeypatch, tmp_path):
+    class FakeProc:
+        returncode = 0
+        stdout = "planner produced prose but no machine JSON"
+        stderr = ""
+
+    monkeypatch.setattr(planner_cli_module, "run_command", lambda *_args, **_kwargs: FakeProc())
+    task = Task(
+        id="planner-smoke-01",
+        title="Add a greeting",
+        intent="Print hello from the README.",
+        workflow="feature",
+        executor=ExecutorBinding(adapter="codex_cli", agent="codex"),
+    )
+    config = AGOSConfig.model_validate(
+        {
+            "executor": {"name": "codex_cli", "agent": "codex"},
+            "workers": {"local_worktree": {"type": "local_worktree"}},
+            "orchestration": {"planner": {"enabled": True}},
+            "workflows": {"feature": {"gates": []}},
+        }
+    )
+    adapter = CliPlannerAdapter(executor="codex_cli", command="codex", cwd=tmp_path)
+
+    result = create_execution_plan_with_provenance(task, config, config.workers, planner=adapter)
+
+    assert result.source == "fallback"
+    assert result.plan.id == "auto-plan-planner-smoke-01"

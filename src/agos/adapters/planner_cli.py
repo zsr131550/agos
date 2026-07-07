@@ -36,13 +36,9 @@ class CliPlannerAdapter:
             runner=run_command,
         )
         payload = load_json_object_from_text(proc.stdout)
-        if isinstance(payload, dict) and _looks_like_execution_plan(payload):
+        if isinstance(payload, dict):
             return json.dumps(payload)
-        return json.dumps(
-            _fallback_plan_payload(task, available_workers),
-            ensure_ascii=False,
-            separators=(",", ":"),
-        )
+        return proc.stdout
 
     def _args(self, prompt: str) -> list[str]:
         command = self.command or _default_command(self.executor)
@@ -104,13 +100,6 @@ def _fallback_plan_payload(task: Task, available_workers: list[str]) -> dict[str
             }
         ],
     }
-
-
-def _looks_like_execution_plan(payload: dict[str, object]) -> bool:
-    return all(
-        key in payload
-        for key in ("id", "task_id", "max_parallel", "requires_candidate_review", "subtasks")
-    ) and isinstance(payload.get("subtasks"), list)
 
 
 def parse_planner_json(text: str) -> dict[str, object] | None:

@@ -6,7 +6,7 @@ from pydantic import BaseModel, Field
 from agos.core.config import load_config
 from agos.core.execution_runtime import ExecutionRuntime, ExecutionRuntimeSnapshot
 from agos.core.execution_service import ExecutionService
-from agos.core.execution_planner import PlannerAdapter, create_execution_plan
+from agos.core.execution_planner import PlanSource, PlannerAdapter, create_execution_plan_with_provenance
 from agos.core.review_adapter import ReviewerAdapter
 from agos.core.review_orchestrator import ReviewerSpec
 from agos.core.status import load_status
@@ -18,11 +18,18 @@ class AutoExecutionResult(BaseModel):
     task_id: str
     run_id: str
     run_state: str
+    planner_source: PlanSource = "fallback"
+    subtask_worker_assignments: dict[str, str] = Field(default_factory=dict)
     completed_subtasks: list[str] = Field(default_factory=list)
     failed_subtasks: list[str] = Field(default_factory=list)
     candidate_ids: list[str] = Field(default_factory=list)
     accepted_candidate_ids: list[str] = Field(default_factory=list)
     applied_candidate_ids: list[str] = Field(default_factory=list)
+    reviewer_ids: list[str] = Field(default_factory=list)
+    candidate_review_ids: dict[str, str] = Field(default_factory=dict)
+    candidate_review_raw_refs: dict[str, list[str]] = Field(default_factory=dict)
+    blocked_stage: str | None = None
+    blocked_reason: str | None = None
     dry_run: bool = True
     notes: list[str] = Field(default_factory=list)
 
@@ -44,22 +51,34 @@ def run_auto_execution(
         raise ValueError("No active AGOS task found")
     task = load_task(service.paths.task_yaml)
     config = load_config(service.paths.root)
-    plan = create_execution_plan(
+    plan_result = create_execution_plan_with_provenance(
         task,
         config,
         config.workers,
         planner_json=planner_json,
         planner=planner,
     )
+    plan = plan_result.plan
     prepared = service.execute_plan_model(plan)
     snapshot = _run_prepared_plan(service, prepared)
 
     candidate_ids: list[str] = []
     accepted_candidate_ids: list[str] = []
     applied_candidate_ids: list[str] = []
+    reviewer_ids: list[str] = []
+    candidate_review_ids: dict[str, str] = {}
+    candidate_review_raw_refs: dict[str, list[str]] = {}
+    blocked_stage: str | None = None
+    blocked_reason: str | None = None
     notes: list[str] = []
     if snapshot.state == "stuck":
-        notes.append("execution runtime stopped after repeated state observations; manual inspection required")
+        note = "execution runtime stopped after repeated state observations; manual inspection required"
+        notes.append(note)
+        blocked_stage, blocked_reason = _first_block(blocked_stage, blocked_reason, "execution", note)
+    if snapshot.failed_subtasks:
+        note = "execution completed with failed subtasks"
+        notes.append(note)
+        blocked_stage, blocked_reason = _first_block(blocked_stage, blocked_reason, "execution", note)
     reviewers = dict(reviewer_adapters or {})
     specs = list(reviewer_specs or [])
 
@@ -67,13 +86,17 @@ def run_auto_execution(
         try:
             candidate = service.submit_candidate(subtask_id, summary=f"Automatic candidate for {subtask_id}.")
         except Exception as exc:
-            notes.append(f"candidate skipped for {subtask_id}: {exc}")
+            note = f"candidate skipped for {subtask_id}: {exc}"
+            notes.append(note)
+            blocked_stage, blocked_reason = _first_block(blocked_stage, blocked_reason, "candidate", note)
             continue
         candidate_ids.append(candidate.id)
 
         runs = service.test_candidate(candidate.id)
         if any(run.state != "passed" for run in runs):
-            notes.append(f"candidate {candidate.id} tests failed")
+            note = f"candidate {candidate.id} tests failed"
+            notes.append(note)
+            blocked_stage, blocked_reason = _first_block(blocked_stage, blocked_reason, "tests", note)
             continue
 
         reviewed = False
@@ -86,19 +109,37 @@ def run_auto_execution(
                     max_parallel=config.orchestration.max_parallel,
                 )
             except Exception as exc:
-                notes.append(f"candidate {candidate.id} review failed: {exc}")
+                reviewer_ids.extend(_new_ids(reviewer_ids, [spec.id for spec in specs]))
+                _record_latest_review_binding(
+                    service,
+                    candidate.id,
+                    candidate_review_ids,
+                    candidate_review_raw_refs,
+                )
+                note = f"candidate {candidate.id} review failed: {exc}"
+                notes.append(note)
+                blocked_stage, blocked_reason = _first_block(blocked_stage, blocked_reason, "review", note)
                 continue
+            reviewer_ids.extend(_new_ids(reviewer_ids, [spec.id for spec in specs]))
+            candidate_review_ids[candidate.id] = report.review_id
+            candidate_review_raw_refs[candidate.id] = list(_result.raw_refs)
             if report.open_blocking_findings():
-                notes.append(f"candidate {candidate.id} has blocking review findings")
+                note = f"candidate {candidate.id} has blocking review findings"
+                notes.append(note)
+                blocked_stage, blocked_reason = _first_block(blocked_stage, blocked_reason, "review", note)
                 continue
             reviewed = True
         elif not allow_missing_review:
-            notes.append(f"candidate {candidate.id} requires review before acceptance")
+            note = f"candidate {candidate.id} requires review before acceptance"
+            notes.append(note)
+            blocked_stage, blocked_reason = _first_block(blocked_stage, blocked_reason, "review", note)
             continue
         else:
             _packet_ref, packet = service.review_candidate(candidate.id)
             service.ingest_candidate_review(candidate.id, packet.review_id, findings=[])
-            reviewed = True
+            candidate_review_ids[candidate.id] = packet.review_id
+            candidate_review_raw_refs[candidate.id] = []
+            notes.append(f"candidate {candidate.id} missing review explicitly allowed")
 
         try:
             service.decide_candidate(
@@ -108,7 +149,9 @@ def run_auto_execution(
                 decided_by="agos_auto_pipeline",
             )
         except Exception as exc:
-            notes.append(f"candidate {candidate.id} was not accepted: {exc}")
+            note = f"candidate {candidate.id} was not accepted: {exc}"
+            notes.append(note)
+            blocked_stage, blocked_reason = _first_block(blocked_stage, blocked_reason, "decision", note)
             continue
         accepted_candidate_ids.append(candidate.id)
 
@@ -116,7 +159,9 @@ def run_auto_execution(
             try:
                 service.apply_candidate(candidate.id)
             except Exception as exc:
-                notes.append(f"candidate {candidate.id} apply failed: {exc}")
+                note = f"candidate {candidate.id} apply failed: {exc}"
+                notes.append(note)
+                blocked_stage, blocked_reason = _first_block(blocked_stage, blocked_reason, "apply", note)
                 continue
             applied_candidate_ids.append(candidate.id)
 
@@ -125,11 +170,20 @@ def run_auto_execution(
         task_id=task.id,
         run_id=snapshot.run_id,
         run_state=snapshot.state,
+        planner_source=plan_result.source,
+        subtask_worker_assignments={
+            subtask.id: subtask.worker.adapter for subtask in prepared.subtasks
+        },
         completed_subtasks=list(snapshot.completed_subtasks),
         failed_subtasks=list(snapshot.failed_subtasks),
         candidate_ids=candidate_ids,
         accepted_candidate_ids=accepted_candidate_ids,
         applied_candidate_ids=applied_candidate_ids,
+        reviewer_ids=reviewer_ids,
+        candidate_review_ids=candidate_review_ids,
+        candidate_review_raw_refs=candidate_review_raw_refs,
+        blocked_stage=blocked_stage,
+        blocked_reason=blocked_reason,
         dry_run=not apply,
         notes=notes,
     )
@@ -191,6 +245,39 @@ def _acceptance_reason(*, reviewed: bool) -> str:
     if reviewed:
         return "Automatic pipeline accepted candidate after passing tests and clean review."
     return "Automatic pipeline accepted candidate after passing tests with missing review explicitly allowed."
+
+
+def _first_block(
+    current_stage: str | None,
+    current_reason: str | None,
+    stage: str,
+    reason: str,
+) -> tuple[str | None, str | None]:
+    if current_stage is not None:
+        return current_stage, current_reason
+    return stage, reason
+
+
+def _new_ids(existing: list[str], incoming: list[str]) -> list[str]:
+    seen = set(existing)
+    return [value for value in incoming if value not in seen]
+
+
+def _record_latest_review_binding(
+    service: ExecutionService,
+    candidate_id: str,
+    candidate_review_ids: dict[str, str],
+    candidate_review_raw_refs: dict[str, list[str]],
+) -> None:
+    try:
+        candidate = service.store.read_candidate(candidate_id)
+    except Exception:
+        return
+    if not candidate.review_refs:
+        return
+    binding = candidate.review_refs[-1]
+    candidate_review_ids[candidate_id] = binding.review_id
+    candidate_review_raw_refs[candidate_id] = list(binding.raw_refs)
 
 
 # Overall timeout applied when a claude_code worker opts into async `--bg`

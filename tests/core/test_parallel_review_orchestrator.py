@@ -6,9 +6,10 @@ from agos.core.review_orchestrator import ParallelReviewOrchestrator, ReviewerSp
 
 
 class FakeReviewer:
-    def __init__(self, name: str, *, state: str = "completed") -> None:
+    def __init__(self, name: str, *, state: str = "completed", raw_ref: str | None = None) -> None:
         self.name = name
         self.state = state
+        self.raw_ref = raw_ref
         self.started: list[str] = []
 
     def start(self, request):
@@ -28,12 +29,14 @@ class FakeReviewer:
                 reviewer_id=reviewer_id,
                 state="failed",
                 detail="reviewer failed",
+                raw_ref=self.raw_ref,
             )
         return ReviewerRunStatus(
             backend=self.name,
             run_id=run_id,
             reviewer_id=reviewer_id,
             state="completed",
+            raw_ref=self.raw_ref,
             findings=[
                 Finding(
                     id=f"finding-{reviewer_id}",
@@ -81,6 +84,21 @@ def test_parallel_review_orchestrator_runs_multiple_reviewers():
     assert [finding.source_agent for finding in result.findings] == ["security", "tests"]
     assert security.started == ["security"]
     assert tests.started == ["tests"]
+
+
+def test_parallel_review_orchestrator_preserves_reviewer_raw_refs():
+    codex_like = FakeReviewer("codex_backend", raw_ref="reviews/review-01/raw/codex.json")
+    orchestrator = ParallelReviewOrchestrator(reviewers={"codex_backend": codex_like})
+
+    result = orchestrator.run(
+        run_id="review-run-01",
+        packet=_packet(),
+        reviewers=[ReviewerSpec(id="codex", role="security_reviewer", adapter="codex_backend")],
+    )
+
+    assert result.state == "completed"
+    assert codex_like.started == ["codex"]
+    assert result.raw_refs == ("reviews/review-01/raw/codex.json",)
 
 
 def test_required_reviewer_failure_fails_review_run():
