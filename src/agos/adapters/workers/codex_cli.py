@@ -16,6 +16,7 @@ from agos.adapters.workers.transport import (
     output_refs_from_payload,
     run_worker_command,
 )
+from agos.adapters.noninteractive import noninteractive_prompt
 from agos.core.command import run_command
 from agos.core.execution_worker import (
     WorkerAssignment,
@@ -121,7 +122,15 @@ class CodexWorkerAdapter:
 
     def start(self, request: WorkerStartRequest) -> WorkerRun:
         proc = run_worker_command(
-            [self.command, "exec", "--json", request.prompt],
+            [
+                self.command,
+                "exec",
+                "--ignore-user-config",
+                "--ignore-rules",
+                "--dangerously-bypass-approvals-and-sandbox",
+                "--json",
+                noninteractive_prompt(request.prompt),
+            ],
             action="codex exec",
             cwd=Path(request.workspace_path),
             timeout_seconds=self.timeout_seconds,

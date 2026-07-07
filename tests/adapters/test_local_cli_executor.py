@@ -131,8 +131,28 @@ def test_codex_and_claude_executor_args(tmp_repo):
     codex = CodexCliExecutorAdapter(command="codex", evidence_dir=tmp_repo / "e", cwd=tmp_repo)
     claude = ClaudeCodeExecutorAdapter(command="claude", evidence_dir=tmp_repo / "e", cwd=tmp_repo)
 
-    assert codex._start_args("Do work") == ["codex", "exec", "--json", "Do work"]
-    assert claude._start_args("Do work") == ["claude", "-p", "--output-format", "json", "Do work"]
+    codex_args = codex._start_args("Do work")
+    claude_args = claude._start_args("Do work")
+
+    assert codex_args == [
+        "codex",
+        "exec",
+        "--ignore-user-config",
+        "--ignore-rules",
+        "--dangerously-bypass-approvals-and-sandbox",
+        "--json",
+        "Do work",
+    ]
+    assert claude_args == [
+        "claude",
+        "--safe-mode",
+        "--permission-mode",
+        "bypassPermissions",
+        "-p",
+        "--output-format",
+        "json",
+        "Do work",
+    ]
 
 
 def test_task_prompt_includes_intent_and_acceptance():
@@ -156,6 +176,7 @@ def test_task_prompt_declares_background_executor_mode():
     prompt = _task_prompt(_task())
 
     assert "You are running as an AGOS background executor/subagent" in prompt
+    assert "This AGOS execution contract overrides any local skill" in prompt
     assert "Do not wait for user approval" in prompt
     assert "Do not invoke brainstorming or design-approval gates" in prompt
     assert "Implement immediately" in prompt
@@ -179,3 +200,37 @@ def test_local_cli_executor_fails_when_successful_run_leaves_output_empty(monkey
     assert status.state == "failed"
     assert "completed without writing files to outputs/agos-01" in status.detail
     assert [event.kind for event in events] == ["error", "error"]
+
+
+def test_local_cli_executor_retries_once_when_agent_asks_instead_of_writing(
+    monkeypatch,
+    tmp_repo,
+):
+    calls: list[list[str]] = []
+
+    def fake_run_command(args, **kwargs):
+        del kwargs
+        calls.append(args)
+        if len(calls) == 1:
+            return SimpleNamespace(
+                returncode=0,
+                stdout="Do you want me to use a browser companion before I implement?",
+                stderr="",
+            )
+        assert "previous response stopped without writing output" in args[-1]
+        assert "Do not ask questions" in args[-1]
+        (tmp_repo / "outputs" / "agos-01" / "index.html").write_text(
+            "<!doctype html><title>done</title>",
+            encoding="utf-8",
+        )
+        return SimpleNamespace(returncode=0, stdout="done", stderr="")
+
+    monkeypatch.setattr("agos.adapters.local_cli_executor.run_command", fake_run_command)
+    adapter = _TestExecutor(evidence_dir=tmp_repo / ".agos" / "evidence", cwd=tmp_repo)
+
+    run = adapter.start(_task())
+    status = adapter.status(run.run_id)
+
+    assert len(calls) == 2
+    assert status.state == "completed"
+    assert status.detail == "done"

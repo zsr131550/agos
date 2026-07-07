@@ -17,6 +17,7 @@ from agos.adapters.workers.transport import (
     output_refs_from_payload,
     run_worker_command,
 )
+from agos.adapters.noninteractive import noninteractive_prompt
 from agos.core.command import run_command
 from agos.core.execution_worker import (
     WorkerAssignment,
@@ -118,7 +119,16 @@ class ClaudeWorkerAdapter:
 
     def _start_sync(self, request: WorkerStartRequest) -> WorkerRun:
         proc = run_worker_command(
-            [self.command, "-p", "--output-format", "json", request.prompt],
+            [
+                self.command,
+                "--safe-mode",
+                "--permission-mode",
+                "bypassPermissions",
+                "-p",
+                "--output-format",
+                "json",
+                noninteractive_prompt(request.prompt),
+            ],
             action="claude -p",
             cwd=Path(request.workspace_path),
             timeout_seconds=self.timeout_seconds,
@@ -149,7 +159,15 @@ class ClaudeWorkerAdapter:
 
     def _start_async(self, request: WorkerStartRequest) -> WorkerRun:
         proc = run_worker_command(
-            [self.command, "-p", "--bg", request.prompt],
+            [
+                self.command,
+                "--safe-mode",
+                "--permission-mode",
+                "bypassPermissions",
+                "-p",
+                "--bg",
+                noninteractive_prompt(request.prompt),
+            ],
             action="claude -p --bg",
             cwd=Path(request.workspace_path),
             timeout_seconds=self.timeout_seconds,

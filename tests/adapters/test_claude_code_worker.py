@@ -52,9 +52,19 @@ def _adapter(tmp_path, **overrides) -> ClaudeWorkerAdapter:
 
 
 def test_sync_start_returns_completed_on_success(monkeypatch, tmp_path):
+    calls: list[list[str]] = []
+
+    def runner(args, **kwargs):
+        del kwargs
+        calls.append(args)
+        return _proc(
+            json.dumps({"session_id": "sess-1", "is_error": "false", "result": "ok"}),
+            args=tuple(args),
+        )
+
     monkeypatch.setattr(
         "agos.adapters.workers.claude_code.run_command",
-        _runner(sync_stdout=json.dumps({"session_id": "sess-1", "is_error": "false", "result": "ok"})),
+        runner,
     )
     adapter = _adapter(tmp_path)
 
@@ -62,6 +72,8 @@ def test_sync_start_returns_completed_on_success(monkeypatch, tmp_path):
 
     assert run.state == "completed"
     assert run.run_id == "sess-1"
+    assert calls[0][:4] == ["claude", "--safe-mode", "--permission-mode", "bypassPermissions"]
+    assert "Do not ask clarifying questions" in calls[0][-1]
 
 
 def test_sync_start_returns_failed_when_is_error(monkeypatch, tmp_path):

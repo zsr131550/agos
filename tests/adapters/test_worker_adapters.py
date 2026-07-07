@@ -177,8 +177,12 @@ def test_codex_worker_adapter_starts_cli_with_workspace_and_prompt(monkeypatch, 
     assert run.backend == "codex"
     assert run.run_id == "codex-run-01"
     assert calls[0][:2] == ["codex", "exec"]
+    assert "--ignore-user-config" in calls[0]
+    assert "--ignore-rules" in calls[0]
+    assert "--dangerously-bypass-approvals-and-sandbox" in calls[0]
     assert "--json" in calls[0]
-    assert "Implement README change" in calls[0]
+    assert "Implement README change" in calls[0][-1]
+    assert "Do not ask clarifying questions" in calls[0][-1]
 
 
 def test_codex_worker_adapter_parses_pretty_exec_json(monkeypatch, tmp_path):
@@ -251,7 +255,13 @@ def test_codex_worker_adapter_parses_exec_jsonl_and_polls_cached_status(monkeypa
     assert run.state == "running"
     assert status.state == "completed"
     assert status.detail == "done"
-    assert calls == [["codex", "exec", "--json", "Do the work"]]
+    assert calls[0][:2] == ["codex", "exec"]
+    assert "--ignore-user-config" in calls[0]
+    assert "--ignore-rules" in calls[0]
+    assert "--dangerously-bypass-approvals-and-sandbox" in calls[0]
+    assert "--json" in calls[0]
+    assert "Do the work" in calls[0][-1]
+    assert "Do not ask clarifying questions" in calls[0][-1]
 
 
 def test_codex_worker_adapter_poll_and_cancel(monkeypatch):

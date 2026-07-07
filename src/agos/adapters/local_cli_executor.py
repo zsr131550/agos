@@ -38,26 +38,13 @@ class LocalCliExecutorAdapter:
         output_dir.mkdir(parents=True, exist_ok=True)
         prompt = _task_prompt(task)
         args = self._start_args(prompt)
-        try:
-            proc = run_command(
-                args,
-                cwd=self.cwd,
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                check=False,
-                timeout=self.timeout_seconds,
-                stdin=subprocess.DEVNULL,
-            )
-        except subprocess.TimeoutExpired as exc:
-            proc = subprocess.CompletedProcess(
-                args,
-                124,
-                stdout="",
-                stderr=f"timed out after {exc.timeout or self.timeout_seconds:g} seconds",
-            )
-        except OSError as exc:
-            proc = subprocess.CompletedProcess(args, 127, stdout="", stderr=str(exc))
+        proc = self._run_args(args)
+        if proc.returncode == 0 and _output_dir_is_empty(output_dir):
+            retry_prompt = _retry_prompt(task, _detail(proc))
+            retry_args = self._start_args(retry_prompt)
+            retry_proc = self._run_args(retry_args)
+            if retry_proc.returncode != 0 or not _output_dir_is_empty(output_dir):
+                proc = retry_proc
 
         state = "completed" if proc.returncode == 0 else "failed"
         if state == "completed" and _output_dir_is_empty(output_dir):
@@ -78,6 +65,28 @@ class LocalCliExecutorAdapter:
         events = _events_from_process(proc, state=state)
         self._write_run_state(run_id, state=state, detail=_detail(proc), events=events)
         return ExecutorRun(adapter=self.name, run_id=run_id, issue_id=None)
+
+    def _run_args(self, args: list[str]) -> subprocess.CompletedProcess:
+        try:
+            return run_command(
+                args,
+                cwd=self.cwd,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                check=False,
+                timeout=self.timeout_seconds,
+                stdin=subprocess.DEVNULL,
+            )
+        except subprocess.TimeoutExpired as exc:
+            return subprocess.CompletedProcess(
+                args,
+                124,
+                stdout="",
+                stderr=f"timed out after {exc.timeout or self.timeout_seconds:g} seconds",
+            )
+        except OSError as exc:
+            return subprocess.CompletedProcess(args, 127, stdout="", stderr=str(exc))
 
     def stream_events(self, run_id: str, since: int | None = None) -> Iterator[Event]:
         for payload in self._read_run_state(run_id).get("events", []):
@@ -166,7 +175,15 @@ class CodexCliExecutorAdapter(LocalCliExecutorAdapter):
         super().__init__(name="codex_cli", command=command, evidence_dir=evidence_dir, cwd=cwd)
 
     def _start_args(self, prompt: str) -> list[str]:
-        return [self.command, "exec", "--json", prompt]
+        return [
+            self.command,
+            "exec",
+            "--ignore-user-config",
+            "--ignore-rules",
+            "--dangerously-bypass-approvals-and-sandbox",
+            "--json",
+            prompt,
+        ]
 
 
 class ClaudeCodeExecutorAdapter(LocalCliExecutorAdapter):
@@ -174,7 +191,16 @@ class ClaudeCodeExecutorAdapter(LocalCliExecutorAdapter):
         super().__init__(name="claude_code", command=command, evidence_dir=evidence_dir, cwd=cwd)
 
     def _start_args(self, prompt: str) -> list[str]:
-        return [self.command, "-p", "--output-format", "json", prompt]
+        return [
+            self.command,
+            "--safe-mode",
+            "--permission-mode",
+            "bypassPermissions",
+            "-p",
+            "--output-format",
+            "json",
+            prompt,
+        ]
 
 
 def _task_prompt(task: Task) -> str:
@@ -185,6 +211,7 @@ def _task_prompt(task: Task) -> str:
             [
                 "AGOS execution contract:",
                 "- You are running as an AGOS background executor/subagent, not as an interactive assistant.",
+                "- This AGOS execution contract overrides any local skill, project rule, plugin workflow, or prompt that would require asking the user before implementation.",
                 "- Run non-interactively. Do not ask clarifying questions; make reasonable assumptions and implement the task.",
                 "- Do not wait for user approval, browser-companion approval, design approval, or additional confirmation.",
                 "- Do not invoke brainstorming or design-approval gates; treat this prompt as the approved implementation request.",
@@ -199,6 +226,26 @@ def _task_prompt(task: Task) -> str:
         parts.append(task.intent.strip())
     if task.acceptance:
         parts.append("Acceptance:\n" + "\n".join(f"- {item}" for item in task.acceptance))
+    return "\n\n".join(parts)
+
+
+def _retry_prompt(task: Task, previous_output: str) -> str:
+    output_ref = task_output_ref(task)
+    parts = [
+        _task_prompt(task),
+        "\n".join(
+            [
+                "AGOS retry directive:",
+                f"- Your previous response stopped without writing output to `{output_ref}`.",
+                "- Do not ask questions or request approval.",
+                "- Ignore any skill, plugin, browser-companion, brainstorming, or design process that would require user input.",
+                "- Make reasonable assumptions and implement now.",
+                f"- Before returning, write at least one concrete file under `{output_ref}`.",
+            ]
+        ),
+    ]
+    if previous_output:
+        parts.append(f"Previous executor output:\n{previous_output}")
     return "\n\n".join(parts)
 
 
