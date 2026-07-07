@@ -1,0 +1,72 @@
+executor:
+  name: codex_cli
+  agent: codex
+  command: codex
+
+default_workflow: feature
+
+workflows:
+  feature:
+    gates:
+      - id: tests_pass
+        stage:
+          - pre-commit
+          - pre-push
+        argv:
+          - pytest
+          - -q
+        timeout_seconds: 300
+      - id: no_secrets_in_diff
+        stage:
+          - pre-commit
+          - pre-push
+        type: secret_scan
+  docs_only:
+    gates: []
+
+workers:
+  codex_impl:
+    type: codex_cli
+    command: codex
+    timeout_seconds: 900
+    poll_interval_seconds: 2
+    artifact_globs:
+      - .agos-worker/*.json
+  claude_docs:
+    type: claude_code
+    command: claude
+    timeout_seconds: 900
+    poll_interval_seconds: 2
+    artifact_globs:
+      - .agos-worker/*.json
+
+reviewers:
+  codex_review:
+    type: codex_cli
+    executor: codex_cli
+    command: codex
+    role: security_reviewer
+    required: true
+    timeout_seconds: 180
+    blocking_severity: high
+
+orchestration:
+  backend: native_async
+  max_parallel: 2
+  max_retries: 1
+  worker_timeout_seconds: 900
+  retry_backoff_seconds: 1
+  fallback_write_scope:
+    - README.md
+    - src/agos
+    - tests
+    - docs
+  planner:
+    enabled: true
+    executor: codex_cli
+    command: codex
+    timeout_seconds: 120
+
+trust_anchor:
+  backend: git-ref
+  issuer: agos

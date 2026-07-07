@@ -88,7 +88,8 @@ def test_prepare_merge_gate_builds_candidate_evidence_that_merge_gate_accepts(mo
     candidates = store.read_candidates()
     assert len(candidates) == 1
     assert candidates[0].status == "applied"
-    assert candidates[0].review_refs == []
+    assert candidates[0].review_refs
+    assert candidates[0].review_refs[-1].state == "completed"
     assert (paths.current_task / "evidence" / "anchors.json").is_file()
 
     gate = runner.invoke(
@@ -101,7 +102,6 @@ def test_prepare_merge_gate_builds_candidate_evidence_that_merge_gate_accepts(mo
             "file",
             "--anchor-path",
             ".agos/tasks/current/evidence/anchors.json",
-            "--allow-missing-review",
             "--base",
             base,
             "--head",

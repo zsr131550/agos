@@ -760,9 +760,14 @@ AGOS_MULTICA_WORKER_SMOKE=1 python -m pytest tests/integration -q
 AGOS_OPENHANDS_WORKER_SMOKE=1 python -m pytest tests/integration -q
 ```
 
-## CI、信任锚与合并门禁
+## CI, Trust Anchors, and Merge Gate
 
-本地 Git hooks 是 advisory，开发者可以用 `--no-verify` 绕过。生产强制点应是 CI：
+Local Git hooks are advisory; developers can bypass them with `--no-verify`. The enforced boundary is CI. This repository now tracks an enabled `.agos/agos.yaml` with planner-backed decomposition, multiple workers, and a required local LLM reviewer. GitHub Actions includes:
+
+- `autonomous-readiness`: installs Codex/Claude CLI, runs `agos config validate --json`, `agos doctor --json`, and CI policy tests.
+- `real-agent-smoke`: enables real planner/reviewer/worker smoke tests for Codex, Claude, Multica, and OpenHands paths.
+- `agos-prepare`: materializes `.agos/tasks/current`, candidate evidence, candidate-bound clean review evidence, and a file trust anchor from the PR head checkout.
+- `merge-gate`: downloads the prepared artifact and runs `agos merge-gate` without `--allow-missing-review`.
 
 ```bash
 agos prepare-merge-gate \
@@ -775,34 +780,42 @@ agos merge-gate \
   --require-anchor \
   --anchor-backend file \
   --anchor-path ".agos/tasks/current/evidence/anchors.json" \
-  --allow-missing-review \
   --base "$BASE_SHA" \
   --head "$HEAD_SHA" \
   --json
 ```
 
-`merge-gate` 会验证：
+`merge-gate` verifies:
 
-- active task ledger hash chain
-- `gates_locked` 与当前 workflow gates 是否一致
-- trust anchor 是否匹配 ledger head
-- candidate patch hash 是否匹配
-- candidate test evidence 是否完整
-- candidate review evidence 是否完整且未过期
-- PR submitted diff 是否绑定到被审查/测试的 candidate
+- active task ledger hash chain;
+- `gates_locked` matches the current workflow gate config;
+- trust anchor matches the ledger head;
+- candidate patch hash matches recorded evidence;
+- candidate test evidence is complete;
+- candidate review evidence is complete and current;
+- submitted PR diff is bound to reviewed/tested candidate evidence.
 
-GitHub Actions 中，本仓库提供两个 PR jobs：
+### CI real-agent smoke environment
 
-1. `agos-prepare`：在 PR head checkout 上生成 `.agos/tasks/current` 和 file trust anchor artifact。
-2. `merge-gate`：下载 artifact 并运行 `agos merge-gate`。
+`real-agent-smoke` is a strong proof job: CI sets the smoke flags to `1`, so missing credentials or services fail the job. Configure these GitHub secrets/vars:
 
-要真正阻止不合规 PR 合并，还需要在 GitHub branch protection 中要求 `merge-gate` status check。
+| Name | Type | Purpose |
+| --- | --- | --- |
+| `OPENAI_API_KEY` | secret | Codex planner/reviewer/worker smoke |
+| `ANTHROPIC_API_KEY` | secret | Claude worker smoke |
+| `AGOS_OPENHANDS_ENDPOINT` | secret or var | OpenHands worker smoke endpoint |
+| `AGOS_OPENHANDS_TOKEN` | secret, optional | OpenHands token |
+| `AGOS_MULTICA_AGENT` | var, optional | Multica assignee; default `Lambda` |
+| `AGOS_MULTICA_BIN` | var, optional | Multica CLI; default `multica` |
+| `MULTICA_API_KEY` / `MULTICA_BASE_URL` | secret/var as required by Multica CLI | Multica worker smoke |
+
+To actually block non-compliant PRs, require the `merge-gate`, `autonomous-readiness`, and `real-agent-smoke` status checks in GitHub branch protection.
 
 ---
 
-## 本地验证与真实 Codex CLI 集成测试
+## Local Verification and Real Agent Integration Tests
 
-常规验证：
+Regular verification:
 
 ```bash
 python -m ruff check src tests
@@ -812,28 +825,33 @@ python -m pytest --cov=agos --cov-report=term-missing -q
 python -m build
 ```
 
-真实 Codex CLI opt-in 集成测试默认跳过，需要显式打开环境变量。
+Local real-agent smoke tests still require explicit environment variables. CI's `real-agent-smoke` job sets these flags by default.
 
-Bash / zsh：
+Bash / zsh:
 
 ```bash
-AGOS_CODEX_WORKER_SMOKE=1 AGOS_CODEX_BIN=codex \
-  python -m pytest tests/integration/test_worker_adapters_opt_in.py::test_codex_worker_smoke -q
-
 AGOS_PLANNER_SMOKE=1 AGOS_PLANNER_BIN=codex \
   python -m pytest tests/integration/test_planner_cli_opt_in.py::test_planner_cli_produces_plan_json -q
 
 AGOS_REVIEWER_SMOKE=1 AGOS_REVIEWER_BIN=codex \
   python -m pytest tests/integration/test_reviewer_cli_opt_in.py::test_llm_cli_reviewer_runs_real_cli -q
+
+AGOS_CODEX_WORKER_SMOKE=1 AGOS_CODEX_BIN=codex \
+  python -m pytest tests/integration/test_worker_adapters_opt_in.py::test_codex_worker_smoke -q
+
+AGOS_CLAUDE_WORKER_SMOKE=1 AGOS_CLAUDE_BIN=claude \
+  python -m pytest tests/integration/test_worker_adapters_opt_in.py::test_claude_worker_smoke -q
+
+AGOS_MULTICA_WORKER_SMOKE=1 AGOS_MULTICA_BIN=multica AGOS_MULTICA_AGENT=Lambda \
+  python -m pytest tests/integration/test_worker_adapters_opt_in.py::test_multica_worker_smoke -q
+
+AGOS_OPENHANDS_WORKER_SMOKE=1 AGOS_OPENHANDS_ENDPOINT=http://openhands.local \
+  python -m pytest tests/integration/test_worker_adapters_opt_in.py::test_openhands_worker_smoke -q
 ```
 
-Windows PowerShell：
+Windows PowerShell:
 
 ```powershell
-$env:AGOS_CODEX_WORKER_SMOKE='1'; $env:AGOS_CODEX_BIN='codex.cmd'
-python -m pytest tests/integration/test_worker_adapters_opt_in.py::test_codex_worker_smoke -q
-Remove-Item Env:AGOS_CODEX_WORKER_SMOKE,Env:AGOS_CODEX_BIN -ErrorAction SilentlyContinue
-
 $env:AGOS_PLANNER_SMOKE='1'; $env:AGOS_PLANNER_BIN='codex.cmd'
 python -m pytest tests/integration/test_planner_cli_opt_in.py::test_planner_cli_produces_plan_json -q
 Remove-Item Env:AGOS_PLANNER_SMOKE,Env:AGOS_PLANNER_BIN -ErrorAction SilentlyContinue
@@ -841,18 +859,15 @@ Remove-Item Env:AGOS_PLANNER_SMOKE,Env:AGOS_PLANNER_BIN -ErrorAction SilentlyCon
 $env:AGOS_REVIEWER_SMOKE='1'; $env:AGOS_REVIEWER_BIN='codex.cmd'
 python -m pytest tests/integration/test_reviewer_cli_opt_in.py::test_llm_cli_reviewer_runs_real_cli -q
 Remove-Item Env:AGOS_REVIEWER_SMOKE,Env:AGOS_REVIEWER_BIN -ErrorAction SilentlyContinue
+
+$env:AGOS_CODEX_WORKER_SMOKE='1'; $env:AGOS_CODEX_BIN='codex.cmd'
+python -m pytest tests/integration/test_worker_adapters_opt_in.py::test_codex_worker_smoke -q
+Remove-Item Env:AGOS_CODEX_WORKER_SMOKE,Env:AGOS_CODEX_BIN -ErrorAction SilentlyContinue
+
+$env:AGOS_CLAUDE_WORKER_SMOKE='1'; $env:AGOS_CLAUDE_BIN='claude.cmd'
+python -m pytest tests/integration/test_worker_adapters_opt_in.py::test_claude_worker_smoke -q
+Remove-Item Env:AGOS_CLAUDE_WORKER_SMOKE,Env:AGOS_CLAUDE_BIN -ErrorAction SilentlyContinue
 ```
-
-全量本地 integration suite，并启用 Codex 相关真实 CLI：
-
-```bash
-AGOS_CODEX_WORKER_SMOKE=1 AGOS_CODEX_BIN=codex \
-AGOS_PLANNER_SMOKE=1 AGOS_PLANNER_BIN=codex \
-AGOS_REVIEWER_SMOKE=1 AGOS_REVIEWER_BIN=codex \
-python -m pytest tests/integration -q
-```
-
-Multica/OpenHands 的真实 smoke 会创建真实外部任务或调用真实服务，默认跳过。仅在你确认环境和成本后开启对应环境变量。
 
 ---
 
