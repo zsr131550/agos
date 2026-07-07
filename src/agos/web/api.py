@@ -7,7 +7,10 @@ import re
 import shutil
 import signal
 import subprocess
+import threading
 import time
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -53,6 +56,26 @@ _SECRET_KEY_RE = re.compile(
     re.IGNORECASE,
 )
 _REDACTED = "***REDACTED***"
+
+_TASK_STATE_LOCKS_GUARD = threading.Lock()
+_TASK_STATE_LOCKS: dict[Path, threading.RLock] = {}
+
+
+def _task_state_lock(paths: AgosPaths) -> threading.RLock:
+    key = paths.current_task.resolve()
+    with _TASK_STATE_LOCKS_GUARD:
+        lock = _TASK_STATE_LOCKS.get(key)
+        if lock is None:
+            lock = threading.RLock()
+            _TASK_STATE_LOCKS[key] = lock
+        return lock
+
+
+@contextmanager
+def _locked_task_state(paths: AgosPaths) -> Iterator[None]:
+    lock = _task_state_lock(paths)
+    with lock:
+        yield
 
 
 def health_payload(repo_root: Path) -> dict[str, object]:
@@ -310,14 +333,12 @@ def resume_current_task_payload(repo_root: Path) -> dict[str, object]:
 
 
 def restart_current_task_payload(repo_root: Path) -> dict[str, object]:
-    paths = _require_initialized(repo_root)
-    payload = _set_current_phase(paths.root, "executing", "dashboard_restarted")
-    status = load_status(paths)
-    if status is not None:
-        status.last_event_seq = None
-        save_status(status, paths)
-        payload = {"ok": True, "run": current_run_payload(paths.root)["run"]}
-    return payload
+    return _set_current_phase(
+        repo_root,
+        "executing",
+        "dashboard_restarted",
+        mark_manual_event=True,
+    )
 
 
 def review_run_payload(repo_root: Path, request_payload: dict[str, Any]) -> dict[str, object]:
@@ -557,30 +578,40 @@ def _archived_task_rows(paths: AgosPaths) -> list[dict[str, object]]:
     return rows
 
 
-def _set_current_phase(repo_root: Path, phase: str, event_type: str) -> dict[str, object]:
+def _set_current_phase(
+    repo_root: Path,
+    phase: str,
+    event_type: str,
+    *,
+    mark_manual_event: bool = False,
+) -> dict[str, object]:
     paths = _require_initialized(repo_root)
-    task = _load_current_task(paths)
-    status = load_status(paths)
-    if status is None:
-        raise DashboardApiError("status_missing", "Current AGOS task status is missing.")
-    ledger = Ledger(paths.ledger)
-    record = ledger.append({"type": event_type, "task_id": task.id, "phase": phase})
-    status.phase = phase  # type: ignore[assignment]
-    status.ledger_head_hash = record["hash"]
-    save_status(status, paths)
-    return {"ok": True, "run": current_run_payload(paths.root)["run"]}
+    with _locked_task_state(paths):
+        task = _load_current_task(paths)
+        status = load_status(paths)
+        if status is None:
+            raise DashboardApiError("status_missing", "Current AGOS task status is missing.")
+        ledger = Ledger(paths.ledger)
+        record = ledger.append({"type": event_type, "task_id": task.id, "phase": phase})
+        status.phase = phase  # type: ignore[assignment]
+        status.ledger_head_hash = record["hash"]
+        if mark_manual_event:
+            status.last_event_seq = int(record["seq"])
+        save_status(status, paths)
+        return {"ok": True, "run": current_run_payload(paths.root)["run"]}
 
 
 def _mark_task_done(paths: AgosPaths, *, event_type: str) -> None:
-    task = _load_current_task(paths)
-    status = load_status(paths)
-    if status is None:
-        return
-    ledger = Ledger(paths.ledger)
-    record = ledger.append({"type": event_type, "task_id": task.id, "phase": "done"})
-    status.phase = "done"
-    status.ledger_head_hash = record["hash"]
-    save_status(status, paths)
+    with _locked_task_state(paths):
+        task = _load_current_task(paths)
+        status = load_status(paths)
+        if status is None:
+            return
+        ledger = Ledger(paths.ledger)
+        record = ledger.append({"type": event_type, "task_id": task.id, "phase": "done"})
+        status.phase = "done"
+        status.ledger_head_hash = record["hash"]
+        save_status(status, paths)
 
 
 def _task_phase_from_status_or_evidence(
@@ -592,6 +623,8 @@ def _task_phase_from_status_or_evidence(
     if status is not None and status.executor_run is not None:
         run_state = _executor_run_state(paths, status.executor_run.run_id)
         if run_state == "completed":
+            if _has_manual_phase_after_executor_completion(paths, status):
+                return status.phase
             if not _task_has_business_output(paths):
                 if status.phase != "blocked":
                     status.phase = "blocked"
@@ -606,6 +639,46 @@ def _task_phase_from_status_or_evidence(
     if status is not None:
         return status.phase
     return "archived" if archived else "unknown"
+
+
+def _has_manual_phase_after_executor_completion(paths: AgosPaths, status: TaskStatus) -> bool:
+    """Return whether a dashboard lifecycle action supersedes completed executor evidence."""
+
+    if status.last_event_seq is None or status.executor_run is None:
+        return False
+    lifecycle_seq = _latest_dashboard_lifecycle_seq(paths)
+    if lifecycle_seq is None or status.last_event_seq != lifecycle_seq:
+        return False
+    completed_seq = _executor_completed_seq(paths, status.executor_run.run_id)
+    return completed_seq is None or lifecycle_seq > completed_seq
+
+
+def _latest_dashboard_lifecycle_seq(paths: AgosPaths) -> int | None:
+    try:
+        records = Ledger(paths.ledger).read_all()
+    except Exception:
+        return None
+    for record in reversed(records):
+        if record.get("type") in {
+            "dashboard_paused",
+            "dashboard_resumed",
+            "dashboard_restarted",
+        }:
+            seq = record.get("seq")
+            return int(seq) if isinstance(seq, int) else None
+    return None
+
+
+def _executor_completed_seq(paths: AgosPaths, run_id: str) -> int | None:
+    try:
+        records = Ledger(paths.ledger).read_all()
+    except Exception:
+        return None
+    for record in reversed(records):
+        if record.get("type") == "executor_completed" and record.get("run_id") == run_id:
+            seq = record.get("seq")
+            return int(seq) if isinstance(seq, int) else None
+    return None
 
 
 def _executor_run_state(paths: AgosPaths, run_id: str) -> str | None:

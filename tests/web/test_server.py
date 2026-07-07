@@ -1,5 +1,6 @@
 ﻿from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 import json
 import threading
@@ -312,6 +313,58 @@ def test_dashboard_server_post_current_lifecycle_actions(tmp_repo) -> None:
     assert resumed["run"]["phase"] == "executing"
     assert restarted["run"]["phase"] == "executing"
     assert load_status(paths).phase == "executing"
+
+
+def test_dashboard_server_serializes_concurrent_lifecycle_posts(tmp_repo) -> None:
+    write_dashboard_config(tmp_repo)
+    from agos.core.adapter import ExecutorRun
+    from agos.core.ledger import Ledger
+    from agos.core.repo import repo_paths
+    from agos.core.status import TaskStatus, load_status, save_status
+    from agos.core.task import ExecutorBinding, Task, save_task
+
+    paths = repo_paths(tmp_repo)
+    task = Task(
+        id="agos-life-concurrent",
+        title="Concurrent lifecycle task",
+        workflow="feature",
+        gates=[],
+        executor=ExecutorBinding(adapter="multica", agent="Lambda"),
+    )
+    save_task(task, paths.task_yaml)
+    ledger = Ledger(paths.ledger)
+    started = ledger.append({"type": "task_started", "task_id": task.id, "title": task.title})
+    save_status(
+        TaskStatus.for_started_task(
+            task=task,
+            run=ExecutorRun(adapter="multica", run_id="run-life-concurrent", issue_id=None),
+            ledger_head_hash=started["hash"],
+        ),
+        paths,
+    )
+
+    def post_action(base: str, action: str) -> tuple[int, dict[str, object]]:
+        return post_json(f"{base}/api/runs/current/{action}", {})
+
+    actions = ["pause", "resume", "restart"] * 8
+    with running_dashboard_server(tmp_repo) as server:
+        base = f"http://127.0.0.1:{server.server_port}"
+        with ThreadPoolExecutor(max_workers=6) as pool:
+            results = list(pool.map(lambda action: post_action(base, action), actions))
+
+        with urllib.request.urlopen(f"{base}/api/runs/current/ledger", timeout=5) as response:
+            ledger_payload = json.loads(response.read().decode("utf-8"))
+        with urllib.request.urlopen(f"{base}/api/runs/current", timeout=5) as response:
+            current_payload = json.loads(response.read().decode("utf-8"))
+
+    assert all(status == 200 for status, _payload in results)
+    assert all(payload["ok"] is True for _status, payload in results)
+    assert ledger_payload["verified"] is True
+    assert ledger_payload["error"] is None
+    assert ledger_payload["count"] == 1 + len(actions)
+    Ledger(paths.ledger).verify_chain()
+    assert load_status(paths).ledger_head_hash == Ledger(paths.ledger).head_hash()
+    assert current_payload["ok"] is True
 
 
 def test_dashboard_server_post_runs_requires_title(tmp_repo) -> None:

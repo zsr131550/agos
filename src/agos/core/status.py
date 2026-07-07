@@ -1,6 +1,8 @@
 """`status.json`: a derived cache of the ledger, never an independent truth source."""
 from __future__ import annotations
 
+import os
+import tempfile
 from typing import Literal
 
 from pydantic import BaseModel
@@ -73,7 +75,23 @@ def save_status(status: Status, paths: AgosPaths) -> None:
     """Persist `status.json` under the current task directory."""
 
     paths.status_json.parent.mkdir(parents=True, exist_ok=True)
-    paths.status_json.write_text(status.model_dump_json(indent=2), encoding="utf-8")
+    payload = status.model_dump_json(indent=2)
+    fd, tmp_name = tempfile.mkstemp(
+        prefix=f"{paths.status_json.name}.",
+        suffix=".tmp",
+        dir=paths.status_json.parent,
+        text=True,
+    )
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(payload)
+        os.replace(tmp_name, paths.status_json)
+    except Exception:
+        try:
+            os.unlink(tmp_name)
+        except OSError:
+            pass
+        raise
 
 
 def derive_status(

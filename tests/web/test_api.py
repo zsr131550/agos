@@ -225,6 +225,30 @@ def test_runs_payload_uses_completed_executor_evidence_for_current_phase(dashboa
     assert load_status(paths).phase == "done"
 
 
+def test_restart_payload_keeps_explicit_restarted_phase_for_completed_output(
+    dashboard_repo: Path,
+) -> None:
+    paths = repo_paths(dashboard_repo)
+    run_id = "run-01"
+    run_state = paths.evidence / "executor_runs" / f"{run_id}.json"
+    run_state.parent.mkdir(parents=True, exist_ok=True)
+    run_state.write_text(
+        json.dumps({"run_id": run_id, "adapter": "codex_cli", "state": "completed"}),
+        encoding="utf-8",
+    )
+    assert current_run_payload(dashboard_repo)["run"]["phase"] == "done"
+
+    restarted = restart_current_task_payload(dashboard_repo)
+    current = current_run_payload(dashboard_repo)
+
+    assert restarted["run"]["phase"] == "executing"
+    assert current["run"]["phase"] == "executing"
+    status = load_status(paths)
+    assert status is not None
+    assert status.phase == "executing"
+    assert status.last_event_seq is not None
+
+
 def test_completed_executor_without_outputs_is_blocked_not_done(dashboard_repo: Path) -> None:
     paths = repo_paths(dashboard_repo)
     shutil.rmtree(paths.current_task / "execution")
