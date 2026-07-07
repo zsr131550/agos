@@ -16,14 +16,18 @@ from agos.web.api import (
     archive_current_task_payload,
     candidates_payload,
     config_payload,
+    continue_archived_task_payload,
     current_run_payload,
     error_payload,
     evidence_payload,
     execution_payload,
     health_payload,
+    pause_current_task_payload,
     ledger_payload,
     reviews_payload,
     review_run_payload,
+    restart_current_task_payload,
+    resume_current_task_payload,
     runs_payload,
     start_run_payload,
     status_payload,
@@ -83,6 +87,20 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
             return
         if parsed.path == "/api/runs/current/archive":
             self._serve_archive_current_task()
+            return
+        if parsed.path == "/api/runs/current/pause":
+            self._serve_simple_post(pause_current_task_payload)
+            return
+        if parsed.path == "/api/runs/current/resume":
+            self._serve_simple_post(resume_current_task_payload)
+            return
+        if parsed.path == "/api/runs/current/restart":
+            self._serve_simple_post(restart_current_task_payload)
+            return
+        archive_prefix = "/api/runs/archive/"
+        if parsed.path.startswith(archive_prefix) and parsed.path.endswith("/continue"):
+            archive_id = parsed.path.removeprefix(archive_prefix).removesuffix("/continue")
+            self._serve_continue_archived_task(archive_id)
             return
         if parsed.path == "/api/reviews/run":
             self._serve_review_run()
@@ -155,6 +173,38 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
         try:
             self._read_json_body()
             result = archive_current_task_payload(self.server.repo_root)
+            status = HTTPStatus.OK
+        except DashboardApiError as exc:
+            result = error_payload(exc)
+            status = HTTPStatus.BAD_REQUEST
+        except Exception:
+            result = {
+                "ok": False,
+                "error": {"code": "internal_error", "message": "Internal dashboard server error"},
+            }
+            status = HTTPStatus.INTERNAL_SERVER_ERROR
+        self._write_json(result, status=status)
+
+    def _serve_continue_archived_task(self, archive_id: str) -> None:
+        try:
+            self._read_json_body()
+            result = continue_archived_task_payload(self.server.repo_root, archive_id)
+            status = HTTPStatus.OK
+        except DashboardApiError as exc:
+            result = error_payload(exc)
+            status = HTTPStatus.BAD_REQUEST
+        except Exception:
+            result = {
+                "ok": False,
+                "error": {"code": "internal_error", "message": "Internal dashboard server error"},
+            }
+            status = HTTPStatus.INTERNAL_SERVER_ERROR
+        self._write_json(result, status=status)
+
+    def _serve_simple_post(self, builder: PayloadBuilder) -> None:
+        try:
+            self._read_json_body()
+            result = builder(self.server.repo_root)
             status = HTTPStatus.OK
         except DashboardApiError as exc:
             result = error_payload(exc)

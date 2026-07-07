@@ -116,6 +116,9 @@
       border-radius: 16px;
       padding: 12px;
       background: var(--panel-soft);
+      cursor: pointer;
+      text-align: left;
+      width: 100%;
     }
     .run-card.active { border-color: var(--brand); background: var(--brand-soft); }
     .run-card strong { display: block; margin-bottom: 6px; }
@@ -291,6 +294,13 @@
           </div>
           <span class="badge brand" id="poll-state">5s 轮询</span>
         </div>
+        <div class="form-actions" id="current-run-actions">
+          <button type="button" id="pause-current-task">暂停</button>
+          <button type="button" id="resume-current-task">继续</button>
+          <button type="button" id="restart-current-task">重新开始</button>
+          <button type="button" id="archive-current-task">归档</button>
+        </div>
+        <br>
         <div class="grid cols-3" id="summary-grid"></div>
       </section>
 
@@ -352,9 +362,16 @@
       agents: { task_agents: [], review_agents: [] },
       runs: [],
       current: null,
+      selectedRun: null,
       selectedRef: null,
       loading: false,
       error: null,
+    };
+
+    const lifecycleEndpoints = {
+      pause: '/api/runs/current/pause',
+      resume: '/api/runs/current/resume',
+      restart: '/api/runs/current/restart',
     };
 
     const $ = (id) => document.getElementById(id);
@@ -469,6 +486,60 @@
       }
     }
 
+    async function lifecycleAction(action) {
+      renderError(null);
+      const labels = { pause: '暂停', resume: '继续', restart: '重新开始' };
+      try {
+        const result = await fetchJson(lifecycleEndpoints[action] || `/api/runs/current/${action}`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({}),
+        });
+        state.current = result.run;
+        $('new-run-status').textContent = `${labels[action] || action}完成。`;
+        await refreshAll();
+      } catch (error) {
+        $('new-run-status').textContent = `${labels[action] || action}失败：${error.message}`;
+        renderError(error);
+      }
+    }
+
+    async function continueArchivedTask(archiveId) {
+      renderError(null);
+      try {
+        const result = await fetchJson(`/api/runs/archive/${encodeURIComponent(archiveId)}/continue`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({}),
+        });
+        state.current = result.run;
+        state.selectedRun = result.run;
+        $('new-run-status').textContent = '已继续归档任务。';
+        await refreshAll();
+      } catch (error) {
+        $('new-run-status').textContent = `继续归档任务失败：${error.message}`;
+        renderError(error);
+      }
+    }
+
+    async function selectRun(run) {
+      state.selectedRun = run;
+      if (run.scope === 'archived') {
+        state.current = {
+          id: run.id,
+          title: run.title,
+          workflow: run.workflow,
+          phase: run.phase || 'archived',
+          task: run,
+          pipeline: { phase: run.phase || 'archived', workflow: run.workflow, subtasks_count: 0, candidates_count: 0 },
+          archive_id: run.archive_id,
+        };
+        renderDashboard();
+        return;
+      }
+      await refreshSelected();
+    }
+
     async function continueActiveTask() {
       showActiveTaskConflict(false);
       $('new-run-status').textContent = '继续查看当前 active task。';
@@ -548,13 +619,14 @@
         const runs = await fetchJson('/api/runs');
         state.runs = runs.runs || runs.items || runs || [];
         renderRuns();
-        if (!runs.current_run_id || !asArray(state.runs).length) {
+        if (!runs.current_run_id && !asArray(state.runs).some((run) => run.scope === 'archived')) {
           state.current = null;
           renderDashboard();
           renderError(null);
           return;
         }
-        await refreshSelected();
+        if (runs.current_run_id) await refreshSelected();
+        else renderDashboard();
       } catch (error) {
         state.error = error;
         state.runs = [];
@@ -619,13 +691,29 @@
         const phase = run.phase || run.status?.phase || statusValue || run.state || 'unknown';
         const currentTaskId = state.current?.task?.id || state.current?.id;
         const active = state.current && (state.current.id === run.id || currentTaskId === run.id || state.current.title === run.title) ? ' active' : '';
-        return `<article class="run-card${active}"><strong>${escapeHtml(title)}</strong><small>${statusBadge(phase)}<br>${escapeHtml(run.created_at || run.updated_at || run.path || '')}</small></article>`;
+        const archiveAction = run.scope === 'archived' && run.archive_id
+          ? `<br><button type="button" data-archive-id="${escapeHtml(run.archive_id)}">继续任务</button>`
+          : '';
+        return `<article class="run-card${active}" role="button" tabindex="0" data-run-index="${index}"><strong>${escapeHtml(title)}</strong><small>${statusBadge(phase)} ${run.scope === 'archived' ? statusBadge('archived') : ''}<br>${escapeHtml(run.created_at || run.updated_at || run.path || '')}</small>${archiveAction}</article>`;
       }).join('');
+      document.querySelectorAll('[data-run-index]').forEach((button) => {
+        button.addEventListener('click', async (event) => {
+          const archiveButton = event.target.closest('[data-archive-id]');
+          if (archiveButton) {
+            event.stopPropagation();
+            await continueArchivedTask(archiveButton.getAttribute('data-archive-id'));
+            return;
+          }
+          const index = Number(button.getAttribute('data-run-index'));
+          await selectRun(asArray(state.runs)[index]);
+        });
+      });
     }
 
     function renderDashboard() {
       const run = state.current || {};
       renderRuns();
+      renderCurrentRunActions(run);
       renderSummary(run);
       renderPipeline(run.pipeline);
       renderSubagents(run.execution);
@@ -634,6 +722,17 @@
       renderMergeGate(run.merge_gate);
       renderEvidence(run);
       renderDistillation(run.distillation);
+    }
+
+    function renderCurrentRunActions(run) {
+      const box = $('current-run-actions');
+      const isArchived = run?.archive_id || state.selectedRun?.scope === 'archived';
+      const isDone = run.phase === 'done';
+      box.style.display = run?.id ? 'flex' : 'none';
+      $('pause-current-task').disabled = !run?.id || isArchived || isDone || run.phase === 'blocked';
+      $('resume-current-task').disabled = !run?.id || isArchived || isDone || run.phase === 'executing';
+      $('restart-current-task').disabled = !run?.id || isArchived;
+      $('archive-current-task').disabled = !run?.id || isArchived;
     }
 
     function renderAgentSelectors() {
@@ -804,6 +903,10 @@
     $('replace-active-submit').addEventListener('click', replaceActiveTaskFromForm);
     $('continue-active-task').addEventListener('click', continueActiveTask);
     $('archive-active-task').addEventListener('click', archiveActiveTask);
+    $('archive-current-task').addEventListener('click', archiveActiveTask);
+    $('pause-current-task').addEventListener('click', () => lifecycleAction('pause'));
+    $('resume-current-task').addEventListener('click', () => lifecycleAction('resume'));
+    $('restart-current-task').addEventListener('click', () => lifecycleAction('restart'));
     $('review-run-form').addEventListener('submit', runReviewFromForm);
     refreshAll();
     window.setInterval(refreshAll, 5000);

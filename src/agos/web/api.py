@@ -2,8 +2,11 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import shutil
+import signal
+import subprocess
 import time
 from pathlib import Path
 from typing import Any
@@ -14,6 +17,7 @@ from agos.adapters.reviewers import LlmCliReviewerAdapter
 from agos.cli.cmd_review import run_review
 from agos.cli.cmd_start import StartTaskError, start_task
 from agos.cli.cmd_start import ExecutorSelection
+from agos.core.adapter import ExecutorRun
 from agos.core.config import load_config
 from agos.core.execution import ArbiterDecision, CandidatePatch, CandidateTestRun, ExecutionSubtask
 from agos.core.execution_store import ExecutionStore
@@ -22,8 +26,8 @@ from agos.core.merge_gate import verify_merge_gate
 from agos.core.review_orchestrator import ParallelReviewOrchestrator, ReviewerSpec
 from agos.core.review_service import ReviewService
 from agos.core.review_store import ReviewStore
-from agos.core.repo import AgosPaths, git_head, repo_paths
-from agos.core.status import load_status
+from agos.core.repo import AgosPaths, git_head, repo_paths, task_paths
+from agos.core.status import TaskStatus, load_status, save_status
 from agos.core.task import load_task, task_output_ref
 from agos.web.evidence import EvidenceResolutionError, read_evidence_text, resolve_evidence_ref
 
@@ -108,28 +112,28 @@ def status_payload(repo_root: Path) -> dict[str, object]:
 
 def runs_payload(repo_root: Path) -> dict[str, object]:
     paths = _require_initialized(repo_root)
-    if not paths.task_yaml.is_file():
-        return {
-            "ok": True,
-            "repo_root": str(paths.root),
-            "current_run_id": None,
-            "runs": [],
-        }
-    task = _load_current_task(paths)
-    status = load_status(paths)
-    phase = status.phase if status is not None else "unknown"
-    return {
-        "ok": True,
-        "repo_root": str(paths.root),
-        "current_run_id": task.id,
-        "runs": [
+    runs: list[dict[str, object]] = []
+    current_run_id = None
+    if paths.task_yaml.is_file():
+        task = _load_current_task(paths)
+        status = load_status(paths)
+        phase = _task_phase_from_status_or_evidence(paths, status, archived=False)
+        current_run_id = task.id
+        runs.append(
             {
                 "id": task.id,
                 "title": task.title,
                 "workflow": task.workflow,
                 "phase": phase,
+                "scope": "current",
             }
-        ],
+        )
+    runs.extend(_archived_task_rows(paths))
+    return {
+        "ok": True,
+        "repo_root": str(paths.root),
+        "current_run_id": current_run_id,
+        "runs": runs,
     }
 
 
@@ -143,6 +147,7 @@ def current_run_payload(repo_root: Path) -> dict[str, object]:
             "Current AGOS task status is missing.",
             hint="Run AGOS task start/status recovery before opening the dashboard.",
         )
+    status_phase = _task_phase_from_status_or_evidence(paths, status, archived=False)
 
     ledger = ledger_payload(paths.root)
     execution = execution_payload(paths.root)
@@ -158,7 +163,7 @@ def current_run_payload(repo_root: Path) -> dict[str, object]:
         "id": task.id,
         "title": task.title,
         "workflow": task.workflow,
-        "phase": status.phase,
+        "phase": status_phase,
         "executor_run": _dump_model(status.executor_run),
         "output_ref": task_output_ref(task),
         "output_dir": str(paths.root / task_output_ref(task)),
@@ -166,7 +171,7 @@ def current_run_payload(repo_root: Path) -> dict[str, object]:
     pipeline = {
         "task_id": task.id,
         "workflow": task.workflow,
-        "phase": status.phase,
+        "phase": status_phase,
         "execution_plan_id": execution_plan.get("id") if execution_plan else None,
         "subtasks_count": len(execution.get("subtasks", [])),
         "candidates_count": candidates.get("count", 0),
@@ -261,6 +266,8 @@ def archive_current_task_payload(repo_root: Path) -> dict[str, object]:
     if not paths.current_task.exists() or not any(paths.current_task.iterdir()):
         raise DashboardApiError("active_task_missing", "No active AGOS task is available.")
     task_id = _archive_task_id(paths)
+    termination = _terminate_task_processes(paths)
+    _mark_task_done(paths, event_type="dashboard_archived")
     archive_root = paths.tasks / "archive"
     archive_root.mkdir(parents=True, exist_ok=True)
     archive_dir = archive_root / f"{_fsafe_name(task_id)}-{_archive_timestamp()}"
@@ -272,8 +279,45 @@ def archive_current_task_payload(repo_root: Path) -> dict[str, object]:
     return {
         "ok": True,
         "archived_task_id": task_id,
+        "archive_id": archive_dir.name,
         "archive_path": str(archive_dir),
+        "terminated_processes": termination["terminated"],
+        "termination_errors": termination["errors"],
     }
+
+
+def continue_archived_task_payload(repo_root: Path, archive_id: str) -> dict[str, object]:
+    """Restore an archived task as the active current task."""
+
+    paths = _require_initialized(repo_root)
+    archive_dir = _archive_dir_for_id(paths, archive_id)
+    if not archive_dir.is_dir() or not (archive_dir / "task.yaml").is_file():
+        raise DashboardApiError("archive_missing", f"Archived AGOS task not found: {archive_id}")
+    if paths.current_task.exists() and any(paths.current_task.iterdir()):
+        archive_current_task_payload(paths.root)
+    paths.current_task.parent.mkdir(parents=True, exist_ok=True)
+    archive_dir.rename(paths.current_task)
+    _ensure_restored_task_status(paths)
+    return {"ok": True, "archive_id": archive_id, "run": current_run_payload(paths.root)["run"]}
+
+
+def pause_current_task_payload(repo_root: Path) -> dict[str, object]:
+    return _set_current_phase(repo_root, "blocked", "dashboard_paused")
+
+
+def resume_current_task_payload(repo_root: Path) -> dict[str, object]:
+    return _set_current_phase(repo_root, "executing", "dashboard_resumed")
+
+
+def restart_current_task_payload(repo_root: Path) -> dict[str, object]:
+    paths = _require_initialized(repo_root)
+    payload = _set_current_phase(paths.root, "executing", "dashboard_restarted")
+    status = load_status(paths)
+    if status is not None:
+        status.last_event_seq = None
+        save_status(status, paths)
+        payload = {"ok": True, "run": current_run_payload(paths.root)["run"]}
+    return payload
 
 
 def review_run_payload(repo_root: Path, request_payload: dict[str, Any]) -> dict[str, object]:
@@ -466,6 +510,241 @@ def _archive_timestamp() -> str:
 def _fsafe_name(value: str) -> str:
     cleaned = re.sub(r"[^A-Za-z0-9_.-]+", "-", value.strip())
     return cleaned.strip("-") or "task"
+
+
+def _archive_dir_for_id(paths: AgosPaths, archive_id: str) -> Path:
+    safe_id = _fsafe_name(archive_id)
+    if safe_id != archive_id:
+        raise DashboardApiError("invalid_archive_id", "archive id contains unsupported characters")
+    archive_dir = (paths.tasks / "archive" / archive_id).resolve()
+    archive_root = (paths.tasks / "archive").resolve()
+    try:
+        archive_dir.relative_to(archive_root)
+    except ValueError as exc:
+        raise DashboardApiError("invalid_archive_id", "archive id escapes archive root") from exc
+    return archive_dir
+
+
+def _archived_task_rows(paths: AgosPaths) -> list[dict[str, object]]:
+    archive_root = paths.tasks / "archive"
+    if not archive_root.is_dir():
+        return []
+    rows: list[dict[str, object]] = []
+    for archive_dir in sorted(archive_root.iterdir(), key=lambda item: item.stat().st_mtime, reverse=True):
+        if not archive_dir.is_dir():
+            continue
+        task_yaml = archive_dir / "task.yaml"
+        if not task_yaml.is_file():
+            continue
+        try:
+            task = load_task(task_yaml)
+        except Exception:
+            continue
+        archived_paths = task_paths(paths.root, archive_dir)
+        status = load_status(archived_paths)
+        phase = _task_phase_from_status_or_evidence(archived_paths, status, archived=True)
+        rows.append(
+            {
+                "id": task.id,
+                "title": task.title,
+                "workflow": task.workflow,
+                "phase": phase,
+                "scope": "archived",
+                "archive_id": archive_dir.name,
+                "path": str(archive_dir),
+            }
+        )
+    return rows
+
+
+def _set_current_phase(repo_root: Path, phase: str, event_type: str) -> dict[str, object]:
+    paths = _require_initialized(repo_root)
+    task = _load_current_task(paths)
+    status = load_status(paths)
+    if status is None:
+        raise DashboardApiError("status_missing", "Current AGOS task status is missing.")
+    ledger = Ledger(paths.ledger)
+    record = ledger.append({"type": event_type, "task_id": task.id, "phase": phase})
+    status.phase = phase  # type: ignore[assignment]
+    status.ledger_head_hash = record["hash"]
+    save_status(status, paths)
+    return {"ok": True, "run": current_run_payload(paths.root)["run"]}
+
+
+def _mark_task_done(paths: AgosPaths, *, event_type: str) -> None:
+    task = _load_current_task(paths)
+    status = load_status(paths)
+    if status is None:
+        return
+    ledger = Ledger(paths.ledger)
+    record = ledger.append({"type": event_type, "task_id": task.id, "phase": "done"})
+    status.phase = "done"
+    status.ledger_head_hash = record["hash"]
+    save_status(status, paths)
+
+
+def _task_phase_from_status_or_evidence(
+    paths: AgosPaths,
+    status: TaskStatus | None,
+    *,
+    archived: bool,
+) -> str:
+    if status is not None and status.executor_run is not None:
+        run_state = _executor_run_state(paths, status.executor_run.run_id)
+        if run_state == "completed":
+            if not _task_has_business_output(paths):
+                if status.phase != "blocked":
+                    status.phase = "blocked"
+                    save_status(status, paths)
+                return "blocked"
+            if status.phase != "done":
+                status.phase = "done"
+                save_status(status, paths)
+            return "done"
+        if run_state in {"failed", "blocked"}:
+            return run_state
+    if status is not None:
+        return status.phase
+    return "archived" if archived else "unknown"
+
+
+def _executor_run_state(paths: AgosPaths, run_id: str) -> str | None:
+    state_path = paths.evidence / "executor_runs" / f"{run_id}.json"
+    if not state_path.is_file():
+        return None
+    try:
+        payload = json.loads(state_path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    state = str(payload.get("state") or "").strip().lower()
+    return state or None
+
+
+def _task_has_business_output(paths: AgosPaths) -> bool:
+    try:
+        task = load_task(paths.task_yaml)
+    except Exception:
+        task = None
+    if task is not None:
+        output_dir = paths.root / task_output_ref(task)
+        if _directory_has_files(output_dir):
+            return True
+    execution_dir = paths.current_task / "execution"
+    candidate_dir = execution_dir / "candidates"
+    if any(candidate_dir.glob("*.json")):
+        return True
+    patch_dir = execution_dir / "patches"
+    if any(patch_dir.glob("*")):
+        return True
+    return False
+
+
+def _directory_has_files(path: Path) -> bool:
+    try:
+        return any(item.is_file() for item in path.rglob("*"))
+    except OSError:
+        return False
+
+
+def _terminate_task_processes(paths: AgosPaths) -> dict[str, object]:
+    status = load_status(paths)
+    run_id = status.executor_run.run_id if status is not None and status.executor_run is not None else None
+    candidate_pids = _task_process_ids(paths)
+    if run_id:
+        candidate_pids.update(_process_ids_for_run_id(run_id))
+
+    current_pid = os.getpid()
+    terminated: list[int] = []
+    errors: list[str] = []
+    for pid in sorted(candidate_pids):
+        if pid <= 0 or pid == current_pid:
+            continue
+        try:
+            _kill_process_tree(pid)
+            terminated.append(pid)
+        except Exception as exc:
+            errors.append(f"{pid}: {exc}")
+    return {"terminated": terminated, "errors": errors}
+
+
+def _task_process_ids(paths: AgosPaths) -> set[int]:
+    pids: set[int] = set()
+    for state_path in (paths.evidence / "executor_runs").glob("*.json"):
+        try:
+            payload = json.loads(state_path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        for key in ("pid", "process_id"):
+            value = payload.get(key)
+            if isinstance(value, int):
+                pids.add(value)
+        for key in ("pids", "process_ids"):
+            value = payload.get(key)
+            if isinstance(value, list):
+                pids.update(item for item in value if isinstance(item, int))
+    return pids
+
+
+def _process_ids_for_run_id(run_id: str) -> set[int]:
+    if os.name != "nt":
+        return set()
+    try:
+        proc = subprocess.run(
+            [
+                "powershell",
+                "-NoProfile",
+                "-Command",
+                (
+                    "Get-CimInstance Win32_Process | "
+                    f"Where-Object {{ $_.ProcessId -ne $PID -and $_.CommandLine -like '*{_ps_single_quote(run_id)}*' }} | "
+                    "Select-Object -ExpandProperty ProcessId"
+                ),
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except Exception:
+        return set()
+    pids: set[int] = set()
+    for line in proc.stdout.splitlines():
+        try:
+            pids.add(int(line.strip()))
+        except ValueError:
+            continue
+    return pids
+
+
+def _kill_process_tree(pid: int) -> None:
+    if os.name == "nt":
+        subprocess.run(
+            ["taskkill", "/PID", str(pid), "/T", "/F"],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        return
+    os.kill(pid, signal.SIGTERM)
+
+
+def _ps_single_quote(value: str) -> str:
+    return value.replace("'", "''")
+
+
+def _ensure_restored_task_status(paths: AgosPaths) -> None:
+    if paths.status_json.is_file():
+        return
+    task = _load_current_task(paths)
+    ledger = Ledger(paths.ledger)
+    record = ledger.append({"type": "dashboard_restored", "task_id": task.id, "phase": "executing"})
+    status = TaskStatus.for_started_task(
+        task=task,
+        run=ExecutorRun(adapter=task.executor.adapter, run_id=f"restored-{task.id}", issue_id=None),
+        ledger_head_hash=record["hash"],
+    )
+    save_status(status, paths)
 
 
 def _merge_gate_payload(paths: AgosPaths) -> dict[str, object]:

@@ -1,6 +1,7 @@
 ﻿from __future__ import annotations
 
 import json
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -20,23 +21,27 @@ from agos.core.execution import (
 from agos.core.execution_store import ExecutionStore
 from agos.core.gate import gates_locked_payload
 from agos.core.ledger import Ledger
-from agos.core.repo import repo_paths
+from agos.core.repo import repo_paths, task_paths
 from agos.core.review import ReviewPacket, ReviewReport
 from agos.core.review_store import ReviewStore
-from agos.core.status import TaskStatus, save_status
+from agos.core.status import TaskStatus, load_status, save_status
 from agos.core.task import ExecutorBinding, Task, save_task
 from agos.web.api import (
     DashboardApiError,
     archive_current_task_payload,
     agents_payload,
     config_payload,
+    continue_archived_task_payload,
     current_run_payload,
     candidates_payload,
     error_payload,
     execution_payload,
     evidence_payload,
     health_payload,
+    pause_current_task_payload,
     review_run_payload,
+    restart_current_task_payload,
+    resume_current_task_payload,
     runs_payload,
     start_run_payload,
     status_payload,
@@ -166,6 +171,112 @@ def test_archive_current_task_payload_moves_active_task_to_archive(dashboard_rep
     assert archive_path.parent == paths.tasks / "archive"
     assert (archive_path / "task.yaml").is_file()
     assert not paths.current_task.exists()
+    assert load_status(task_paths(dashboard_repo, archive_path)).phase == "done"
+
+
+def test_runs_payload_lists_archived_tasks(dashboard_repo: Path) -> None:
+    archived = archive_current_task_payload(dashboard_repo)
+
+    payload = runs_payload(dashboard_repo)
+
+    assert payload["current_run_id"] is None
+    assert payload["runs"][0]["id"] == "agos-dashboard-01"
+    assert payload["runs"][0]["scope"] == "archived"
+    assert payload["runs"][0]["archive_id"] == Path(archived["archive_path"]).name
+    assert payload["runs"][0]["title"] == "构建可视化控制台"
+    assert payload["runs"][0]["phase"] == "done"
+
+
+def test_runs_payload_uses_completed_executor_evidence_for_archived_phase(dashboard_repo: Path) -> None:
+    paths = repo_paths(dashboard_repo)
+    run_id = "run-01"
+    run_state = paths.evidence / "executor_runs" / f"{run_id}.json"
+    run_state.parent.mkdir(parents=True, exist_ok=True)
+    run_state.write_text(
+        json.dumps({"run_id": run_id, "adapter": "codex_cli", "state": "completed"}),
+        encoding="utf-8",
+    )
+    archived = archive_current_task_payload(dashboard_repo)
+    archived_paths = task_paths(dashboard_repo, Path(archived["archive_path"]))
+    status = load_status(archived_paths)
+    status.phase = "executing"  # type: ignore[assignment]
+    save_status(status, archived_paths)
+
+    payload = runs_payload(dashboard_repo)
+
+    assert payload["runs"][0]["phase"] == "done"
+
+
+def test_runs_payload_uses_completed_executor_evidence_for_current_phase(dashboard_repo: Path) -> None:
+    paths = repo_paths(dashboard_repo)
+    run_id = "run-01"
+    run_state = paths.evidence / "executor_runs" / f"{run_id}.json"
+    run_state.parent.mkdir(parents=True, exist_ok=True)
+    run_state.write_text(
+        json.dumps({"run_id": run_id, "adapter": "codex_cli", "state": "completed"}),
+        encoding="utf-8",
+    )
+
+    payload = runs_payload(dashboard_repo)
+    current = current_run_payload(dashboard_repo)
+
+    assert payload["runs"][0]["phase"] == "done"
+    assert current["run"]["phase"] == "done"
+    assert load_status(paths).phase == "done"
+
+
+def test_completed_executor_without_outputs_is_blocked_not_done(dashboard_repo: Path) -> None:
+    paths = repo_paths(dashboard_repo)
+    shutil.rmtree(paths.current_task / "execution")
+    run_id = "run-01"
+    run_state = paths.evidence / "executor_runs" / f"{run_id}.json"
+    run_state.parent.mkdir(parents=True, exist_ok=True)
+    run_state.write_text(
+        json.dumps({"run_id": run_id, "adapter": "codex_cli", "state": "completed"}),
+        encoding="utf-8",
+    )
+
+    payload = runs_payload(dashboard_repo)
+    current = current_run_payload(dashboard_repo)
+
+    assert payload["runs"][0]["phase"] == "blocked"
+    assert current["run"]["phase"] == "blocked"
+    assert load_status(paths).phase == "blocked"
+
+
+def test_continue_archived_task_payload_restores_archive_as_current(dashboard_repo: Path) -> None:
+    paths = repo_paths(dashboard_repo)
+    archived = archive_current_task_payload(dashboard_repo)
+    archive_id = Path(archived["archive_path"]).name
+
+    payload = continue_archived_task_payload(dashboard_repo, archive_id)
+
+    assert payload["ok"] is True
+    assert payload["run"]["id"] == "agos-dashboard-01"
+    assert paths.task_yaml.is_file()
+    assert not Path(archived["archive_path"]).exists()
+
+
+def test_current_task_lifecycle_payloads_update_phase(dashboard_repo: Path) -> None:
+    paths = repo_paths(dashboard_repo)
+
+    paused = pause_current_task_payload(dashboard_repo)
+    assert paused["run"]["phase"] == "blocked"
+    assert load_status(paths).phase == "blocked"
+
+    resumed = resume_current_task_payload(dashboard_repo)
+    assert resumed["run"]["phase"] == "executing"
+    assert load_status(paths).phase == "executing"
+
+    restarted = restart_current_task_payload(dashboard_repo)
+    assert restarted["run"]["phase"] == "executing"
+    assert load_status(paths).phase == "executing"
+    records = Ledger(paths.ledger).read_all()
+    assert [record["type"] for record in records[-3:]] == [
+        "dashboard_paused",
+        "dashboard_resumed",
+        "dashboard_restarted",
+    ]
 
 
 def test_start_run_payload_can_replace_active_task(dashboard_repo: Path, monkeypatch) -> None:
@@ -234,6 +345,7 @@ def test_runs_and_current_run_payloads_include_pipeline_state(dashboard_repo: Pa
             "title": "构建可视化控制台",
             "workflow": "feature",
             "phase": "executing",
+            "scope": "current",
         }
     ]
     assert current["run"]["id"] == "agos-dashboard-01"

@@ -248,6 +248,72 @@ def test_dashboard_server_post_archive_current_task(tmp_repo) -> None:
     assert (tmp_repo / ".agos" / "tasks" / "archive").is_dir()
 
 
+def test_dashboard_server_post_continue_archived_task(tmp_repo) -> None:
+    write_dashboard_config(tmp_repo)
+    current = tmp_repo / ".agos" / "tasks" / "current"
+    (current / "task.yaml").write_text(
+        "id: agos-old\ntitle: Old task\nworkflow: feature\ngates: []\nexecutor:\n  adapter: multica\n  agent: Lambda\n",
+        encoding="utf-8",
+    )
+
+    with running_dashboard_server(tmp_repo) as server:
+        _status, archived = post_json(
+            f"http://127.0.0.1:{server.server_port}/api/runs/current/archive",
+            {},
+        )
+        archive_id = archived["archive_id"]
+        status, payload = post_json(
+            f"http://127.0.0.1:{server.server_port}/api/runs/archive/{archive_id}/continue",
+            {},
+        )
+
+    assert status == 200
+    assert payload["ok"] is True
+    assert payload["run"]["id"] == "agos-old"
+    assert (current / "task.yaml").is_file()
+
+
+def test_dashboard_server_post_current_lifecycle_actions(tmp_repo) -> None:
+    write_dashboard_config(tmp_repo)
+    from agos.core.adapter import ExecutorRun
+    from agos.core.ledger import Ledger
+    from agos.core.repo import repo_paths
+    from agos.core.status import TaskStatus, load_status, save_status
+    from agos.core.task import ExecutorBinding, Task, save_task
+
+    paths = repo_paths(tmp_repo)
+    task = Task(
+        id="agos-life-web",
+        title="Lifecycle task",
+        workflow="feature",
+        gates=[],
+        executor=ExecutorBinding(adapter="multica", agent="Lambda"),
+    )
+    save_task(task, paths.task_yaml)
+    ledger = Ledger(paths.ledger)
+    started = ledger.append({"type": "task_started", "task_id": task.id, "title": task.title})
+    save_status(
+        TaskStatus.for_started_task(
+            task=task,
+            run=ExecutorRun(adapter="multica", run_id="run-life-web", issue_id=None),
+            ledger_head_hash=started["hash"],
+        ),
+        paths,
+    )
+
+    with running_dashboard_server(tmp_repo) as server:
+        base = f"http://127.0.0.1:{server.server_port}"
+        status_pause, paused = post_json(f"{base}/api/runs/current/pause", {})
+        status_resume, resumed = post_json(f"{base}/api/runs/current/resume", {})
+        status_restart, restarted = post_json(f"{base}/api/runs/current/restart", {})
+
+    assert status_pause == status_resume == status_restart == 200
+    assert paused["run"]["phase"] == "blocked"
+    assert resumed["run"]["phase"] == "executing"
+    assert restarted["run"]["phase"] == "executing"
+    assert load_status(paths).phase == "executing"
+
+
 def test_dashboard_server_post_runs_requires_title(tmp_repo) -> None:
     write_dashboard_config(tmp_repo)
     with running_dashboard_server(tmp_repo) as server:

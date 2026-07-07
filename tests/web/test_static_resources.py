@@ -41,12 +41,23 @@ def test_dashboard_static_index_is_packaged() -> None:
     assert 'id="replace-active-submit"' in text
     assert 'id="continue-active-task"' in text
     assert 'id="archive-active-task"' in text
+    assert 'id="pause-current-task"' in text
+    assert 'id="resume-current-task"' in text
+    assert 'id="restart-current-task"' in text
     assert 'id="review-agent"' in text
     assert 'id="review-run-submit"' in text
     assert "createRunFromForm" in text
     assert "replaceActiveTaskFromForm" in text
     assert "archiveActiveTask" in text
-    assert "if (!runs.current_run_id || !asArray(state.runs).length)" in text
+    assert "selectRun" in text
+    assert "lifecycleAction" in text
+    assert "continueArchivedTask" in text
+    assert "run.phase === 'done'" in text
+    assert "/api/runs/current/pause" in text
+    assert "/api/runs/current/resume" in text
+    assert "/api/runs/current/restart" in text
+    assert "/api/runs/archive/" in text
+    assert "if (!runs.current_run_id && !asArray(state.runs).some((run) => run.scope === 'archived'))" in text
     assert "state.current = null" in text
     assert "refreshAgents" in text
     assert "runReviewFromForm" in text
