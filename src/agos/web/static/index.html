@@ -855,7 +855,7 @@
         return;
       }
       $('merge-gate-view').innerHTML = `<table><thead><tr><th>检查项</th><th>状态</th><th>详情</th></tr></thead><tbody>${checks.map((check, index) => `
-        <tr><td>${escapeHtml(labelOf(check, `check-${index + 1}`))}</td><td>${statusBadge(check.status || check.result)}</td><td>${escapeHtml(check.message || check.summary || check.detail || '')}</td></tr>`).join('')}</tbody></table>`;
+        <tr><td>${escapeHtml(labelOf(check, `check-${index + 1}`))}</td><td>${statusBadge(check.state || check.status || check.result)}</td><td>${escapeHtml(check.message || check.summary || check.detail || '')}</td></tr>`).join('')}</tbody></table>`;
     }
 
     function collectEvidenceRefs(run) {

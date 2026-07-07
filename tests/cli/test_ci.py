@@ -234,6 +234,26 @@ def test_ci_pre_push_without_upstream_uses_head_diff(monkeypatch, tmp_repo):
     assert calls == [["git", "diff", "HEAD"]]
 
 
+def test_ci_diff_stage_normalizes_missing_stdout(monkeypatch, tmp_repo):
+    import agos.cli.cmd_ci as cmd_ci
+
+    captured = {}
+
+    def fake_run_command(*args, **kwargs):
+        captured["kwargs"] = kwargs
+        return SimpleNamespace(returncode=0, stdout=None, stderr="")
+
+    monkeypatch.setattr(
+        cmd_ci,
+        "run_command",
+        fake_run_command,
+    )
+
+    assert cmd_ci._git_diff_for_stage(tmp_repo, "pre-commit") == ""
+    assert captured["kwargs"]["encoding"] == "utf-8"
+    assert captured["kwargs"]["errors"] == "replace"
+
+
 def test_ci_reuses_single_ledger_read_for_policy_checks(monkeypatch, tmp_repo):
     config_data = {
         "executor": {"name": "multica", "agent": "Lambda"},

@@ -61,6 +61,7 @@ def test_dashboard_static_index_is_packaged() -> None:
     assert "state.current = null" in text
     assert "refreshAgents" in text
     assert "runReviewFromForm" in text
+    assert "statusBadge(check.state || check.status || check.result)" in text
     assert "fetchJson('/api/runs', {" in text
     assert "replace_active" in text
     assert "fetchJson('/api/runs/current/archive', {" in text

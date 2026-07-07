@@ -46,8 +46,10 @@ def _git_diff_for_stage(repo_root, stage: str) -> str:
         check=True,
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="replace",
     )
-    return completed.stdout
+    return completed.stdout or ""
 
 
 def ci_local_command(

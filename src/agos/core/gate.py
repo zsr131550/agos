@@ -94,6 +94,8 @@ class CommandGate:
             "cwd": ctx.repo_root,
             "capture_output": True,
             "text": True,
+            "encoding": "utf-8",
+            "errors": "replace",
             "env": _gate_command_env(),
         }
         if self.spec.timeout_seconds is not None:
@@ -212,6 +214,8 @@ class ExternalSecurityGate:
             "cwd": ctx.repo_root,
             "capture_output": True,
             "text": True,
+            "encoding": "utf-8",
+            "errors": "replace",
             "env": _gate_command_env(),
         }
         if self.spec.timeout_seconds is not None:

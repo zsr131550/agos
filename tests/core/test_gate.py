@@ -113,6 +113,8 @@ def test_command_gate_passes_configured_timeout(tmp_repo: Path, monkeypatch: pyt
 
     assert res.state == "pass"
     assert captured["kwargs"]["timeout"] == 123
+    assert captured["kwargs"]["encoding"] == "utf-8"
+    assert captured["kwargs"]["errors"] == "replace"
 
 
 def test_command_gate_strips_git_hook_local_env(tmp_repo: Path, monkeypatch: pytest.MonkeyPatch):
@@ -179,6 +181,8 @@ def test_external_security_gate_passes_configured_timeout(
 
     assert res.state == "pass"
     assert captured["kwargs"]["timeout"] == 456
+    assert captured["kwargs"]["encoding"] == "utf-8"
+    assert captured["kwargs"]["errors"] == "replace"
 
 
 def test_secret_scan_clear(tmp_repo: Path):
