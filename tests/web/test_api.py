@@ -435,6 +435,50 @@ def test_runs_and_current_run_payloads_include_pipeline_state(dashboard_repo: Pa
     assert current["reviews"]["reports"][0]["review_id"] == "review-01"
 
 
+def test_current_run_payload_maps_agent_returned_options_to_candidates(
+    dashboard_repo: Path,
+) -> None:
+    paths = repo_paths(dashboard_repo)
+    ledger = Ledger(paths.ledger)
+    ledger.append(
+        {
+            "type": "executor_completed",
+            "run_id": "run-01",
+            "state": "completed",
+            "detail": "\n".join(
+                [
+                    json.dumps(
+                        {
+                            "type": "item.completed",
+                            "item": {
+                                "type": "agent_message",
+                                "text": (
+                                    "方案 A：Add read-only dashboard API payloads\n"
+                                    "方案 B：Only update copywriting"
+                                ),
+                            },
+                        },
+                        ensure_ascii=False,
+                    )
+                ]
+            ),
+        }
+    )
+
+    payload = current_run_payload(dashboard_repo)
+
+    options = payload["run"]["agent_options"]["options"]
+    assert payload["run"]["agent_options"]["count"] == 2
+    assert options[0]["id"] == "option-1"
+    assert options[0]["title"] == "方案 A"
+    assert options[0]["summary"] == "Add read-only dashboard API payloads"
+    assert options[0]["source_run_id"] == "run-01"
+    assert options[0]["mapped_candidate_id"] == "candidate-01"
+    assert options[0]["mapped_candidate_status"] == "accepted"
+    assert options[1]["mapped_candidate_id"] is None
+    assert payload["agent_options"]["options"][0]["mapped_candidate_id"] == "candidate-01"
+
+
 def test_runs_payload_returns_empty_list_without_active_task(tmp_repo: Path) -> None:
     paths = repo_paths(tmp_repo)
     paths.agos_dir.mkdir(parents=True, exist_ok=True)

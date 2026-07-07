@@ -314,8 +314,13 @@
         <div id="subagents-view"></div>
       </section>
 
+      <section class="panel" id="agent-options-panel">
+        <div class="section-title"><div><h2>Agent 返回方案</h2><p>从 executor 原始返回中提取的自然语言方案，并关联到实际候选补丁。</p></div></div>
+        <div id="agent-options-view"></div>
+      </section>
+
       <section class="panel" id="candidates-panel">
-        <div class="section-title"><div><h2>候选方案</h2><p>Task 3 current-run payload 中 candidates 的候选输出。</p></div></div>
+        <div class="section-title"><div><h2>候选补丁</h2><p>来自 candidates 的可测试、可评审、可合并补丁输出。</p></div></div>
         <div id="candidates-view"></div>
       </section>
 
@@ -717,6 +722,7 @@
       renderSummary(run);
       renderPipeline(run.pipeline);
       renderSubagents(run.execution);
+      renderAgentOptions(run.agent_options);
       renderCandidates(run.candidates);
       renderReviews(run.reviews);
       renderMergeGate(run.merge_gate);
@@ -780,7 +786,7 @@
       const items = [
         { label: '任务', value: taskTitle },
         { label: '状态', html: statusBadge(phase) },
-        { label: '候选 / 节点 / 门禁', value: `${asArray(candidates).length} / ${asArray(subtasks).length} / ${asArray(checks).length}` },
+        { label: '候选补丁 / 节点 / 门禁', value: `${asArray(candidates).length} / ${asArray(subtasks).length} / ${asArray(checks).length}` },
         { label: 'Workflow', value: workflow },
         { label: '执行 ID', value: executionId },
         { label: '输出目录', value: run.output_ref || run.output_dir || 'outputs/<task-id>' },
@@ -795,7 +801,7 @@
         const summaryCards = [
           ['Plan', pipeline?.workflow || pipeline?.phase || '默认 workflow', pipeline?.phase || 'unknown'],
           ['Workers', `${pipeline?.subtasks_count ?? 0} 个 Subagent 节点`, pipeline?.subtasks_count ? 'running' : 'pending'],
-          ['Candidates', `${pipeline?.candidates_count ?? 0} 个候选方案`, pipeline?.candidates_count ? 'ok' : 'pending'],
+          ['Candidate Patches', `${pipeline?.candidates_count ?? 0} 个候选补丁`, pipeline?.candidates_count ? 'ok' : 'pending'],
           ['Ledger', pipeline?.ledger_verified ? 'ledger.jsonl 已验证' : '等待 ledger_verified', pipeline?.ledger_verified ? 'verified' : 'pending'],
           ['Merge Gate', pipeline?.merge_gate_passed ? '已通过' : '未通过', pipeline?.merge_gate_passed ? 'passed' : 'pending'],
         ];
@@ -826,13 +832,26 @@
       }).join('')}</tbody></table>`;
     }
 
+    function renderAgentOptions(agentOptions) {
+      const rows = asArray(agentOptions?.options);
+      if (!rows.length) {
+        $('agent-options-view').innerHTML = '<div class="empty">暂无 Agent 返回方案。</div>';
+        return;
+      }
+      $('agent-options-view').innerHTML = `<table><thead><tr><th>方案</th><th>映射状态</th><th>对应候选补丁</th><th>摘要</th></tr></thead><tbody>${rows.map((row, index) => {
+        const mapped = row.mapped_candidate_id || '';
+        const mappingState = mapped ? (row.mapped_candidate_status || 'mapped') : 'unmapped';
+        return `<tr><td>${escapeHtml(row.title || `option-${index + 1}`)}</td><td>${statusBadge(mappingState)}</td><td>${escapeHtml(mapped || '未映射')}</td><td>${escapeHtml(row.summary || '')}</td></tr>`;
+      }).join('')}</tbody></table>`;
+    }
+
     function renderCandidates(candidates) {
       const rows = candidates?.candidates || candidates || [];
       if (!asArray(rows).length) {
-        $('candidates-view').innerHTML = '<div class="empty">暂无候选方案。</div>';
+        $('candidates-view').innerHTML = '<div class="empty">暂无候选补丁。</div>';
         return;
       }
-      $('candidates-view').innerHTML = `<table><thead><tr><th>候选</th><th>状态</th><th>Patch / Ref</th><th>摘要</th></tr></thead><tbody>${asArray(rows).map((row, index) => `
+      $('candidates-view').innerHTML = `<table><thead><tr><th>候选补丁</th><th>状态</th><th>Patch / Ref</th><th>摘要</th></tr></thead><tbody>${asArray(rows).map((row, index) => `
         <tr><td>${escapeHtml(labelOf(row, `candidate-${index + 1}`))}</td><td>${statusBadge(row.status || row.state || row.verdict)}</td><td>${escapeHtml(row.patch_ref || row.patch || row.ref || '')}</td><td>${escapeHtml(row.summary || row.description || row.notes || '')}</td></tr>`).join('')}</tbody></table>`;
     }
 

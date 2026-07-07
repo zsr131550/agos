@@ -179,6 +179,7 @@ def current_run_payload(repo_root: Path) -> dict[str, object]:
     merge_gate = _merge_gate_payload(paths)
     execution_plan = execution.get("plan") if isinstance(execution.get("plan"), dict) else None
     candidate_rows = candidates.get("candidates", [])
+    agent_options = _agent_options_payload(paths, candidate_rows)
 
     task_payload = task.model_dump(mode="json")
     status_payload_value = status.model_dump(mode="json")
@@ -216,6 +217,7 @@ def current_run_payload(repo_root: Path) -> dict[str, object]:
             "execution": execution,
             "candidates": candidates,
             "reviews": reviews,
+            "agent_options": agent_options,
             "merge_gate": merge_gate,
             "pipeline": pipeline,
             "distillation": distillation,
@@ -232,6 +234,7 @@ def current_run_payload(repo_root: Path) -> dict[str, object]:
         "execution": execution,
         "candidates": candidates,
         "reviews": reviews,
+        "agent_options": agent_options,
         "merge_gate": merge_gate,
         "pipeline": pipeline,
         "distillation": distillation,
@@ -458,6 +461,82 @@ def candidates_payload(repo_root: Path) -> dict[str, object]:
         "test_errors": test_errors,
         "decision_errors": decision_errors,
     }
+
+
+_AGENT_OPTION_LINE_RE = re.compile(
+    r"^\s*(?:[-*]\s*)?"
+    r"(?P<title>(?:方案|选项)\s*[A-Za-z0-9一二三四五六七八九十]+|Option\s*[A-Za-z0-9]+)"
+    r"\s*[:：]\s*(?P<summary>.+?)\s*$",
+    re.IGNORECASE | re.MULTILINE,
+)
+
+
+def _agent_options_payload(paths: AgosPaths, candidate_rows: object) -> dict[str, object]:
+    candidates = [row for row in candidate_rows if isinstance(row, dict)]
+    options: list[dict[str, object]] = []
+    try:
+        records = Ledger(paths.ledger).read_all()
+    except Exception:
+        records = []
+    for record in records:
+        if record.get("type") != "executor_completed":
+            continue
+        run_id = str(record.get("run_id") or "")
+        detail = record.get("detail")
+        if not isinstance(detail, str) or not detail.strip():
+            continue
+        for message in _agent_message_texts(detail):
+            for match in _AGENT_OPTION_LINE_RE.finditer(message):
+                summary = match.group("summary").strip()
+                mapped = _candidate_for_agent_option(summary, candidates)
+                options.append(
+                    {
+                        "id": f"option-{len(options) + 1}",
+                        "title": match.group("title").strip(),
+                        "summary": summary,
+                        "source_run_id": run_id,
+                        "mapped_candidate_id": mapped.get("id") if mapped else None,
+                        "mapped_candidate_status": mapped.get("status") if mapped else None,
+                    }
+                )
+    return {"ok": True, "count": len(options), "options": options}
+
+
+def _agent_message_texts(detail: str) -> Iterator[str]:
+    for line in detail.splitlines():
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        item = event.get("item") if isinstance(event, dict) else None
+        if not isinstance(item, dict) or item.get("type") != "agent_message":
+            continue
+        text = item.get("text")
+        if isinstance(text, str) and text.strip():
+            yield text
+
+
+def _candidate_for_agent_option(
+    option_summary: str,
+    candidates: list[dict[str, Any]],
+) -> dict[str, Any] | None:
+    normalized_option = _normalize_option_text(option_summary)
+    for candidate in candidates:
+        summary = candidate.get("summary")
+        if not isinstance(summary, str):
+            continue
+        normalized_summary = _normalize_option_text(summary)
+        if normalized_option == normalized_summary:
+            return candidate
+        if normalized_option and normalized_option in normalized_summary:
+            return candidate
+        if normalized_summary and normalized_summary in normalized_option:
+            return candidate
+    return None
+
+
+def _normalize_option_text(value: str) -> str:
+    return re.sub(r"\s+", " ", value.strip().lower())
 
 
 def reviews_payload(repo_root: Path) -> dict[str, object]:

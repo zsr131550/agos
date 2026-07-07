@@ -62,6 +62,10 @@ def test_dashboard_static_index_is_packaged() -> None:
     assert "refreshAgents" in text
     assert "runReviewFromForm" in text
     assert "statusBadge(check.state || check.status || check.result)" in text
+    assert "\u5019\u9009\u8865\u4e01" in text
+    assert "Agent \u8fd4\u56de\u65b9\u6848" in text
+    assert "renderAgentOptions(run.agent_options)" in text
+    assert "mapped_candidate_id" in text
     assert "fetchJson('/api/runs', {" in text
     assert "replace_active" in text
     assert "fetchJson('/api/runs/current/archive', {" in text
@@ -71,7 +75,7 @@ def test_dashboard_static_index_is_packaged() -> None:
     assert "Promise.all([fetchJson('/api/health'), fetchJson('/api/runs')])" not in text
     assert "evidence.text || JSON.stringify" in text
     assert "暂无任务批次。" in text
-    assert "候选 / 节点 / 门禁" in text
+    assert "\u5019\u9009\u8865\u4e01 / \u8282\u70b9 / \u95e8\u7981" in text
     assert "执行 ID" in text
     assert "输出目录" in text
     assert "run.output_ref || run.output_dir" in text
