@@ -3,9 +3,9 @@ from __future__ import annotations
 
 import json
 from collections.abc import Mapping
-from typing import Protocol
+from typing import Literal, Protocol
 
-from pydantic import ValidationError
+from pydantic import BaseModel, ValidationError
 
 from agos.core.config import AGOSConfig, WorkerConfig
 from agos.core.execution import ExecutionPlan
@@ -19,6 +19,16 @@ class PlannerAdapter(Protocol):
     def plan_json(self, task: Task, available_workers: list[str]) -> str: ...
 
 
+PlanSource = Literal["planner_json", "llm", "fallback"]
+
+
+class ExecutionPlanResult(BaseModel):
+    """Execution plan plus provenance for the automatic execution loop."""
+
+    plan: ExecutionPlan
+    source: PlanSource
+
+
 def create_execution_plan(
     task: Task,
     config: AGOSConfig,
@@ -27,6 +37,25 @@ def create_execution_plan(
     planner_json: str | None = None,
     planner: PlannerAdapter | None = None,
 ) -> ExecutionPlan:
+    """Create a conservative execution plan for an active task."""
+
+    return create_execution_plan_with_provenance(
+        task,
+        config,
+        available_workers,
+        planner_json=planner_json,
+        planner=planner,
+    ).plan
+
+
+def create_execution_plan_with_provenance(
+    task: Task,
+    config: AGOSConfig,
+    available_workers: Mapping[str, WorkerConfig] | Mapping[str, object],
+    *,
+    planner_json: str | None = None,
+    planner: PlannerAdapter | None = None,
+) -> ExecutionPlanResult:
     """Create a conservative execution plan for an active task.
 
     Priority: an explicit ``planner_json`` argument wins, then an LLM planner
@@ -37,13 +66,18 @@ def create_execution_plan(
     """
 
     worker_names = list(available_workers)
+    source: PlanSource = "fallback"
     if planner_json is None and planner is not None and config.orchestration.planner.enabled:
         planner_json = _safe_llm_plan(planner, task, worker_names)
+        if planner_json is not None:
+            source = "llm"
+    elif planner_json is not None:
+        source = "planner_json"
     if planner_json is not None:
         try:
             payload = json.loads(planner_json)
         except json.JSONDecodeError:
-            return _fallback_plan(task, config, worker_names)
+            return ExecutionPlanResult(plan=_fallback_plan(task, config, worker_names), source="fallback")
         if not isinstance(payload, dict):
             raise ValueError("planner output must be a JSON object")
         payload = dict(payload)
@@ -53,9 +87,9 @@ def create_execution_plan(
         except ValidationError as exc:
             raise ValueError(str(exc)) from exc
         _validate_plan_workers(plan, worker_names)
-        return plan
+        return ExecutionPlanResult(plan=plan, source=source)
 
-    return _fallback_plan(task, config, worker_names)
+    return ExecutionPlanResult(plan=_fallback_plan(task, config, worker_names), source="fallback")
 
 
 def _safe_llm_plan(planner: PlannerAdapter, task: Task, worker_names: list[str]) -> str | None:

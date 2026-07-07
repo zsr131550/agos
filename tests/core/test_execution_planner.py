@@ -5,7 +5,7 @@ import json
 import pytest
 
 from agos.core.config import AGOSConfig
-from agos.core.execution_planner import create_execution_plan
+from agos.core.execution_planner import create_execution_plan, create_execution_plan_with_provenance
 from agos.core.task import ExecutorBinding, Task
 
 
@@ -91,6 +91,43 @@ def test_invalid_json_falls_back_to_deterministic_plan() -> None:
 
     assert plan.id == "auto-plan-agos-01"
     assert plan.max_parallel == 2
+
+
+def test_planner_json_multi_subtask_preserves_worker_assignments() -> None:
+    config = _config(
+        workers={
+            "alpha": {"type": "local_worktree"},
+            "beta": {"type": "local_worktree"},
+        }
+    )
+    planner_json = json.dumps(
+        {
+            "id": "planner-plan",
+            "task_id": "agos-01",
+            "max_parallel": 2,
+            "requires_candidate_review": True,
+            "subtasks": [
+                {
+                    "id": "subtask-docs",
+                    "title": "Update docs",
+                    "write_scope": ["docs"],
+                    "worker": {"adapter": "alpha", "role": "docs_agent"},
+                },
+                {
+                    "id": "subtask-tests",
+                    "title": "Update tests",
+                    "write_scope": ["tests"],
+                    "worker": {"adapter": "beta", "role": "test_agent"},
+                },
+            ],
+        }
+    )
+
+    result = create_execution_plan_with_provenance(_task(), config, config.workers, planner_json=planner_json)
+
+    assert result.source == "planner_json"
+    assert [subtask.worker.adapter for subtask in result.plan.subtasks] == ["alpha", "beta"]
+    assert [subtask.worker.role for subtask in result.plan.subtasks] == ["docs_agent", "test_agent"]
 
 
 def test_planner_json_with_unknown_worker_is_rejected() -> None:
@@ -233,4 +270,68 @@ def test_llm_planner_disabled_uses_fallback() -> None:
     plan = create_execution_plan(_task(), config, config.workers, planner=planner)
 
     assert plan.id == "auto-plan-agos-01"
+    assert planner.calls == 0
+
+
+def test_planner_json_provenance_reports_explicit_source() -> None:
+    config = _config()
+    planner_json = json.dumps(
+        {
+            "id": "planner-plan",
+            "task_id": "wrong-task",
+            "max_parallel": 2,
+            "requires_candidate_review": True,
+            "subtasks": [
+                {
+                    "id": "subtask-docs",
+                    "title": "Update docs",
+                    "write_scope": ["README.md"],
+                    "worker": {"adapter": "alpha", "role": "worker_agent"},
+                }
+            ],
+        }
+    )
+
+    result = create_execution_plan_with_provenance(
+        _task("active-task"), config, config.workers, planner_json=planner_json
+    )
+
+    assert result.source == "planner_json"
+    assert result.plan.id == "planner-plan"
+    assert result.plan.task_id == "active-task"
+
+
+def test_llm_planner_provenance_reports_llm_source() -> None:
+    config = _config(planner_enabled=True)
+    planner = _FakePlanner(
+        json.dumps(
+            {
+                "id": "llm-plan",
+                "task_id": "agos-01",
+                "subtasks": [
+                    {
+                        "id": "llm-subtask",
+                        "title": "Update docs",
+                        "write_scope": ["README.md"],
+                        "worker": {"adapter": "alpha", "role": "worker_agent"},
+                    }
+                ],
+            }
+        )
+    )
+
+    result = create_execution_plan_with_provenance(_task(), config, config.workers, planner=planner)
+
+    assert result.source == "llm"
+    assert result.plan.id == "llm-plan"
+
+
+def test_fallback_provenance_reports_fallback_source_for_disabled_planner() -> None:
+    config = _config(planner_enabled=False)
+    planner = _FakePlanner(json.dumps({"id": "llm-plan", "subtasks": []}))
+
+    result = create_execution_plan_with_provenance(_task(), config, config.workers, planner=planner)
+
+    assert result.source == "fallback"
+    assert result.plan.id == "auto-plan-agos-01"
     assert planner.calls == 0

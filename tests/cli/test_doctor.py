@@ -121,6 +121,89 @@ def test_doctor_warns_on_dev_only_reviewer(monkeypatch, tmp_repo):
     assert "dev-only reviewer" in checks["reviewers"]["detail"]
 
 
+def test_doctor_warns_when_autonomous_loop_has_no_reviewers(monkeypatch, tmp_repo):
+    agos_dir = tmp_repo / ".agos"
+    agos_dir.mkdir()
+    (agos_dir / "agos.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "executor": {"name": "multica", "agent": "Lambda"},
+                "workers": {"local_worktree": {"type": "local_worktree"}},
+                "orchestration": {"backend": "native_async", "max_parallel": 1},
+                "workflows": {"feature": {"gates": []}},
+            },
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(tmp_repo)
+    _stub_cli_entrypoint_success(monkeypatch)
+
+    result = runner.invoke(app, ["doctor", "--json"])
+
+    assert result.exit_code == 0, result.stderr
+    payload = json.loads(result.stdout)
+    checks = {check["name"]: check for check in payload["checks"]}
+    assert checks["autonomous_loop"]["state"] == "warning"
+    assert "review" in checks["autonomous_loop"]["detail"]
+    assert "--allow-missing-review" in checks["autonomous_loop"]["detail"]
+
+
+def test_doctor_warns_when_autonomous_planner_command_is_unavailable(monkeypatch, tmp_repo):
+    agos_dir = tmp_repo / ".agos"
+    agos_dir.mkdir()
+    (agos_dir / "agos.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "executor": {"name": "multica", "agent": "Lambda"},
+                "workers": {"local_worktree": {"type": "local_worktree"}},
+                "reviewers": {"manual": {"type": "manual", "role": "security_reviewer"}},
+                "orchestration": {
+                    "backend": "native_async",
+                    "max_parallel": 1,
+                    "planner": {"enabled": True, "executor": "codex_cli", "command": "missing-codex-for-test"},
+                },
+                "workflows": {"feature": {"gates": []}},
+            },
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(tmp_repo)
+    _stub_cli_entrypoint_success(monkeypatch)
+    import agos.cli.cmd_doctor as cmd_doctor
+
+    monkeypatch.setattr(
+        cmd_doctor.shutil,
+        "which",
+        lambda name: r"C:\\Tools\\agos.cmd" if name == "agos" else None,
+    )
+
+    result = runner.invoke(app, ["doctor", "--json"])
+
+    assert result.exit_code == 0, result.stderr
+    payload = json.loads(result.stdout)
+    checks = {check["name"]: check for check in payload["checks"]}
+    assert checks["autonomous_loop"]["state"] == "warning"
+    assert "planner command unavailable" in checks["autonomous_loop"]["detail"]
+    assert "fallback" in checks["autonomous_loop"]["detail"]
+
+
+def test_doctor_warns_when_required_manual_reviewer_blocks_auto_acceptance(monkeypatch, tmp_repo):
+    _write_config(tmp_repo)
+    monkeypatch.chdir(tmp_repo)
+    _stub_cli_entrypoint_success(monkeypatch)
+
+    result = runner.invoke(app, ["doctor", "--json"])
+
+    assert result.exit_code == 0, result.stderr
+    payload = json.loads(result.stdout)
+    checks = {check["name"]: check for check in payload["checks"]}
+    assert checks["autonomous_loop"]["state"] == "warning"
+    assert "manual reviewer" in checks["autonomous_loop"]["detail"]
+    assert "blocks automatic acceptance" in checks["autonomous_loop"]["detail"]
+
+
 def test_doctor_human_reports_check_lines(monkeypatch, tmp_repo):
     _write_config(tmp_repo)
     monkeypatch.chdir(tmp_repo)

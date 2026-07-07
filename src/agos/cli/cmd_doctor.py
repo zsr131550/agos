@@ -77,6 +77,7 @@ def _run_checks() -> list[DoctorCheck]:
                 DoctorCheck("workers", "skipped", "repository is not initialized"),
                 DoctorCheck("reviewers", "skipped", "repository is not initialized"),
                 DoctorCheck("orchestration", "skipped", "repository is not initialized"),
+                DoctorCheck("autonomous_loop", "skipped", "repository is not initialized"),
                 DoctorCheck("trust_anchor", "skipped", "repository is not initialized"),
             ]
         )
@@ -92,18 +93,22 @@ def _run_checks() -> list[DoctorCheck]:
                 DoctorCheck("workers", "skipped", "config is invalid"),
                 DoctorCheck("reviewers", "skipped", "config is invalid"),
                 DoctorCheck("orchestration", "skipped", "config is invalid"),
+                DoctorCheck("autonomous_loop", "skipped", "config is invalid"),
                 DoctorCheck("trust_anchor", "skipped", "config is invalid"),
             ]
         )
         return checks
 
     service = ExecutionService(paths)
+    worker_count = 0
     try:
         register_configured_worker_adapters(service)
+        worker_count = len(service.worker_adapters())
         checks.append(_worker_health_check(service))
     except Exception as exc:
         checks.append(DoctorCheck("workers", "failed", str(exc)))
 
+    reviewer_specs = []
     try:
         reviewer_specs = configured_reviewer_specs(repo_root)
         configured_reviewer_adapters(repo_root)
@@ -133,6 +138,7 @@ def _run_checks() -> list[DoctorCheck]:
     except Exception as exc:
         checks.append(DoctorCheck("orchestration", "failed", str(exc)))
 
+    checks.append(_autonomous_loop_readiness_check(config, reviewer_specs=reviewer_specs, worker_count=worker_count))
     checks.append(_trust_anchor_check(paths, config))
 
     return checks
@@ -239,6 +245,63 @@ def _worker_health_check(service: ExecutionService) -> DoctorCheck:
     if warnings:
         return DoctorCheck("workers", "warning", "; ".join(warnings))
     return DoctorCheck("workers", "passed", f"{len(adapters)} worker(s) healthy")
+
+
+def _autonomous_loop_readiness_check(
+    config: AGOSConfig,
+    *,
+    reviewer_specs,
+    worker_count: int,
+) -> DoctorCheck:
+    issues: list[str] = []
+    failures: list[str] = []
+
+    if worker_count == 0:
+        issues.append("no workers configured; fallback local_worktree will be used only when execution registers it")
+    elif config.orchestration.max_parallel > worker_count:
+        issues.append(
+            f"max_parallel={config.orchestration.max_parallel} exceeds configured worker count={worker_count}; "
+            "extra capacity will wait"
+        )
+
+    planner = config.orchestration.planner
+    if planner.enabled:
+        planner_command = planner.command or _default_cli_command(planner.executor)
+        if shutil.which(planner_command) is None:
+            issues.append(
+                f"planner command unavailable: {planner_command}; agos run auto will use deterministic fallback"
+            )
+
+    if not reviewer_specs:
+        issues.append(
+            "no reviewers configured; automatic acceptance is blocked unless --allow-missing-review is used"
+        )
+
+    for name, reviewer in sorted(config.reviewers.items()):
+        if reviewer.type == "manual" and reviewer.required:
+            issues.append(
+                f"required manual reviewer {name!r} blocks automatic acceptance until manual findings are ingested"
+            )
+        elif reviewer.type in {"codex_cli", "claude_code"}:
+            command = reviewer.command or _default_cli_command(reviewer.executor or reviewer.type)
+            if reviewer.required and shutil.which(command) is None:
+                failures.append(f"required reviewer {name!r} command unavailable: {command}")
+            elif shutil.which(command) is None:
+                issues.append(f"optional reviewer {name!r} command unavailable: {command}")
+
+    if failures:
+        return DoctorCheck("autonomous_loop", "failed", "; ".join(failures + issues))
+    if issues:
+        return DoctorCheck("autonomous_loop", "warning", "; ".join(issues))
+    return DoctorCheck("autonomous_loop", "passed", "planner/worker/reviewer loop ready")
+
+
+def _default_cli_command(executor: str) -> str:
+    if executor == "codex_cli":
+        return "codex"
+    if executor == "claude_code":
+        return "claude"
+    return executor
 
 
 def _trust_anchor_check(paths, config: AGOSConfig) -> DoctorCheck:

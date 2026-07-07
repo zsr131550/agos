@@ -629,6 +629,133 @@ External backend endpoint 需要实现：
 
 ---
 
+
+## Autonomous Agent Review Loop Examples
+
+`agos run auto` is the product entrypoint for this loop: active task -> execution plan -> worker/subagent assignment -> candidate patch -> candidate gates -> local reviewer -> candidate decision -> guarded apply only when `--apply` is present.
+
+### Minimal local fallback
+
+When the LLM planner is disabled or unavailable, AGOS creates a deterministic fallback plan: one subtask, the first available worker, and the configured `fallback_write_scope`. This is the safest offline/CI baseline. A required `manual` reviewer is human-in-the-loop and will block automatic acceptance until findings are ingested; use `codex_cli` or `claude_code` for a fully local agent-review loop.
+
+```yaml
+workers:
+  local_worktree:
+    type: local_worktree
+
+reviewers:
+  manual_security:
+    type: manual
+    role: security_reviewer
+    required: true
+
+orchestration:
+  backend: native_async
+  max_parallel: 1
+  fallback_write_scope:
+    - README.md
+    - src/agos
+    - tests
+    - docs
+  planner:
+    enabled: false
+```
+
+### Planner + Codex worker + Codex reviewer
+
+```yaml
+workers:
+  codex_impl:
+    type: codex_cli
+    command: codex
+    timeout_seconds: 900
+    artifact_globs:
+      - .agos-worker/*.json
+
+reviewers:
+  codex_review:
+    type: codex_cli
+    executor: codex_cli
+    command: codex
+    role: security_reviewer
+    required: true
+    timeout_seconds: 180
+    blocking_severity: high
+
+orchestration:
+  backend: native_async
+  max_parallel: 1
+  max_retries: 1
+  worker_timeout_seconds: 900
+  planner:
+    enabled: true
+    executor: codex_cli
+    command: codex
+    timeout_seconds: 60
+```
+
+### Multi-worker Codex / Claude split
+
+Planner output must assign every subtask to a configured `worker.adapter`. `agos run auto --json` reports `planner_source`, `subtask_worker_assignments`, `reviewer_ids`, `candidate_review_ids`, raw review refs, and any blocked stage/reason.
+
+```yaml
+workers:
+  codex_impl:
+    type: codex_cli
+    command: codex
+    timeout_seconds: 900
+  claude_docs:
+    type: claude_code
+    command: claude
+    timeout_seconds: 900
+
+reviewers:
+  codex_review:
+    type: codex_cli
+    executor: codex_cli
+    command: codex
+    role: security_reviewer
+    required: true
+
+orchestration:
+  backend: native_async
+  max_parallel: 2
+  max_retries: 1
+  worker_timeout_seconds: 900
+  planner:
+    enabled: true
+    executor: codex_cli
+    command: codex
+    timeout_seconds: 60
+```
+
+Check readiness before running the autonomous loop:
+
+```bash
+agos doctor
+agos config validate
+```
+
+If no reviewer is configured, `agos run auto` will not accept candidates by default. For local experiments only, use:
+
+```bash
+agos run auto --dry-run --allow-missing-review --json
+```
+
+`--allow-missing-review` is a non-production escape hatch. Production loops should configure a `manual`, `codex_cli`, or `claude_code` reviewer and require review evidence in the merge gate.
+
+### Real agent smoke tests
+
+Default tests do not call real Codex, Claude, Multica, or OpenHands. Enable smoke tests explicitly during local release validation:
+
+```bash
+AGOS_PLANNER_SMOKE=1 AGOS_PLANNER_BIN=codex python -m pytest tests/integration/test_planner_cli_opt_in.py -q
+AGOS_REVIEWER_SMOKE=1 AGOS_REVIEWER_BIN=codex python -m pytest tests/integration/test_reviewer_cli_opt_in.py -q
+AGOS_CODEX_WORKER_SMOKE=1 AGOS_CODEX_BIN=codex python -m pytest tests/integration/test_worker_adapters_opt_in.py -q
+AGOS_MULTICA_WORKER_SMOKE=1 python -m pytest tests/integration -q
+AGOS_OPENHANDS_WORKER_SMOKE=1 python -m pytest tests/integration -q
+```
+
 ## CI、信任锚与合并门禁
 
 本地 Git hooks 是 advisory，开发者可以用 `--no-verify` 绕过。生产强制点应是 CI：

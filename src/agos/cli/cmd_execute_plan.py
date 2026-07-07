@@ -185,11 +185,16 @@ def _format_auto_result(result: AutoExecutionResult) -> str:
         f"run: {result.run_id}",
         f"state: {result.run_state}",
         f"mode: {'dry-run' if result.dry_run else 'apply'}",
+        f"planner: {result.planner_source}",
+        f"workers: {_join_mapping(result.subtask_worker_assignments)}",
         f"completed: {_join(tuple(result.completed_subtasks))}",
         f"failed: {_join(tuple(result.failed_subtasks))}",
         f"candidates: {_join(tuple(result.candidate_ids))}",
+        f"reviewers: {_join(tuple(result.reviewer_ids))}",
+        f"reviews: {_join_mapping(result.candidate_review_ids)}",
         f"accepted: {_join(tuple(result.accepted_candidate_ids))}",
         f"applied: {_join(tuple(result.applied_candidate_ids))}",
+        f"blocked: {_format_block(result)}",
     ]
     if result.notes:
         parts.append("notes: " + " | ".join(result.notes))
@@ -198,6 +203,18 @@ def _format_auto_result(result: AutoExecutionResult) -> str:
 
 def _join(values: tuple[str, ...]) -> str:
     return ", ".join(values) if values else "-"
+
+
+def _join_mapping(values: dict[str, str]) -> str:
+    return ", ".join(f"{key}={value}" for key, value in sorted(values.items())) if values else "-"
+
+
+def _format_block(result: AutoExecutionResult) -> str:
+    if result.blocked_stage is None:
+        return "-"
+    if result.blocked_reason:
+        return f"{result.blocked_stage}: {result.blocked_reason}"
+    return result.blocked_stage
 
 
 run_app.callback(invoke_without_command=True)(execute_plan_command)

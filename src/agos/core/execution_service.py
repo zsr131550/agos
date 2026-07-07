@@ -417,6 +417,7 @@ class ExecutionService:
                 candidate_id,
                 packet.review_id,
                 error=f"required reviewers failed: {failed}",
+                raw_refs=result.raw_refs,
             )
             raise ValueError(f"required reviewers failed: {failed}")
 
@@ -1057,6 +1058,7 @@ class ExecutionService:
         review_id: str,
         *,
         error: str,
+        raw_refs: Iterable[str] = (),
     ) -> None:
         _status, task = self._active_task()
         candidate = self.store.read_candidate(candidate_id)
@@ -1075,6 +1077,7 @@ class ExecutionService:
                 "state": "failed",
                 "completed_at": utc_now_iso(),
                 "ledger_head_at_completion": failed_event["hash"],
+                "raw_refs": list(raw_refs),
             }
         )
         bindings = list(candidate.review_refs)
