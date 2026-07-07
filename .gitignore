@@ -13,7 +13,8 @@ dist/
 htmlcov/
 .venv/
 venv/
-.agos/
+.agos/*
+!.agos/agos.yaml
 dist_test/
 .worktrees/
 .idea/

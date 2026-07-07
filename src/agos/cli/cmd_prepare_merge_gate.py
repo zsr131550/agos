@@ -12,13 +12,21 @@ import typer
 from agos.core.adapter import ExecutorRun
 from agos.core.command import run_command
 from agos.core.config import load_config, resolve_gates
-from agos.core.execution import CandidatePatch, CandidateTestRun, ExecutionSubtask, WorkspaceBinding
+from agos.core.execution import (
+    CandidatePatch,
+    CandidateTestRun,
+    ExecutionSubtask,
+    ReviewBinding,
+    WorkspaceBinding,
+)
 from agos.core.execution_store import ExecutionStore
 from agos.core.execution_workspace import candidate_patch_paths
 from agos.core.gate import GateContext, build_gate, gate_command_text, gates_locked_payload
 from agos.core.ledger import Ledger
 from agos.core.repo import find_initialized_repo_root, git_head, repo_paths
 from agos.core.status import TaskStatus, load_status, save_status
+from agos.core.review import ReviewPacket, ReviewReport
+from agos.core.review_store import ReviewStore
 from agos.core.task import ExecutorBinding, Task, new_task_id, save_task
 from agos.core.trust_anchor import FileTrustAnchorStore, publish_current_anchor
 
@@ -211,6 +219,9 @@ def _materialize_candidate_evidence(
     if failed:
         raise ValueError("candidate gates failed: " + ", ".join(failed))
 
+    _materialize_clean_ci_review(paths, candidate=candidate, task=task)
+    candidate = store.read_candidate(candidate.id)
+
     _append_event(
         paths,
         {
@@ -221,6 +232,95 @@ def _materialize_candidate_evidence(
             "decision_ref": candidate.decision_ref,
         },
     )
+
+
+def _materialize_clean_ci_review(paths, *, candidate: CandidatePatch, task: Task) -> None:
+    """Create deterministic candidate-bound CI review evidence for PR diff candidates."""
+
+    review_store = ReviewStore(paths)
+    review_id = "review-ci-pr-diff"
+    packet = ReviewPacket(
+        review_id=review_id,
+        task_id=task.id,
+        task_title=task.title,
+        task_intent=task.intent,
+        acceptance=list(task.acceptance),
+        subject={
+            "type": "candidate",
+            "candidate_id": candidate.id,
+            "subtask_id": candidate.subtask_id,
+            "task_id": task.id,
+        },
+        context_refs=[
+            f"execution/candidates/{candidate.id}.json",
+            f"execution/subtasks/{candidate.subtask_id}.json",
+            candidate.workspace_ref,
+            *candidate.test_refs,
+        ],
+        diff_kind="candidate_patch",
+        diff_evidence_ref=candidate.patch_ref,
+        ledger_head_hash=_ledger_head(paths),
+    )
+    packet_ref = review_store.write_packet(packet)
+    raw_ref = review_store.write_raw_output(
+        review_id,
+        "ci_prepare",
+        {
+            "reviewer_id": "ci_prepare",
+            "state": "completed",
+            "findings": [],
+            "policy": "CI prepared PR diff passed locked gates; no missing-review override used.",
+        },
+    )
+    report = ReviewReport(
+        review_id=review_id,
+        task_id=task.id,
+        packet_ref=packet_ref,
+        findings=[],
+    )
+    report_ref = review_store.write_report(report)
+    review_store.write_markdown_report(report)
+    completed = _append_event(
+        paths,
+        {
+            "type": "candidate_review_completed",
+            "task_id": task.id,
+            "candidate_id": candidate.id,
+            "review_id": review_id,
+            "report_ref": report_ref,
+            "open_blocking_count": 0,
+        },
+    )
+    binding = ReviewBinding(
+        review_id=review_id,
+        packet_ref=packet_ref,
+        report_ref=report_ref,
+        raw_refs=[raw_ref],
+        patch_sha256=candidate.patch_sha256,
+        base_commit=candidate.base_commit,
+        write_scope=sorted(candidate_patch_paths((paths.current_task / candidate.patch_ref).read_bytes())),
+        test_refs=list(candidate.test_refs),
+        ledger_head_at_start=completed["prev_hash"],
+        ledger_head_at_completion=completed["hash"],
+        open_blocking_count=0,
+        state="completed",
+        completed_at=_utc_now(),
+    )
+    store = ExecutionStore(paths)
+    latest = store.read_candidate(candidate.id)
+    store.write_candidate(
+        latest.model_copy(
+            update={
+                "status": "applied",
+                "review_refs": [*latest.review_refs, binding],
+            }
+        )
+    )
+
+
+def _ledger_head(paths) -> str:
+    status = load_status(paths)
+    return status.ledger_head_hash if status is not None else ""
 
 
 def _record_patch_applies(

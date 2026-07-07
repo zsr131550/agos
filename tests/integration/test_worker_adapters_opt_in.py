@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+from agos.adapters.workers.claude_code import ClaudeWorkerAdapter
 from agos.adapters.workers.codex_cli import CodexWorkerAdapter
 from agos.adapters.workers.multica_worker import MulticaWorkerAdapter
 from agos.adapters.workers.openhands import OpenHandsWorkerAdapter
@@ -44,6 +45,19 @@ def test_codex_worker_smoke(tmp_path):
     workspace = _git_workspace(tmp_path)
     adapter = CodexWorkerAdapter(
         command=os.getenv("AGOS_CODEX_BIN", "codex"),
+        timeout_seconds=120,
+    )
+    run = adapter.start(_request(workspace))
+    status = adapter.poll(run.run_id, subtask_id=run.subtask_id)
+    assert status.backend == adapter.name
+    assert status.run_id == run.run_id
+
+
+@pytest.mark.skipif(os.getenv("AGOS_CLAUDE_WORKER_SMOKE") != "1", reason="opt-in real Claude worker smoke")
+def test_claude_worker_smoke(tmp_path):
+    workspace = _git_workspace(tmp_path)
+    adapter = ClaudeWorkerAdapter(
+        command=os.getenv("AGOS_CLAUDE_BIN", "claude"),
         timeout_seconds=120,
     )
     run = adapter.start(_request(workspace))
