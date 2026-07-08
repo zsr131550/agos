@@ -306,6 +306,31 @@ def test_run_command_cmd_shim_translates_capture_output(monkeypatch):
     assert "capture_output" not in recorder["kwargs"]
 
 
+def test_run_command_cmd_shim_pipes_input_to_stdin(monkeypatch):
+    from agos.core.command import run_command
+    import agos.core.command as command_module
+
+    monkeypatch.setattr(command_module.sys, "platform", "win32")
+    recorder = {}
+    communicated = {}
+
+    def communicate(*, input=None, timeout=None):
+        del timeout
+        communicated["input"] = input
+        return ("out", "err")
+
+    _patch_popen(
+        monkeypatch,
+        _FakeProc(returncode=0, communicate=communicate),
+        recorder,
+    )
+
+    run_command([r"C:\npm\codex.CMD", "exec", "-"], input="hello", capture_output=True)
+
+    assert recorder["kwargs"]["stdin"] == subprocess.PIPE
+    assert communicated["input"] == "hello"
+
+
 def test_run_command_cmd_shim_check_raises_called_process_error(monkeypatch):
     from agos.core.command import run_command
     import agos.core.command as command_module

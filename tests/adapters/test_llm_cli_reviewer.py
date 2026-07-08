@@ -186,7 +186,8 @@ def test_llm_cli_reviewer_reads_candidate_patch_into_prompt(monkeypatch, tmp_pat
     captured: dict[str, str] = {}
 
     def fake_run_command(args, **kwargs):
-        captured["prompt"] = args[-1]
+        captured["prompt"] = kwargs["input"]
+        captured["prompt_arg"] = args[-1]
         return _completed(json.dumps({"findings": []}))
 
     monkeypatch.setattr("agos.adapters.reviewers.llm_cli.run_command", fake_run_command)
@@ -208,6 +209,7 @@ def test_llm_cli_reviewer_reads_candidate_patch_into_prompt(monkeypatch, tmp_pat
     )
     adapter.start(request)
 
+    assert captured["prompt_arg"] == "-"
     assert diff_content in captured["prompt"]
     # The bare ref string must not stand in for the missing diff.
     assert "Diff:\n" + patch_ref + "\n" not in captured["prompt"]
@@ -219,7 +221,8 @@ def test_llm_cli_reviewer_falls_back_to_ref_when_patch_missing(monkeypatch, tmp_
     captured: dict[str, str] = {}
 
     def fake_run_command(args, **kwargs):
-        captured["prompt"] = args[-1]
+        captured["prompt"] = kwargs["input"]
+        captured["prompt_arg"] = args[-1]
         return _completed(json.dumps({"findings": []}))
 
     monkeypatch.setattr("agos.adapters.reviewers.llm_cli.run_command", fake_run_command)
@@ -241,6 +244,7 @@ def test_llm_cli_reviewer_falls_back_to_ref_when_patch_missing(monkeypatch, tmp_
     )
     adapter.start(request)
 
+    assert captured["prompt_arg"] == "-"
     assert patch_ref in captured["prompt"]
 
 
@@ -252,8 +256,7 @@ def test_codex_reviewer_args_skip_git_repo_check():
     args = adapter._args("review this diff")
 
     assert "--skip-git-repo-check" in args
-    # The flag is an exec option and must precede the positional prompt.
-    assert args.index("--skip-git-repo-check") < args.index("review this diff")
+    assert args[-1] == "-"
 
 
 def test_claude_reviewer_unwraps_result_envelope(monkeypatch):

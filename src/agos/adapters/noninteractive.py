@@ -7,6 +7,7 @@ def noninteractive_prompt(prompt: str) -> str:
 
     return "\n\n".join(
         [
+            "AGOS task request:\n" + prompt.strip(),
             "\n".join(
                 [
                     "AGOS execution contract:",
@@ -18,6 +19,5 @@ def noninteractive_prompt(prompt: str) -> str:
                     "- Implement immediately and write concrete artifacts before returning.",
                 ]
             ),
-            prompt.strip(),
         ]
     )

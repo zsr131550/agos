@@ -76,6 +76,8 @@ def _spawn_cmd_shim(
     if capture_output:
         kwargs.setdefault("stdout", subprocess.PIPE)
         kwargs.setdefault("stderr", subprocess.PIPE)
+    if input is not None:
+        kwargs.setdefault("stdin", subprocess.PIPE)
     if text is not None:
         kwargs["text"] = text
     if encoding is not None:

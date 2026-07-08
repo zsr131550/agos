@@ -43,11 +43,13 @@ class LlmCliReviewerAdapter:
         status: ReviewerRunStatus
         raw_ref: str | None = None
         try:
+            prompt = _prompt(request, base_path=self.cwd)
             proc = run_worker_command(
-                self._args(_prompt(request, base_path=self.cwd)),
+                self._args(prompt),
                 action=f"{self.executor} reviewer",
                 cwd=self.cwd,
                 timeout_seconds=self.timeout_seconds,
+                stdin_text=prompt if self.executor == "codex_cli" else None,
                 runner=run_command,
             )
             stdout = proc.stdout
@@ -144,7 +146,7 @@ class LlmCliReviewerAdapter:
             # The reviewer runs in a scratch cwd that is not a git repo and the
             # diff is delivered in the prompt, so skip codex's git-trust check
             # rather than refuse to start.
-            return [command, "exec", "--skip-git-repo-check", "--json", prompt]
+            return [command, "exec", "--skip-git-repo-check", "--json", "-"]
         if self.executor == "claude_code":
             return [command, "-p", "--output-format", "json", prompt]
         raise ValueError(f"unsupported reviewer executor: {self.executor}")

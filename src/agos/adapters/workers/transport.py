@@ -24,16 +24,20 @@ def run_worker_command(
     timeout_seconds: int,
     env: dict[str, str] | None = None,
     cwd: Path | None = None,
+    stdin_text: str | None = None,
     runner=run_command,
 ):
     kwargs: dict[str, Any] = {
         "capture_output": True,
         "text": True,
         "encoding": "utf-8",
-        "stdin": subprocess.DEVNULL,
         "timeout": timeout_seconds,
         "env": worker_env(env),
     }
+    if stdin_text is None:
+        kwargs["stdin"] = subprocess.DEVNULL
+    else:
+        kwargs["input"] = stdin_text
     if cwd is not None:
         kwargs["cwd"] = cwd
     try:

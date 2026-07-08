@@ -125,12 +125,13 @@ class CodexWorkerAdapter:
         )
 
     def start(self, request: WorkerStartRequest) -> WorkerRun:
+        prompt = noninteractive_prompt(request.prompt)
         args = [
             self.command,
             "exec",
             "--dangerously-bypass-approvals-and-sandbox",
             "--json",
-            noninteractive_prompt(request.prompt),
+            "-",
         ]
         if self.ignore_rules:
             args.insert(2, "--ignore-rules")
@@ -142,6 +143,7 @@ class CodexWorkerAdapter:
             cwd=Path(request.workspace_path),
             timeout_seconds=self.timeout_seconds,
             env=self.env,
+            stdin_text=prompt,
             runner=run_command,
         )
         worker_run, cached_status = _exec_result(self.name, request, proc.stdout)

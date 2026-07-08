@@ -151,7 +151,7 @@ def test_codex_worker_adapter_starts_cli_with_workspace_and_prompt(monkeypatch, 
     from agos.adapters.workers.codex_cli import CodexWorkerAdapter
     import agos.adapters.workers.codex_cli as codex_module
 
-    calls: list[list[str]] = []
+    calls: list[tuple[list[str], dict[str, object]]] = []
 
     class FakeProc:
         returncode = 0
@@ -159,7 +159,7 @@ def test_codex_worker_adapter_starts_cli_with_workspace_and_prompt(monkeypatch, 
         stderr = ""
 
     def fake_run(args, **kwargs):
-        calls.append(args)
+        calls.append((args, kwargs))
         assert kwargs["cwd"] == tmp_path
         return FakeProc()
 
@@ -176,20 +176,22 @@ def test_codex_worker_adapter_starts_cli_with_workspace_and_prompt(monkeypatch, 
 
     assert run.backend == "codex"
     assert run.run_id == "codex-run-01"
-    assert calls[0][:2] == ["codex", "exec"]
-    assert "--ignore-user-config" not in calls[0]
-    assert "--ignore-rules" not in calls[0]
-    assert "--dangerously-bypass-approvals-and-sandbox" in calls[0]
-    assert "--json" in calls[0]
-    assert "Implement README change" in calls[0][-1]
-    assert "Do not ask clarifying questions" in calls[0][-1]
+    args, kwargs = calls[0]
+    assert args[:2] == ["codex", "exec"]
+    assert "--ignore-user-config" not in args
+    assert "--ignore-rules" not in args
+    assert "--dangerously-bypass-approvals-and-sandbox" in args
+    assert "--json" in args
+    assert args[-1] == "-"
+    assert "Implement README change" in kwargs["input"]
+    assert "Do not ask clarifying questions" in kwargs["input"]
 
 
 def test_codex_worker_adapter_can_opt_into_hermetic_user_config(monkeypatch, tmp_path):
     from agos.adapters.workers.codex_cli import CodexWorkerAdapter
     import agos.adapters.workers.codex_cli as codex_module
 
-    calls: list[list[str]] = []
+    calls: list[tuple[list[str], dict[str, object]]] = []
 
     class FakeProc:
         returncode = 0
@@ -197,8 +199,7 @@ def test_codex_worker_adapter_can_opt_into_hermetic_user_config(monkeypatch, tmp
         stderr = ""
 
     def fake_run(args, **kwargs):
-        del kwargs
-        calls.append(args)
+        calls.append((args, kwargs))
         return FakeProc()
 
     monkeypatch.setattr(codex_module, "run_command", fake_run)
@@ -216,8 +217,11 @@ def test_codex_worker_adapter_can_opt_into_hermetic_user_config(monkeypatch, tmp
         )
     )
 
-    assert "--ignore-user-config" in calls[0]
-    assert "--ignore-rules" in calls[0]
+    args, kwargs = calls[0]
+    assert "--ignore-user-config" in args
+    assert "--ignore-rules" in args
+    assert args[-1] == "-"
+    assert "Implement README change" in kwargs["input"]
 
 
 def test_codex_worker_adapter_parses_pretty_exec_json(monkeypatch, tmp_path):
@@ -248,7 +252,7 @@ def test_codex_worker_adapter_parses_exec_jsonl_and_polls_cached_status(monkeypa
     from agos.adapters.workers.codex_cli import CodexWorkerAdapter
     import agos.adapters.workers.codex_cli as codex_module
 
-    calls: list[list[str]] = []
+    calls: list[tuple[list[str], dict[str, object]]] = []
 
     class FakeProc:
         returncode = 0
@@ -258,9 +262,10 @@ def test_codex_worker_adapter_parses_exec_jsonl_and_polls_cached_status(monkeypa
             self.stdout = stdout
 
     def fake_run(args, **kwargs):
-        del kwargs
-        calls.append(args)
+        calls.append((args, kwargs))
         if args[1] == "exec":
+            assert args[-1] == "-"
+            assert "Do the work" in kwargs["input"]
             return FakeProc(
                 "\n".join(
                     [
@@ -290,13 +295,15 @@ def test_codex_worker_adapter_parses_exec_jsonl_and_polls_cached_status(monkeypa
     assert run.state == "running"
     assert status.state == "completed"
     assert status.detail == "done"
-    assert calls[0][:2] == ["codex", "exec"]
-    assert "--ignore-user-config" not in calls[0]
-    assert "--ignore-rules" not in calls[0]
-    assert "--dangerously-bypass-approvals-and-sandbox" in calls[0]
-    assert "--json" in calls[0]
-    assert "Do the work" in calls[0][-1]
-    assert "Do not ask clarifying questions" in calls[0][-1]
+    args, kwargs = calls[0]
+    assert args[:2] == ["codex", "exec"]
+    assert "--ignore-user-config" not in args
+    assert "--ignore-rules" not in args
+    assert "--dangerously-bypass-approvals-and-sandbox" in args
+    assert "--json" in args
+    assert args[-1] == "-"
+    assert "Do the work" in kwargs["input"]
+    assert "Do not ask clarifying questions" in kwargs["input"]
 
 
 def test_codex_worker_adapter_poll_and_cancel(monkeypatch):
@@ -522,7 +529,8 @@ def test_codex_worker_adapter_passes_timeout_and_env(monkeypatch, tmp_path):
 
     assert observed[0]["timeout"] == 99
     assert observed[0]["env"]["AGOS_WORKER_MODE"] == "production"
-    assert observed[0]["stdin"] == subprocess.DEVNULL
+    assert "stdin" not in observed[0]
+    assert "Implement README change" in observed[0]["input"]
 
 
 def test_multica_worker_adapter_passes_timeout_and_env(monkeypatch):
