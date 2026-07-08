@@ -60,6 +60,8 @@ class CodexWorkerAdapter:
         artifact_globs: tuple[str, ...] | list[str] = (),
         env: dict[str, str] | None = None,
         health_probe: bool = False,
+        ignore_user_config: bool = False,
+        ignore_rules: bool = False,
     ) -> None:
         self.command = command
         self.name = name
@@ -70,6 +72,8 @@ class CodexWorkerAdapter:
         self.artifact_globs = tuple(artifact_globs)
         self.env = dict(env or {})
         self.health_probe = health_probe
+        self.ignore_user_config = ignore_user_config
+        self.ignore_rules = ignore_rules
         self._subtasks_by_run_id: dict[str, str] = {}
         self._workspaces_by_run_id: dict[str, str] = {}
         self._statuses_by_run_id: dict[str, WorkerRunStatus] = {}
@@ -121,16 +125,19 @@ class CodexWorkerAdapter:
         )
 
     def start(self, request: WorkerStartRequest) -> WorkerRun:
+        args = [
+            self.command,
+            "exec",
+            "--dangerously-bypass-approvals-and-sandbox",
+            "--json",
+            noninteractive_prompt(request.prompt),
+        ]
+        if self.ignore_rules:
+            args.insert(2, "--ignore-rules")
+        if self.ignore_user_config:
+            args.insert(2, "--ignore-user-config")
         proc = run_worker_command(
-            [
-                self.command,
-                "exec",
-                "--ignore-user-config",
-                "--ignore-rules",
-                "--dangerously-bypass-approvals-and-sandbox",
-                "--json",
-                noninteractive_prompt(request.prompt),
-            ],
+            args,
             action="codex exec",
             cwd=Path(request.workspace_path),
             timeout_seconds=self.timeout_seconds,

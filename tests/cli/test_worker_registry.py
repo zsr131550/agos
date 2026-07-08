@@ -98,6 +98,36 @@ def test_worker_registry_passes_runtime_fields(tmp_repo):
     assert adapter.env == {"AGOS_WORKER_MODE": "production"}
 
 
+def test_worker_registry_passes_codex_hermetic_flags(tmp_repo):
+    paths = repo_paths(tmp_repo)
+    paths.agos_dir.mkdir(parents=True, exist_ok=True)
+    paths.agos_yaml.write_text(
+        yaml.safe_dump(
+            {
+                "executor": {"name": "multica", "agent": "Lambda"},
+                "workers": {
+                    "codex-hermetic": {
+                        "type": "codex_cli",
+                        "command": "codex",
+                        "ignore_user_config": True,
+                        "ignore_rules": True,
+                    },
+                },
+                "workflows": {},
+            },
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+    service = ExecutionService(paths)
+
+    register_configured_worker_adapters(service)
+
+    adapter = service._worker_adapters["codex-hermetic"]
+    assert adapter.ignore_user_config is True
+    assert adapter.ignore_rules is True
+
+
 def test_worker_registry_passes_workspace_manager_to_real_workers(tmp_repo):
     paths = repo_paths(tmp_repo)
     paths.agos_dir.mkdir(parents=True, exist_ok=True)

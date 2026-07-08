@@ -44,7 +44,7 @@ def test_llm_cli_reviewer_runs_real_cli(tmp_path):
     run = adapter.start(_smoke_request())
     status = adapter.poll(run.run_id, reviewer_id="smoke")
 
-    # Whether the CLI returned findings or failed closed, it must not crash and
-    # must reach a terminal state with the run id wired through.
-    assert status.is_terminal
+    # Real smoke must prove a usable reviewer path. A failed terminal state is
+    # useful production evidence, but it is not a passing smoke test.
+    assert status.state == "completed", status.model_dump()
     assert status.run_id == "reviewer-smoke-run-01"
