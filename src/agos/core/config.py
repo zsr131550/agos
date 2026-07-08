@@ -61,6 +61,11 @@ class WorkerConfig(BaseModel):
     artifact_globs: list[str] = Field(default_factory=list)
     env: dict[str, str] = Field(default_factory=dict)
     health_probe: bool = Field(default=False)
+    # codex_cli-only: opt into hermetic execution that ignores local Codex
+    # user config/rules. Default off so real local Codex smoke uses the user's
+    # configured CLI authentication and preferences.
+    ignore_user_config: bool = Field(default=False)
+    ignore_rules: bool = Field(default=False)
     # claude_code-only: opt into real async polling via `--bg` + `agents --json`.
     claude_async_poll: bool = Field(default=False)
     # claude_code-only: reserved for follow-up `--resume` turns on completion.

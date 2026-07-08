@@ -33,6 +33,8 @@ def register_configured_worker_adapters(service: ExecutionService) -> None:
                     artifact_globs=worker.artifact_globs,
                     env=worker.env,
                     health_probe=worker.health_probe,
+                    ignore_user_config=worker.ignore_user_config,
+                    ignore_rules=worker.ignore_rules,
                 )
             )
         elif worker.type == "claude_code":

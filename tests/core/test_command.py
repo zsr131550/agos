@@ -58,6 +58,27 @@ def test_resolve_executable_expands_bare_command_on_windows(monkeypatch):
     ]
 
 
+def test_resolve_executable_prefers_cmd_over_powershell_shim_on_windows(monkeypatch):
+    import agos.core.command as command_module
+
+    monkeypatch.setattr(command_module.sys, "platform", "win32")
+
+    def fake_which(name):
+        return {
+            "codex": r"C:\Users\me\AppData\Roaming\npm\codex.ps1",
+            "codex.cmd": r"C:\Users\me\AppData\Roaming\npm\codex.cmd",
+        }.get(name)
+
+    monkeypatch.setattr(command_module.shutil, "which", fake_which)
+
+    assert command_module._resolve_executable(["codex", "exec", "--json", "{}"]) == [
+        r"C:\Users\me\AppData\Roaming\npm\codex.cmd",
+        "exec",
+        "--json",
+        "{}",
+    ]
+
+
 def test_resolve_executable_returns_none_when_unresolvable(monkeypatch):
     import agos.core.command as command_module
 

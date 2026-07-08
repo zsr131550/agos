@@ -177,12 +177,47 @@ def test_codex_worker_adapter_starts_cli_with_workspace_and_prompt(monkeypatch, 
     assert run.backend == "codex"
     assert run.run_id == "codex-run-01"
     assert calls[0][:2] == ["codex", "exec"]
-    assert "--ignore-user-config" in calls[0]
-    assert "--ignore-rules" in calls[0]
+    assert "--ignore-user-config" not in calls[0]
+    assert "--ignore-rules" not in calls[0]
     assert "--dangerously-bypass-approvals-and-sandbox" in calls[0]
     assert "--json" in calls[0]
     assert "Implement README change" in calls[0][-1]
     assert "Do not ask clarifying questions" in calls[0][-1]
+
+
+def test_codex_worker_adapter_can_opt_into_hermetic_user_config(monkeypatch, tmp_path):
+    from agos.adapters.workers.codex_cli import CodexWorkerAdapter
+    import agos.adapters.workers.codex_cli as codex_module
+
+    calls: list[list[str]] = []
+
+    class FakeProc:
+        returncode = 0
+        stdout = '{"run_id": "codex-run-01"}'
+        stderr = ""
+
+    def fake_run(args, **kwargs):
+        del kwargs
+        calls.append(args)
+        return FakeProc()
+
+    monkeypatch.setattr(codex_module, "run_command", fake_run)
+
+    CodexWorkerAdapter(
+        command="codex",
+        ignore_user_config=True,
+        ignore_rules=True,
+    ).start(
+        WorkerStartRequest(
+            run_id="execution-run-01",
+            subtask_id="subtask-01",
+            prompt="Implement README change",
+            workspace_path=str(tmp_path),
+        )
+    )
+
+    assert "--ignore-user-config" in calls[0]
+    assert "--ignore-rules" in calls[0]
 
 
 def test_codex_worker_adapter_parses_pretty_exec_json(monkeypatch, tmp_path):
@@ -256,8 +291,8 @@ def test_codex_worker_adapter_parses_exec_jsonl_and_polls_cached_status(monkeypa
     assert status.state == "completed"
     assert status.detail == "done"
     assert calls[0][:2] == ["codex", "exec"]
-    assert "--ignore-user-config" in calls[0]
-    assert "--ignore-rules" in calls[0]
+    assert "--ignore-user-config" not in calls[0]
+    assert "--ignore-rules" not in calls[0]
     assert "--dangerously-bypass-approvals-and-sandbox" in calls[0]
     assert "--json" in calls[0]
     assert "Do the work" in calls[0][-1]

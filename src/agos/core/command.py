@@ -21,12 +21,13 @@ def run_command(
     kwargs.setdefault("timeout", DEFAULT_COMMAND_TIMEOUT_SECONDS)
     try:
         return _spawn(args, **kwargs)
-    except FileNotFoundError:
-        # npm-installed CLIs (codex, claude) ship as ``.CMD`` shims that
-        # CreateProcess cannot resolve from a bare name on Windows, raising
-        # FileNotFoundError before the process starts. Retry once with the
-        # PATH-resolved executable so callers don't need shell=True -- a shell
-        # would re-expose command injection on prompts that carry task content.
+    except (FileNotFoundError, PermissionError):
+        # npm-installed CLIs (codex, claude) ship several shims on Windows.
+        # CreateProcess cannot directly execute PowerShell scripts and can fail
+        # before the process starts (FileNotFoundError or PermissionError,
+        # depending on how PATH resolution landed). Retry once with a resolved
+        # executable shim so callers don't need shell=True -- a shell would
+        # re-expose command injection on prompts that carry task content.
         # Commands that spawn on the first attempt (git, *.exe, full paths) and
         # genuinely-missing commands are unaffected.
         resolved = _resolve_executable(args)
@@ -117,4 +118,33 @@ def _resolve_executable(args: str | Sequence[str]) -> list[str] | None:
     resolved = shutil.which(args[0])
     if not resolved or resolved == args[0]:
         return None
-    return [resolved, *args[1:]]
+    executable = _prefer_windows_executable_shim(resolved, args[0])
+    if executable is None:
+        executable = resolved
+    if executable == args[0]:
+        return None
+    return [executable, *args[1:]]
+
+
+def _prefer_windows_executable_shim(resolved: str, command: str) -> str | None:
+    """Prefer executable npm shims over PowerShell scripts for bare commands."""
+
+    resolved_path = Path(resolved)
+    suffix = resolved_path.suffix.lower()
+    if suffix in {".cmd", ".bat", ".exe"}:
+        return resolved
+    if suffix not in {".ps1", ".psm1"}:
+        return resolved
+
+    command_path = Path(command)
+    if command_path.parent != Path("."):
+        return resolved
+
+    for extension in (".cmd", ".exe", ".bat"):
+        candidate = shutil.which(f"{command}{extension}")
+        if candidate:
+            return candidate
+        sibling = resolved_path.with_suffix(extension)
+        if sibling.exists():
+            return str(sibling)
+    return resolved

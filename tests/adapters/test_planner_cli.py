@@ -32,8 +32,8 @@ def test_planner_prompt_uses_machine_json_template():
 
     prompt = _planner_prompt(task, ["local_worktree"])
 
-    assert "Machine output task" in prompt
-    assert "No tools" in prompt
+    assert "Return ONLY this JSON object" in prompt
+    assert "byte-for-byte except whitespace" in prompt
     assert '"subtasks"' in prompt
     assert '"adapter":"local_worktree"' in prompt
     assert '"write_scope":["README.md"]' in prompt

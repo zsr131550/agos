@@ -58,24 +58,9 @@ def _default_command(executor: str) -> str:
 
 
 def _planner_prompt(task: Task, available_workers: list[str]) -> str:
-    worker_lines = "\n".join(f"- {worker}" for worker in available_workers) or "- <none>"
-    acceptance = (
-        "\n".join(f"- {item}" for item in task.acceptance) if task.acceptance else "- <none>"
-    )
     example = _fallback_plan_payload(task, available_workers)
     return (
-        "Machine output task. No tools. No questions. No markdown. "
-        "Return only one JSON object matching the required shape.\n\n"
-        f"Task id: {task.id}\n"
-        f"Task title: {task.title}\n"
-        f"Task intent: {task.intent or '<none>'}\n"
-        f"Acceptance:\n{acceptance}\n\n"
-        f"Available workers:\n{worker_lines}\n\n"
-        "Required fields: id, task_id, max_parallel, requires_candidate_review, subtasks. "
-        "The subtasks array must contain at least one subtask. "
-        "Each subtask must include id, title, intent, depends_on, write_scope, worker.adapter. "
-        "Use the first available worker when no better worker is specified. "
-        "Use this exact JSON shape, adjusted only if needed:\n"
+        "Return ONLY this JSON object, byte-for-byte except whitespace: "
         f"{json.dumps(example, ensure_ascii=False, separators=(',', ':'))}"
     )
 
