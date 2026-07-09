@@ -2,6 +2,7 @@
 
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
+import http.client
 import json
 import threading
 import urllib.error
@@ -49,6 +50,35 @@ def post_json(url: str, payload: dict[str, object]) -> tuple[int, dict[str, obje
         return response.status, json.loads(body)
 
 
+def post_raw(
+    server: DashboardHTTPServer,
+    path: str,
+    body: bytes = b"",
+    *,
+    content_length: str | None = None,
+) -> tuple[int, dict[str, object] | str]:
+    connection = http.client.HTTPConnection("127.0.0.1", server.server_port, timeout=5)
+    try:
+        connection.putrequest("POST", path)
+        connection.putheader("Content-Type", "application/json")
+        connection.putheader(
+            "Content-Length",
+            content_length if content_length is not None else str(len(body)),
+        )
+        connection.endheaders()
+        if body:
+            connection.send(body)
+        response = connection.getresponse()
+        payload = response.read().decode("utf-8")
+        try:
+            parsed: dict[str, object] | str = json.loads(payload)
+        except json.JSONDecodeError:
+            parsed = payload
+        return response.status, parsed
+    finally:
+        connection.close()
+
+
 def read_json_request_error(request: urllib.request.Request) -> tuple[int, dict[str, object]]:
     try:
         urllib.request.urlopen(request, timeout=5)
@@ -93,6 +123,20 @@ def test_dashboard_server_serves_static_index(tmp_repo) -> None:
         assert "AGOS 控制台" in body
 
 
+def test_dashboard_server_get_unknown_non_api_returns_404(tmp_repo) -> None:
+    with running_dashboard_server(tmp_repo) as server:
+        try:
+            urllib.request.urlopen(f"http://127.0.0.1:{server.server_port}/missing", timeout=5)
+        except urllib.error.HTTPError as exc:
+            body = exc.read().decode("utf-8")
+            status = exc.code
+        else:  # pragma: no cover - assertion guard
+            raise AssertionError("expected HTTPError")
+
+    assert status == 404
+    assert "Error response" in body
+
+
 def test_dashboard_server_serves_health_json(tmp_repo) -> None:
     with running_dashboard_server(tmp_repo) as server:
         url = f"http://127.0.0.1:{server.server_port}/api/health"
@@ -116,6 +160,25 @@ def test_dashboard_server_serves_agents_json(tmp_repo) -> None:
     review_agent_ids = [agent["id"] for agent in payload["review_agents"]]
     assert "reviewer:tests" in review_agent_ids
     assert "local:reviewer:codex_cli" in review_agent_ids
+
+
+def test_dashboard_server_serves_evidence_json(tmp_repo) -> None:
+    write_dashboard_config(tmp_repo)
+    evidence = tmp_repo / ".agos" / "tasks" / "current" / "evidence" / "gates" / "tests.log"
+    evidence.parent.mkdir(parents=True, exist_ok=True)
+    evidence.write_bytes(b"ok\n")
+
+    with running_dashboard_server(tmp_repo) as server:
+        url = (
+            f"http://127.0.0.1:{server.server_port}"
+            "/api/runs/current/evidence?ref=evidence/gates/tests.log"
+        )
+        with urllib.request.urlopen(url, timeout=5) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+
+    assert payload["ok"] is True
+    assert payload["text"] == "ok\n"
+    assert payload["ref"] == "evidence/gates/tests.log"
 
 
 def test_dashboard_server_serves_empty_runs_when_no_active_task(tmp_repo) -> None:
@@ -144,6 +207,30 @@ def test_dashboard_server_unknown_api_returns_404_json(tmp_repo) -> None:
     assert payload == {"ok": False, "error": {"code": "not_found", "message": "/api/nope"}}
 
 
+def test_dashboard_server_post_unknown_api_returns_404_json(tmp_repo) -> None:
+    with running_dashboard_server(tmp_repo) as server:
+        status, payload = read_json_request_error(
+            urllib.request.Request(
+                f"http://127.0.0.1:{server.server_port}/api/not-a-route",
+                data=b"{}",
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+        )
+
+    assert status == 404
+    assert payload == {"ok": False, "error": {"code": "not_found", "message": "/api/not-a-route"}}
+
+
+def test_dashboard_server_post_unknown_non_api_returns_404(tmp_repo) -> None:
+    with running_dashboard_server(tmp_repo) as server:
+        status, payload = post_raw(server, "/not-api", b"{}")
+
+    assert status == 404
+    assert isinstance(payload, str)
+    assert "Error response" in payload
+
+
 def test_dashboard_server_api_business_error_returns_400_json(tmp_repo) -> None:
     with running_dashboard_server(tmp_repo) as server:
         url = f"http://127.0.0.1:{server.server_port}/api/config"
@@ -169,6 +256,23 @@ def test_dashboard_server_internal_error_is_redacted(tmp_repo, monkeypatch) -> N
     }
     assert "secret path" not in body
     assert "C:/Users" not in body
+
+
+def test_dashboard_server_get_evidence_internal_error_is_redacted(tmp_repo, monkeypatch) -> None:
+    def broken_evidence(repo_root, ref):
+        raise RuntimeError(f"secret evidence path {repo_root} {ref}")
+
+    monkeypatch.setattr(dashboard_server, "evidence_payload", broken_evidence)
+
+    with running_dashboard_server(tmp_repo) as server:
+        url = f"http://127.0.0.1:{server.server_port}/api/runs/current/evidence?ref=secret.txt"
+        status, payload = read_json_error(url)
+
+    assert status == 500
+    assert payload == {
+        "ok": False,
+        "error": {"code": "internal_error", "message": "Internal dashboard server error"},
+    }
 
 
 def test_dashboard_server_post_runs_starts_task(tmp_repo, monkeypatch) -> None:
@@ -410,6 +514,199 @@ def test_dashboard_server_post_runs_requires_title(tmp_repo) -> None:
     assert not (tmp_repo / ".agos" / "tasks" / "current" / "task.yaml").exists()
 
 
+def test_dashboard_server_post_rejects_invalid_content_length(tmp_repo) -> None:
+    with running_dashboard_server(tmp_repo) as server:
+        status, payload = post_raw(server, "/api/runs", content_length="not-an-int")
+
+    assert status == 400
+    assert isinstance(payload, dict)
+    assert payload["error"]["code"] == "invalid_request"
+    assert payload["error"]["message"] == "invalid Content-Length"
+
+
+def test_dashboard_server_post_rejects_empty_body(tmp_repo) -> None:
+    with running_dashboard_server(tmp_repo) as server:
+        status, payload = post_raw(server, "/api/runs")
+
+    assert status == 400
+    assert isinstance(payload, dict)
+    assert payload["error"]["code"] == "invalid_request"
+    assert payload["error"]["message"] == "JSON body is required"
+
+
+def test_dashboard_server_post_rejects_oversized_body_without_reading(tmp_repo) -> None:
+    with running_dashboard_server(tmp_repo) as server:
+        status, payload = post_raw(server, "/api/runs", content_length=str(64 * 1024 + 1))
+
+    assert status == 400
+    assert isinstance(payload, dict)
+    assert payload["error"]["code"] == "invalid_request"
+    assert payload["error"]["message"] == "JSON body is too large"
+
+
+def test_dashboard_server_post_rejects_invalid_json_body(tmp_repo) -> None:
+    with running_dashboard_server(tmp_repo) as server:
+        status, payload = post_raw(server, "/api/runs", b"{")
+
+    assert status == 400
+    assert isinstance(payload, dict)
+    assert payload["error"]["code"] == "invalid_request"
+    assert payload["error"]["message"] == "invalid JSON body"
+
+
+def test_dashboard_server_post_rejects_non_object_json_body(tmp_repo) -> None:
+    with running_dashboard_server(tmp_repo) as server:
+        status, payload = post_raw(server, "/api/runs", b"[]")
+
+    assert status == 400
+    assert isinstance(payload, dict)
+    assert payload["error"]["code"] == "invalid_request"
+    assert payload["error"]["message"] == "JSON body must be an object"
+
+
+def test_dashboard_server_post_runs_internal_error_is_redacted(tmp_repo, monkeypatch) -> None:
+    def broken_start(repo_root, payload):
+        raise RuntimeError("secret start failure")
+
+    monkeypatch.setattr(dashboard_server, "start_run_payload", broken_start)
+
+    with running_dashboard_server(tmp_repo) as server:
+        status, payload = read_json_request_error(
+            urllib.request.Request(
+                f"http://127.0.0.1:{server.server_port}/api/runs",
+                data=json.dumps({"title": "Start"}).encode("utf-8"),
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+        )
+
+    assert status == 500
+    assert payload == {
+        "ok": False,
+        "error": {"code": "internal_error", "message": "Internal dashboard server error"},
+    }
+
+
+def test_dashboard_server_archive_business_error_returns_400(tmp_repo, monkeypatch) -> None:
+    def unavailable_archive(repo_root):
+        raise dashboard_server.DashboardApiError("not_initialized", "archive unavailable")
+
+    monkeypatch.setattr(dashboard_server, "archive_current_task_payload", unavailable_archive)
+
+    with running_dashboard_server(tmp_repo) as server:
+        status, payload = read_json_request_error(
+            urllib.request.Request(
+                f"http://127.0.0.1:{server.server_port}/api/runs/current/archive",
+                data=b"{}",
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+        )
+
+    assert status == 400
+    assert payload["error"]["code"] == "not_initialized"
+
+
+def test_dashboard_server_archive_internal_error_is_redacted(tmp_repo, monkeypatch) -> None:
+    def broken_archive(repo_root):
+        raise RuntimeError("secret archive failure")
+
+    monkeypatch.setattr(dashboard_server, "archive_current_task_payload", broken_archive)
+
+    with running_dashboard_server(tmp_repo) as server:
+        status, payload = read_json_request_error(
+            urllib.request.Request(
+                f"http://127.0.0.1:{server.server_port}/api/runs/current/archive",
+                data=b"{}",
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+        )
+
+    assert status == 500
+    assert payload["error"]["message"] == "Internal dashboard server error"
+
+
+def test_dashboard_server_continue_internal_error_is_redacted(tmp_repo, monkeypatch) -> None:
+    def broken_continue(repo_root, archive_id):
+        raise RuntimeError(f"secret continue failure {archive_id}")
+
+    monkeypatch.setattr(dashboard_server, "continue_archived_task_payload", broken_continue)
+
+    with running_dashboard_server(tmp_repo) as server:
+        status, payload = read_json_request_error(
+            urllib.request.Request(
+                f"http://127.0.0.1:{server.server_port}/api/runs/archive/arch-1/continue",
+                data=b"{}",
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+        )
+
+    assert status == 500
+    assert payload["error"]["message"] == "Internal dashboard server error"
+
+
+def test_dashboard_server_continue_business_error_returns_400(tmp_repo, monkeypatch) -> None:
+    def unavailable_continue(repo_root, archive_id):
+        raise dashboard_server.DashboardApiError("not_found", f"missing {archive_id}")
+
+    monkeypatch.setattr(dashboard_server, "continue_archived_task_payload", unavailable_continue)
+
+    with running_dashboard_server(tmp_repo) as server:
+        status, payload = read_json_request_error(
+            urllib.request.Request(
+                f"http://127.0.0.1:{server.server_port}/api/runs/archive/arch-1/continue",
+                data=b"{}",
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+        )
+
+    assert status == 400
+    assert payload["error"]["code"] == "not_found"
+
+
+def test_dashboard_server_simple_post_internal_error_is_redacted(tmp_repo, monkeypatch) -> None:
+    def broken_pause(repo_root):
+        raise RuntimeError("secret pause failure")
+
+    monkeypatch.setattr(dashboard_server, "pause_current_task_payload", broken_pause)
+
+    with running_dashboard_server(tmp_repo) as server:
+        status, payload = read_json_request_error(
+            urllib.request.Request(
+                f"http://127.0.0.1:{server.server_port}/api/runs/current/pause",
+                data=b"{}",
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+        )
+
+    assert status == 500
+    assert payload["error"]["message"] == "Internal dashboard server error"
+
+
+def test_dashboard_server_simple_post_business_error_returns_400(tmp_repo, monkeypatch) -> None:
+    def unavailable_pause(repo_root):
+        raise dashboard_server.DashboardApiError("not_initialized", "pause unavailable")
+
+    monkeypatch.setattr(dashboard_server, "pause_current_task_payload", unavailable_pause)
+
+    with running_dashboard_server(tmp_repo) as server:
+        status, payload = read_json_request_error(
+            urllib.request.Request(
+                f"http://127.0.0.1:{server.server_port}/api/runs/current/pause",
+                data=b"{}",
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+        )
+
+    assert status == 400
+    assert payload["error"]["code"] == "not_initialized"
+
+
 def test_dashboard_server_post_review_run_uses_selected_reviewer(tmp_repo) -> None:
     write_dashboard_config(tmp_repo)
     # Build a minimal active task for the review packet.
@@ -448,6 +745,46 @@ def test_dashboard_server_post_review_run_uses_selected_reviewer(tmp_repo) -> No
     assert status == 201
     assert payload["ok"] is True
     assert payload["review_run"]["reviewers"] == ["tests"]
+
+
+def test_dashboard_server_review_run_internal_error_is_redacted(tmp_repo, monkeypatch) -> None:
+    def broken_review(repo_root, payload):
+        raise RuntimeError("secret review failure")
+
+    monkeypatch.setattr(dashboard_server, "review_run_payload", broken_review)
+
+    with running_dashboard_server(tmp_repo) as server:
+        status, payload = read_json_request_error(
+            urllib.request.Request(
+                f"http://127.0.0.1:{server.server_port}/api/reviews/run",
+                data=b"{}",
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+        )
+
+    assert status == 500
+    assert payload["error"]["message"] == "Internal dashboard server error"
+
+
+def test_dashboard_server_review_run_business_error_returns_400(tmp_repo, monkeypatch) -> None:
+    def unavailable_review(repo_root, payload):
+        raise dashboard_server.DashboardApiError("invalid_request", "review unavailable")
+
+    monkeypatch.setattr(dashboard_server, "review_run_payload", unavailable_review)
+
+    with running_dashboard_server(tmp_repo) as server:
+        status, payload = read_json_request_error(
+            urllib.request.Request(
+                f"http://127.0.0.1:{server.server_port}/api/reviews/run",
+                data=b"{}",
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+        )
+
+    assert status == 400
+    assert payload["error"]["code"] == "invalid_request"
 
 
 def test_dashboard_server_post_select_agent_option_dispatches_executor(
@@ -512,3 +849,125 @@ def test_dashboard_server_post_select_agent_option_dispatches_executor(
     assert payload["ok"] is True
     assert payload["run_id"] == "run-option-followup"
     assert payload["selected_option"]["id"] == "option-1"
+
+
+def test_dashboard_server_select_agent_option_internal_error_is_redacted(
+    tmp_repo,
+    monkeypatch,
+) -> None:
+    def broken_select(repo_root, payload):
+        raise RuntimeError("secret option failure")
+
+    monkeypatch.setattr(dashboard_server, "select_agent_option_payload", broken_select)
+
+    with running_dashboard_server(tmp_repo) as server:
+        status, payload = read_json_request_error(
+            urllib.request.Request(
+                f"http://127.0.0.1:{server.server_port}/api/runs/current/agent-options/select",
+                data=b"{}",
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+        )
+
+    assert status == 500
+    assert payload["error"]["message"] == "Internal dashboard server error"
+
+
+def test_dashboard_server_select_agent_option_business_error_returns_400(
+    tmp_repo,
+    monkeypatch,
+) -> None:
+    def unavailable_select(repo_root, payload):
+        raise dashboard_server.DashboardApiError("invalid_request", "option unavailable")
+
+    monkeypatch.setattr(dashboard_server, "select_agent_option_payload", unavailable_select)
+
+    with running_dashboard_server(tmp_repo) as server:
+        status, payload = read_json_request_error(
+            urllib.request.Request(
+                f"http://127.0.0.1:{server.server_port}/api/runs/current/agent-options/select",
+                data=b"{}",
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+        )
+
+    assert status == 400
+    assert payload["error"]["code"] == "invalid_request"
+
+
+def test_serve_dashboard_forever_opens_browser_and_closes_server(
+    tmp_repo,
+    monkeypatch,
+    capsys,
+) -> None:
+    calls = {}
+
+    class FakeServer:
+        server_port = 43210
+
+        def serve_forever(self):
+            calls["served"] = True
+            raise KeyboardInterrupt
+
+        def server_close(self):
+            calls["closed"] = True
+
+    def fake_create(repo_root, *, host: str, port: int):
+        calls["repo_root"] = repo_root
+        calls["host"] = host
+        calls["port"] = port
+        return FakeServer()
+
+    monkeypatch.setattr(dashboard_server, "create_dashboard_server", fake_create)
+    monkeypatch.setattr(dashboard_server.webbrowser, "open", lambda url: calls.setdefault("url", url))
+
+    try:
+        dashboard_server.serve_dashboard_forever(
+            tmp_repo,
+            host="0.0.0.0",
+            port=8788,
+            open_browser=True,
+        )
+    except KeyboardInterrupt:
+        pass
+
+    assert calls == {
+        "repo_root": tmp_repo,
+        "host": "0.0.0.0",
+        "port": 8788,
+        "url": "http://127.0.0.1:43210",
+        "served": True,
+        "closed": True,
+    }
+    assert "AGOS dashboard: http://127.0.0.1:43210" in capsys.readouterr().out
+
+
+def test_serve_dashboard_forever_returns_url_when_server_stops(
+    tmp_repo,
+    monkeypatch,
+) -> None:
+    class FakeServer:
+        server_port = 43211
+
+        def serve_forever(self):
+            return None
+
+        def server_close(self):
+            return None
+
+    monkeypatch.setattr(
+        dashboard_server,
+        "create_dashboard_server",
+        lambda repo_root, *, host, port: FakeServer(),
+    )
+
+    url = dashboard_server.serve_dashboard_forever(
+        tmp_repo,
+        host="localhost",
+        port=8788,
+        open_browser=False,
+    )
+
+    assert url == "http://localhost:43211"

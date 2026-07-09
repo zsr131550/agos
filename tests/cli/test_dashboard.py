@@ -34,3 +34,28 @@ def test_dashboard_command_invokes_server(monkeypatch, tmp_repo) -> None:
     assert called["host"] == "127.0.0.1"
     assert called["port"] == 0
     assert called["open_browser"] is False
+
+
+def test_dashboard_command_exits_zero_on_keyboard_interrupt(monkeypatch, tmp_repo) -> None:
+    def interrupt(*args, **kwargs):
+        raise KeyboardInterrupt
+
+    monkeypatch.chdir(tmp_repo)
+    monkeypatch.setattr("agos.cli.cmd_dashboard.serve_dashboard_forever", interrupt)
+
+    result = runner.invoke(app, ["dashboard"])
+
+    assert result.exit_code == 0
+
+
+def test_dashboard_command_reports_server_error(monkeypatch, tmp_repo) -> None:
+    def fail(*args, **kwargs):
+        raise RuntimeError("bind failed")
+
+    monkeypatch.chdir(tmp_repo)
+    monkeypatch.setattr("agos.cli.cmd_dashboard.serve_dashboard_forever", fail)
+
+    result = runner.invoke(app, ["dashboard"])
+
+    assert result.exit_code == 1
+    assert "bind failed" in result.stderr
