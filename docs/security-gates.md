@@ -62,7 +62,7 @@ Recommended strict CI shape:
 python -m pytest --cov=agos --cov-report=term-missing -q
 python -m ruff check src tests
 agos prepare-merge-gate --base "$BASE_SHA" --head "$HEAD_SHA" --anchor-path ".agos/tasks/current/evidence/anchors.json" --issuer "github-actions"
-agos merge-gate --require-anchor --anchor-backend file --anchor-path ".agos/tasks/current/evidence/anchors.json" --allow-missing-review --base "$BASE_SHA" --head "$HEAD_SHA"
+agos merge-gate --require-anchor --anchor-backend file --anchor-path ".agos/tasks/current/evidence/anchors.json" --base "$BASE_SHA" --head "$HEAD_SHA"
 ```
 
 For GitHub pull requests, set `BASE_SHA` to the pull request base SHA and
@@ -106,7 +106,12 @@ pull requests:
   submitted PR diff into candidate evidence, runs candidate gates, and writes a
   file trust anchor to `.agos/tasks/current/evidence/anchors.json`.
 - `merge-gate` downloads that prepared `.agos/tasks/current` artifact and runs
-  `agos merge-gate --require-anchor --anchor-backend file --allow-missing-review --base --head --json`.
+  `agos merge-gate --require-anchor --anchor-backend file --base --head --json`.
+
+The production CI path must not use `--allow-missing-review`. Review evidence
+is part of the candidate binding that `agos prepare-merge-gate` materializes,
+and the merge gate blocks missing, stale, dev-only, or open-blocking review
+evidence.
 
 On a repository without `.agos/agos.yaml` the real binding is skipped and the
 smoke test still proves the command; see `docs/release-install.md` for the full

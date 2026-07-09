@@ -25,6 +25,18 @@ def test_config_show_json_prints_validated_config(monkeypatch, tmp_repo):
     assert payload["config"]["default_workflow"] == "feature"
 
 
+def test_config_show_prints_yaml(monkeypatch, tmp_repo):
+    _write_config(tmp_repo)
+    monkeypatch.chdir(tmp_repo)
+
+    result = runner.invoke(app, ["config", "show"])
+
+    assert result.exit_code == 0, result.stderr
+    payload = yaml.safe_load(result.stdout)
+    assert payload["executor"] == {"name": "multica", "agent": "Lambda"}
+    assert payload["default_workflow"] == "feature"
+
+
 def test_config_validate_reports_success(monkeypatch, tmp_repo):
     _write_config(tmp_repo)
     monkeypatch.chdir(tmp_repo)
@@ -126,6 +138,20 @@ def test_config_validate_reports_invalid_config(monkeypatch, tmp_repo):
     assert result.exit_code == 2
     assert "invalid AGOS configuration" in result.stderr
     assert "bad_gate" in result.stderr
+
+
+def test_config_validate_json_reports_invalid_config(monkeypatch, tmp_repo):
+    agos_dir = tmp_repo / ".agos"
+    agos_dir.mkdir()
+    (agos_dir / "agos.yaml").write_text("executor: {}\nworkflows: {}\n", encoding="utf-8")
+    monkeypatch.chdir(tmp_repo)
+
+    result = runner.invoke(app, ["config", "validate", "--json"])
+
+    assert result.exit_code == 2
+    payload = json.loads(result.stdout)
+    assert payload["ok"] is False
+    assert "invalid AGOS configuration" in payload["error"]
 
 
 def _write_config(tmp_repo) -> None:

@@ -35,6 +35,50 @@ def test_read_evidence_text_preserves_original_newlines(tmp_repo) -> None:
     assert payload["text"] == "a\r\nb\r"
 
 
+def test_read_evidence_text_truncates_after_max_bytes(tmp_repo) -> None:
+    paths = repo_paths(tmp_repo)
+    target = paths.evidence / "gates" / "long.log"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_bytes(b"abcdef")
+
+    payload = read_evidence_text(paths, "evidence/gates/long.log", max_bytes=3)
+
+    assert payload["text"] == "abc"
+    assert payload["truncated"] is True
+    assert payload["size_bytes"] == 6
+
+
+def test_read_evidence_text_replaces_invalid_utf8(tmp_repo) -> None:
+    paths = repo_paths(tmp_repo)
+    target = paths.evidence / "gates" / "bytes.log"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_bytes(b"ok\xff")
+
+    payload = read_evidence_text(paths, "evidence/gates/bytes.log")
+
+    assert payload["text"] == "ok�"
+
+
+def test_read_evidence_text_rejects_unsupported_suffix(tmp_repo) -> None:
+    paths = repo_paths(tmp_repo)
+    target = paths.evidence / "gates" / "image.bin"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_bytes(b"not text")
+
+    with pytest.raises(EvidenceResolutionError, match="unsupported evidence text suffix"):
+        read_evidence_text(paths, "evidence/gates/image.bin")
+
+
+def test_read_evidence_text_rejects_negative_max_bytes(tmp_repo) -> None:
+    paths = repo_paths(tmp_repo)
+    target = paths.evidence / "gates" / "tests_pass.log"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("gate ok\n", encoding="utf-8")
+
+    with pytest.raises(EvidenceResolutionError, match="max_bytes must be non-negative"):
+        read_evidence_text(paths, "evidence/gates/tests_pass.log", max_bytes=-1)
+
+
 def test_resolves_bare_evidence_ref_inside_evidence_dir(tmp_repo) -> None:
     paths = repo_paths(tmp_repo)
     target = paths.evidence / "gates" / "tests_pass.log"
@@ -85,6 +129,13 @@ def test_rejects_unknown_task_relative_root(tmp_repo) -> None:
 
     with pytest.raises(EvidenceResolutionError):
         resolve_evidence_ref(paths, "private.txt")
+
+
+def test_rejects_missing_evidence_file(tmp_repo) -> None:
+    paths = repo_paths(tmp_repo)
+
+    with pytest.raises(EvidenceResolutionError, match="evidence reference does not exist"):
+        resolve_evidence_ref(paths, "evidence/gates/missing.log")
 
 
 def test_rejects_symlink_escape_from_evidence_dir(tmp_repo) -> None:

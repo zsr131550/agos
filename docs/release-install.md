@@ -76,7 +76,7 @@ Strict production enforcement should run:
 
 ```bash
 agos prepare-merge-gate --base "$BASE_SHA" --head "$HEAD_SHA" --anchor-path ".agos/tasks/current/evidence/anchors.json" --issuer "github-actions"
-agos merge-gate --require-anchor --anchor-backend file --anchor-path ".agos/tasks/current/evidence/anchors.json" --allow-missing-review --base "$BASE_SHA" --head "$HEAD_SHA" --json
+agos merge-gate --require-anchor --anchor-backend file --anchor-path ".agos/tasks/current/evidence/anchors.json" --base "$BASE_SHA" --head "$HEAD_SHA" --json
 ```
 
 In GitHub Actions, the recommended production path is to let a prepare job
@@ -97,7 +97,12 @@ The CI workflow now uses two pull-request jobs:
    candidate evidence, runs candidate gates, and writes
    `.agos/tasks/current/evidence/anchors.json`.
 2. `merge-gate` downloads the prepared `.agos/tasks/current` artifact and runs
-   the real PR-bound `agos merge-gate --require-anchor --anchor-backend file --allow-missing-review --base "$BASE_SHA" --head "$HEAD_SHA"`.
+   the real PR-bound `agos merge-gate --require-anchor --anchor-backend file --base "$BASE_SHA" --head "$HEAD_SHA"`.
+
+The PR-bound merge gate intentionally does **not** use
+`--allow-missing-review`. Prepared candidate evidence must include completed
+candidate-bound review evidence; missing, stale, dev-only, or blocking review
+evidence fails the gate.
 
 Repositories without `.agos/agos.yaml` skip the real binding; the smoke test
 still runs and proves the command behaves correctly. This is the fail-closed
