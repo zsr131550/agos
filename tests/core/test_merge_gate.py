@@ -78,19 +78,24 @@ def _write_candidate(
     clean_review: bool = False,
     patch_bytes: bytes = b"diff --git a/README.md b/README.md\n",
     with_decision: bool = True,
+    write_created_record: bool = True,
+    created_patch_ref: str | None = None,
 ) -> CandidatePatch:
     store = ExecutionStore(paths)
     patch_ref, patch_sha = store.write_candidate_patch(candidate_id, patch_bytes)
-    Ledger(paths.ledger).append(
-        {
-            "type": "candidate_patch_created",
-            "task_id": "agos-task-01",
-            "subtask_id": "subtask-01" if candidate_id == "candidate-01" else f"subtask-{candidate_id}",
-            "candidate_id": candidate_id,
-            "patch_ref": patch_ref,
-            "patch_sha256": patch_sha,
-        }
-    )
+    if write_created_record:
+        Ledger(paths.ledger).append(
+            {
+                "type": "candidate_patch_created",
+                "task_id": "agos-task-01",
+                "subtask_id": (
+                    "subtask-01" if candidate_id == "candidate-01" else f"subtask-{candidate_id}"
+                ),
+                "candidate_id": candidate_id,
+                "patch_ref": created_patch_ref or patch_ref,
+                "patch_sha256": patch_sha,
+            }
+        )
     test_refs = (
         ["execution/tests/patch.json", "execution/tests/tests-pass.json"]
         if candidate_id == "candidate-01"
@@ -209,6 +214,22 @@ def _rewrite_candidate_decision(paths, candidate: CandidatePatch, **updates: obj
     payload = json.loads(decision_path.read_text(encoding="utf-8"))
     payload.update(updates)
     decision_path.write_text(json.dumps(payload), encoding="utf-8")
+
+
+def _rewrite_candidate_review(paths, candidate: CandidatePatch, **updates: object) -> CandidatePatch:
+    binding = candidate.review_refs[-1].model_copy(update=updates)
+    candidate = candidate.model_copy(update={"review_refs": [*candidate.review_refs[:-1], binding]})
+    ExecutionStore(paths).write_candidate(candidate)
+    return candidate
+
+
+def _rewrite_review_report(paths, candidate: CandidatePatch, **updates: object) -> None:
+    report_ref = candidate.review_refs[-1].report_ref
+    assert report_ref is not None
+    report_path = paths.current_task / report_ref
+    payload = json.loads(report_path.read_text(encoding="utf-8"))
+    payload.update(updates)
+    report_path.write_text(json.dumps(payload), encoding="utf-8")
 
 
 def _git(repo: Path, *args: str) -> str:
@@ -455,6 +476,48 @@ def test_merge_gate_blocks_missing_decision_file(tmp_repo: Path):
     )
 
 
+def test_merge_gate_blocks_invalid_decision_ref_even_in_legacy_mode(tmp_repo: Path):
+    _task, paths = _write_active_task(tmp_repo)
+    candidate = _write_candidate(paths, status="accepted", clean_review=True)
+    ExecutionStore(paths).write_candidate(
+        candidate.model_copy(update={"decision_ref": "../outside-decision.json"})
+    )
+
+    result = verify_merge_gate(paths, allow_legacy_decisionless=True)
+
+    assert _check(result, "candidate_decisions").state == "block"
+    assert "invalid decision_ref" in "; ".join(
+        _check(result, "candidate_decisions").details
+    )
+
+
+def test_merge_gate_blocks_unreadable_decision_even_in_legacy_mode(tmp_repo: Path):
+    _task, paths = _write_active_task(tmp_repo)
+    candidate = _write_candidate(paths, status="accepted", clean_review=True)
+    assert candidate.decision_ref is not None
+    (paths.current_task / candidate.decision_ref).write_text("{", encoding="utf-8")
+
+    result = verify_merge_gate(paths, allow_legacy_decisionless=True)
+
+    assert _check(result, "candidate_decisions").state == "block"
+    assert "decision evidence is unreadable" in "; ".join(
+        _check(result, "candidate_decisions").details
+    )
+
+
+def test_merge_gate_blocks_decision_ref_that_does_not_match_decision_id(tmp_repo: Path):
+    _task, paths = _write_active_task(tmp_repo)
+    candidate = _write_candidate(paths, status="accepted", clean_review=True)
+    _rewrite_candidate_decision(paths, candidate, id="decision-renamed")
+
+    result = verify_merge_gate(paths)
+
+    assert _check(result, "candidate_decisions").state == "block"
+    assert "decision_ref does not match decision id" in "; ".join(
+        _check(result, "candidate_decisions").details
+    )
+
+
 def test_merge_gate_blocks_applied_event_with_stale_decision_ref(tmp_repo: Path):
     _task, paths = _write_active_task(tmp_repo)
     candidate = _write_candidate(paths, status="applied", clean_review=True)
@@ -474,6 +537,151 @@ def test_merge_gate_blocks_applied_event_with_stale_decision_ref(tmp_repo: Path)
     assert "candidate_applied decision_ref does not match" in "; ".join(
         _check(result, "candidate_decisions").details
     )
+
+
+def test_merge_gate_blocks_multiple_applied_decision_records(tmp_repo: Path):
+    _task, paths = _write_active_task(tmp_repo)
+    candidate = _write_candidate(paths, status="applied", clean_review=True)
+    _append_candidate_applied(paths, candidate)
+    _append_candidate_applied(paths, candidate)
+
+    result = verify_merge_gate(paths)
+
+    assert _check(result, "candidate_decisions").state == "block"
+    assert "multiple candidate_applied decision records" in "; ".join(
+        _check(result, "candidate_decisions").details
+    )
+
+
+def test_merge_gate_blocks_duplicate_candidate_patch_created_records(tmp_repo: Path):
+    _task, paths = _write_active_task(tmp_repo)
+    candidate = _write_candidate(paths, status="proposed")
+    Ledger(paths.ledger).append(
+        {
+            "type": "candidate_patch_created",
+            "task_id": candidate.task_id,
+            "subtask_id": candidate.subtask_id,
+            "candidate_id": candidate.id,
+            "patch_ref": candidate.patch_ref,
+            "patch_sha256": candidate.patch_sha256,
+        }
+    )
+
+    result = verify_merge_gate(paths)
+
+    assert _check(result, "candidate_patch_hashes").state == "block"
+    assert "multiple candidate_patch_created" in "; ".join(
+        _check(result, "candidate_patch_hashes").details
+    )
+
+
+def test_merge_gate_blocks_missing_candidate_patch_created_record(tmp_repo: Path):
+    _task, paths = _write_active_task(tmp_repo)
+    _write_candidate(paths, status="proposed", write_created_record=False)
+
+    result = verify_merge_gate(paths)
+
+    assert "candidate patch creation ledger record is missing" in "; ".join(
+        _check(result, "candidate_patch_hashes").details
+    )
+
+
+def test_merge_gate_blocks_candidate_patch_ref_that_disagrees_with_ledger(tmp_repo: Path):
+    _task, paths = _write_active_task(tmp_repo)
+    _write_candidate(
+        paths,
+        status="proposed",
+        created_patch_ref="execution/candidates/other.patch",
+    )
+
+    result = verify_merge_gate(paths)
+
+    assert "candidate patch ref does not match" in "; ".join(
+        _check(result, "candidate_patch_hashes").details
+    )
+
+
+def test_clean_review_without_persisted_paths_accepts_current_binding(tmp_repo: Path):
+    _task, paths = _write_active_task(tmp_repo)
+    candidate = _write_candidate(paths, status="reviewed", clean_review=True)
+
+    assert _clean_review_issue(candidate) is None
+
+
+def test_merge_gate_blocks_review_without_completion_ledger_hash(tmp_repo: Path):
+    _task, paths = _write_active_task(tmp_repo)
+    candidate = _write_candidate(paths, status="accepted", clean_review=True)
+    _rewrite_candidate_review(paths, candidate, ledger_head_at_completion=None)
+
+    result = verify_merge_gate(paths)
+
+    assert "missing completion ledger hash" in "; ".join(
+        _check(result, "candidate_evidence").details
+    )
+
+
+def test_merge_gate_blocks_invalid_review_report_ref(tmp_repo: Path):
+    _task, paths = _write_active_task(tmp_repo)
+    candidate = _write_candidate(paths, status="accepted", clean_review=True)
+    report_ref = "../outside-report.json"
+    completed = Ledger(paths.ledger).append(
+        {
+            "type": "candidate_review_completed",
+            "task_id": candidate.task_id,
+            "candidate_id": candidate.id,
+            "review_id": candidate.review_refs[-1].review_id,
+            "report_ref": report_ref,
+            "open_blocking_count": 0,
+        }
+    )
+    _rewrite_candidate_review(
+        paths,
+        candidate,
+        report_ref=report_ref,
+        ledger_head_at_completion=completed["hash"],
+    )
+
+    result = verify_merge_gate(paths)
+
+    assert "review report ref is invalid" in "; ".join(
+        _check(result, "candidate_evidence").details
+    )
+
+
+def test_merge_gate_blocks_unreadable_review_report(tmp_repo: Path):
+    _task, paths = _write_active_task(tmp_repo)
+    candidate = _write_candidate(paths, status="accepted", clean_review=True)
+    report_ref = candidate.review_refs[-1].report_ref
+    assert report_ref is not None
+    (paths.current_task / report_ref).write_text("{", encoding="utf-8")
+
+    result = verify_merge_gate(paths)
+
+    assert "review report is unreadable" in "; ".join(
+        _check(result, "candidate_evidence").details
+    )
+
+
+@pytest.mark.parametrize(
+    ("updates", "expected"),
+    [
+        ({"review_id": "review-other"}, "review_id mismatch"),
+        ({"task_id": "task-other"}, "task_id mismatch"),
+        ({"packet_ref": "reviews/other/packet.json"}, "packet_ref mismatch"),
+    ],
+)
+def test_merge_gate_blocks_review_report_binding_mismatch(
+    tmp_repo: Path,
+    updates: dict[str, str],
+    expected: str,
+):
+    _task, paths = _write_active_task(tmp_repo)
+    candidate = _write_candidate(paths, status="accepted", clean_review=True)
+    _rewrite_review_report(paths, candidate, **updates)
+
+    result = verify_merge_gate(paths)
+
+    assert expected in "; ".join(_check(result, "candidate_evidence").details)
 
 
 def test_merge_gate_blocks_missing_candidate_patch_file(tmp_repo: Path):
