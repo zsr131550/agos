@@ -56,56 +56,6 @@ jobs:
       - name: enforce autonomous CI policy
         run: python -m pytest tests/ci/test_autonomous_loop_ci_policy.py -q
 
-  real-agent-smoke:
-    name: real-agent-smoke
-    runs-on: ubuntu-latest
-    needs: [autonomous-readiness]
-    env:
-      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-      MULTICA_API_KEY: ${{ secrets.MULTICA_API_KEY }}
-      MULTICA_BASE_URL: ${{ vars.MULTICA_BASE_URL }}
-      AGOS_PLANNER_SMOKE: "1"
-      AGOS_PLANNER_EXECUTOR: codex_cli
-      AGOS_PLANNER_BIN: codex
-      AGOS_REVIEWER_SMOKE: "1"
-      AGOS_REVIEWER_EXECUTOR: codex_cli
-      AGOS_REVIEWER_BIN: codex
-      AGOS_CODEX_WORKER_SMOKE: "1"
-      AGOS_CODEX_BIN: codex
-      AGOS_CLAUDE_WORKER_SMOKE: "1"
-      AGOS_CLAUDE_BIN: claude
-      AGOS_MULTICA_WORKER_SMOKE: "1"
-      AGOS_MULTICA_BIN: ${{ vars.AGOS_MULTICA_BIN }}
-      AGOS_MULTICA_AGENT: ${{ vars.AGOS_MULTICA_AGENT }}
-      AGOS_OPENHANDS_WORKER_SMOKE: "1"
-      AGOS_OPENHANDS_ENDPOINT: ${{ secrets.AGOS_OPENHANDS_ENDPOINT }}
-      AGOS_OPENHANDS_TOKEN: ${{ secrets.AGOS_OPENHANDS_TOKEN }}
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-      - uses: actions/setup-node@v4
-        with:
-          node-version: "22"
-      - run: python -m pip install --upgrade pip
-      - run: python -m pip install -e ".[dev]"
-      - name: install local agent CLIs
-        run: npm install -g @openai/codex @anthropic-ai/claude-code
-      - name: run real planner/reviewer/worker smokes
-        shell: bash
-        run: |
-          export AGOS_MULTICA_BIN="${AGOS_MULTICA_BIN:-multica}"
-          export AGOS_MULTICA_AGENT="${AGOS_MULTICA_AGENT:-Lambda}"
-          python -m pytest \
-            tests/integration/test_planner_cli_opt_in.py \
-            tests/integration/test_reviewer_cli_opt_in.py \
-            tests/integration/test_worker_adapters_opt_in.py \
-            -q
-
   agos-prepare:
     name: agos-prepare
     if: github.event_name == 'pull_request'

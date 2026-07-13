@@ -465,6 +465,10 @@ def test_review_run_payload_uses_selected_review_agent(dashboard_repo: Path) -> 
 
 def test_review_run_payload_accepts_local_review_agent(dashboard_repo: Path, monkeypatch) -> None:
     captured = {}
+    monkeypatch.setattr(
+        "agos.web.api.shutil.which",
+        lambda command: "/test/bin/codex" if command == "codex" else None,
+    )
 
     def fake_run(self, *, run_id, packet, reviewers, max_parallel=4):
         captured["adapter_names"] = sorted(self._reviewers)

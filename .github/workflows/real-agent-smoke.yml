@@ -1,0 +1,58 @@
+name: real-agent-smoke
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 3 * * 1"
+
+jobs:
+  real-agent-smoke:
+    name: configured provider smokes
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    env:
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      MULTICA_API_KEY: ${{ secrets.MULTICA_API_KEY }}
+      MULTICA_BASE_URL: ${{ vars.MULTICA_BASE_URL }}
+      AGOS_PLANNER_SMOKE: ${{ secrets.OPENAI_API_KEY != '' && '1' || '0' }}
+      AGOS_PLANNER_EXECUTOR: codex_cli
+      AGOS_PLANNER_BIN: codex
+      AGOS_REVIEWER_SMOKE: ${{ secrets.OPENAI_API_KEY != '' && '1' || '0' }}
+      AGOS_REVIEWER_EXECUTOR: codex_cli
+      AGOS_REVIEWER_BIN: codex
+      AGOS_CODEX_WORKER_SMOKE: ${{ secrets.OPENAI_API_KEY != '' && '1' || '0' }}
+      AGOS_CODEX_BIN: codex
+      AGOS_CLAUDE_WORKER_SMOKE: ${{ secrets.ANTHROPIC_API_KEY != '' && '1' || '0' }}
+      AGOS_CLAUDE_BIN: claude
+      AGOS_MULTICA_WORKER_SMOKE: ${{ vars.AGOS_MULTICA_BIN != '' && '1' || '0' }}
+      AGOS_MULTICA_BIN: ${{ vars.AGOS_MULTICA_BIN }}
+      AGOS_MULTICA_AGENT: ${{ vars.AGOS_MULTICA_AGENT }}
+      AGOS_OPENHANDS_WORKER_SMOKE: ${{ secrets.AGOS_OPENHANDS_ENDPOINT != '' && '1' || '0' }}
+      AGOS_OPENHANDS_ENDPOINT: ${{ secrets.AGOS_OPENHANDS_ENDPOINT }}
+      AGOS_OPENHANDS_TOKEN: ${{ secrets.AGOS_OPENHANDS_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - run: python -m pip install --upgrade pip
+      - run: python -m pip install -e ".[dev]"
+      - name: install local agent CLIs
+        run: npm install -g @openai/codex @anthropic-ai/claude-code
+      - name: run configured planner, reviewer, and worker smokes
+        shell: bash
+        run: |
+          export AGOS_MULTICA_BIN="${AGOS_MULTICA_BIN:-multica}"
+          export AGOS_MULTICA_AGENT="${AGOS_MULTICA_AGENT:-Lambda}"
+          python -m pytest \
+            tests/integration/test_planner_cli_opt_in.py \
+            tests/integration/test_reviewer_cli_opt_in.py \
+            tests/integration/test_worker_adapters_opt_in.py \
+            -q

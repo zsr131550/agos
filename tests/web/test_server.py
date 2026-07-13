@@ -146,7 +146,11 @@ def test_dashboard_server_serves_health_json(tmp_repo) -> None:
         assert payload["service"] == "agos-dashboard"
 
 
-def test_dashboard_server_serves_agents_json(tmp_repo) -> None:
+def test_dashboard_server_serves_agents_json(tmp_repo, monkeypatch) -> None:
+    monkeypatch.setattr(
+        "agos.web.api.shutil.which",
+        lambda command: "/test/bin/codex" if command == "codex" else None,
+    )
     write_dashboard_config(tmp_repo)
     with running_dashboard_server(tmp_repo) as server:
         url = f"http://127.0.0.1:{server.server_port}/api/agents"
