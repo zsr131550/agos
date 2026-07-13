@@ -11,7 +11,13 @@ from pydantic import BaseModel, Field
 
 from agos.core.command import run_command
 from agos.core.config import GateSpec, load_config, resolve_gates
-from agos.core.execution import CandidateBundleDecision, CandidateMergePreview, CandidatePatch, ReviewBinding
+from agos.core.execution import (
+    ArbiterDecision,
+    CandidateBundleDecision,
+    CandidateMergePreview,
+    CandidatePatch,
+    ReviewBinding,
+)
 from agos.core.execution_store import ExecutionStore
 from agos.core.execution_workspace import candidate_patch_paths
 from agos.core.gate import gates_match
@@ -56,6 +62,7 @@ def verify_merge_gate(
     require_anchor: bool = False,
     anchor_store: TrustAnchorStore | None = None,
     allow_missing_review: bool = False,
+    allow_legacy_decisionless: bool = False,
     base_ref: str | None = None,
     head_ref: str | None = None,
 ) -> MergeGateResult:
@@ -167,6 +174,22 @@ def verify_merge_gate(
                 details=evidence_issues + evidence_warnings,
             )
         )
+        decision_issues, decision_warnings = _candidate_decision_issues(
+            candidates,
+            records=records,
+            paths=paths,
+            allow_legacy_decisionless=allow_legacy_decisionless,
+        )
+        checks.append(
+            MergeGateCheck(
+                name="candidate_decisions",
+                state="block" if decision_issues else "pass",
+                message="candidate decision verification failed"
+                if decision_issues
+                else "candidate decisions verified",
+                details=decision_issues + decision_warnings,
+            )
+        )
         arbitration_issues = _merge_arbitration_issues(store, records)
         checks.append(
             MergeGateCheck(
@@ -203,8 +226,85 @@ def verify_merge_gate(
     except Exception as exc:
         checks.append(MergeGateCheck(name="candidate_patch_hashes", state="block", message=str(exc)))
         checks.append(MergeGateCheck(name="candidate_evidence", state="block", message=str(exc)))
+        checks.append(MergeGateCheck(name="candidate_decisions", state="block", message=str(exc)))
 
     return _result(checks, task_id=task.id, anchor=anchor)
+
+
+def _candidate_decision_issues(
+    candidates: list[CandidatePatch],
+    *,
+    records: list[dict],
+    paths: AgosPaths,
+    allow_legacy_decisionless: bool,
+) -> tuple[list[str], list[str]]:
+    issues: list[str] = []
+    warnings: list[str] = []
+    applied_records: dict[str, list[dict]] = {}
+    for record in records:
+        if record.get("type") == "candidate_applied" and record.get("candidate_id"):
+            applied_records.setdefault(str(record["candidate_id"]), []).append(record)
+
+    for candidate in candidates:
+        if candidate.status not in {"accepted", "applied"}:
+            continue
+        if candidate.decision_ref is None:
+            detail = f"{candidate.id}: missing decision_ref"
+            if allow_legacy_decisionless:
+                warnings.append(f"{detail}; allowed as legacy decisionless evidence")
+            else:
+                issues.append(detail)
+            continue
+
+        try:
+            decision_path = _task_ref_path(paths, candidate.decision_ref)
+        except ValueError:
+            issues.append(f"{candidate.id}: invalid decision_ref: {candidate.decision_ref}")
+            continue
+        if not decision_path.is_file():
+            issues.append(
+                f"{candidate.id}: decision evidence not found: {candidate.decision_ref}"
+            )
+            continue
+        try:
+            decision = ArbiterDecision.model_validate_json(decision_path.read_text(encoding="utf-8"))
+        except Exception as exc:
+            issues.append(f"{candidate.id}: decision evidence is unreadable: {exc}")
+            continue
+
+        expected_ref = f"execution/decisions/{decision.id}.json"
+        if candidate.decision_ref != expected_ref:
+            issues.append(
+                f"{candidate.id}: decision_ref does not match decision id: {expected_ref}"
+            )
+        if decision.candidate_id != candidate.id:
+            issues.append(
+                f"{candidate.id}: decision candidate_id mismatch: {decision.candidate_id}"
+            )
+        if decision.decision != "accepted":
+            issues.append(f"{candidate.id}: decision is not accepted: {decision.decision}")
+
+        required_refs = {candidate.patch_ref, *candidate.test_refs}
+        completed_reviews = [binding for binding in candidate.review_refs if binding.state == "completed"]
+        if completed_reviews and completed_reviews[-1].report_ref is not None:
+            required_refs.add(completed_reviews[-1].report_ref)
+        missing_refs = sorted(required_refs - set(decision.evidence_refs))
+        if missing_refs:
+            issues.append(
+                f"{candidate.id}: decision missing evidence refs: {', '.join(missing_refs)}"
+            )
+
+        if candidate.status == "applied":
+            candidate_apply_records = applied_records.get(candidate.id, [])
+            if not candidate_apply_records:
+                issues.append(f"{candidate.id}: applied candidate is missing candidate_applied decision evidence")
+            elif len(candidate_apply_records) > 1:
+                issues.append(f"{candidate.id}: multiple candidate_applied decision records found")
+            elif candidate_apply_records[0].get("decision_ref") != candidate.decision_ref:
+                issues.append(
+                    f"{candidate.id}: candidate_applied decision_ref does not match candidate"
+                )
+    return issues, warnings
 
 
 def _candidate_patch_issues(

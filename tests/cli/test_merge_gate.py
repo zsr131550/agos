@@ -12,6 +12,7 @@ from agos.cli.main import app
 from agos.core.adapter import ExecutorRun
 from agos.core.config import AGOSConfig, WorkflowConfig
 from agos.core.ledger import Ledger
+from agos.core.merge_gate import MergeGateResult
 from agos.core.repo import repo_paths
 from agos.core.status import TaskStatus, save_status
 from agos.core.task import ExecutorBinding, Task, save_task
@@ -140,6 +141,24 @@ def test_merge_gate_help_exposes_submitted_diff_refs():
 
     assert "--base" in opts
     assert "--head" in opts
+    assert "--allow-legacy-decisionless" in opts
+
+
+def test_merge_gate_passes_legacy_decisionless_option_to_verifier(monkeypatch, tmp_repo: Path):
+    _write_active_task(tmp_repo)
+    monkeypatch.chdir(tmp_repo)
+    captured = {}
+
+    def fake_verify(_paths, **kwargs):
+        captured.update(kwargs)
+        return MergeGateResult(passed=True, checks=[])
+
+    monkeypatch.setattr(cmd_merge_gate, "verify_merge_gate", fake_verify)
+
+    result = runner.invoke(app, ["merge-gate", "--allow-legacy-decisionless"])
+
+    assert result.exit_code == 0, result.stderr
+    assert captured["allow_legacy_decisionless"] is True
 
 
 def test_merge_gate_exits_nonzero_on_unexpected_error(monkeypatch, tmp_repo: Path):

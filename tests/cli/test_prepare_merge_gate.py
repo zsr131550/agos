@@ -90,6 +90,16 @@ def test_prepare_merge_gate_builds_candidate_evidence_that_merge_gate_accepts(mo
     assert candidates[0].status == "applied"
     assert candidates[0].review_refs
     assert candidates[0].review_refs[-1].state == "completed"
+    assert candidates[0].decision_ref is not None
+    decisions = store.read_decisions(candidates[0].id)
+    assert len(decisions) == 1
+    assert decisions[0].decision == "accepted"
+    required_refs = {
+        candidates[0].patch_ref,
+        *candidates[0].test_refs,
+        candidates[0].review_refs[-1].report_ref,
+    }
+    assert required_refs <= set(decisions[0].evidence_refs)
     assert (paths.current_task / "evidence" / "anchors.json").is_file()
 
     gate = runner.invoke(

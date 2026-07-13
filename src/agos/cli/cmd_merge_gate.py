@@ -24,6 +24,11 @@ def merge_gate_command(
         "--allow-missing-review",
         help="Allow candidates with no completed review; stale or blocking completed reviews still block.",
     ),
+    allow_legacy_decisionless: bool = typer.Option(
+        False,
+        "--allow-legacy-decisionless",
+        help="Allow legacy applied candidates that predate decision evidence.",
+    ),
     base_ref: str | None = typer.Option(None, "--base", help="Base git ref for submitted diff binding."),
     head_ref: str | None = typer.Option(None, "--head", help="Head git ref for submitted diff binding."),
 ) -> None:
@@ -35,6 +40,7 @@ def merge_gate_command(
             require_anchor=require_anchor,
             anchor_store=_store(anchor_backend, repo_root, anchor_path) if require_anchor else None,
             allow_missing_review=allow_missing_review,
+            allow_legacy_decisionless=allow_legacy_decisionless,
             base_ref=base_ref,
             head_ref=head_ref,
         )

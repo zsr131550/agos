@@ -10,6 +10,7 @@ from uuid import uuid4
 import typer
 
 from agos.core.adapter import ExecutorRun
+from agos.core.arbiters import CandidateDecisionArbiter, CandidateDecisionSnapshot
 from agos.core.command import run_command
 from agos.core.config import load_config, resolve_gates
 from agos.core.execution import (
@@ -212,7 +213,7 @@ def _materialize_candidate_evidence(
 
     test_refs = [store.write_test_run(run) for run in runs]
     failed = [run.gate_id for run in runs if run.state != "passed"]
-    final_status = "applied" if not failed else "proposed"
+    final_status = "tested" if not failed else "proposed"
     candidate = candidate.model_copy(update={"status": final_status, "test_refs": test_refs})
     store.write_candidate(candidate)
 
@@ -221,6 +222,10 @@ def _materialize_candidate_evidence(
 
     _materialize_clean_ci_review(paths, candidate=candidate, task=task)
     candidate = store.read_candidate(candidate.id)
+    _materialize_ci_decision(paths, candidate=candidate, task=task)
+    candidate = store.read_candidate(candidate.id)
+    candidate = candidate.model_copy(update={"status": "applied"})
+    store.write_candidate(candidate)
 
     _append_event(
         paths,
@@ -311,10 +316,51 @@ def _materialize_clean_ci_review(paths, *, candidate: CandidatePatch, task: Task
     store.write_candidate(
         latest.model_copy(
             update={
-                "status": "applied",
+                "status": "reviewed",
                 "review_refs": [*latest.review_refs, binding],
             }
         )
+    )
+
+
+def _materialize_ci_decision(paths, *, candidate: CandidatePatch, task: Task) -> None:
+    completed_reviews = [binding for binding in candidate.review_refs if binding.state == "completed"]
+    if not completed_reviews or completed_reviews[-1].report_ref is None:
+        raise ValueError("CI candidate decision requires a completed review report")
+    review = completed_reviews[-1]
+    evidence_refs = [candidate.patch_ref, *candidate.test_refs, review.report_ref]
+    result = CandidateDecisionArbiter().decide(
+        CandidateDecisionSnapshot(
+            candidate_id=candidate.id,
+            decision="accepted",
+            reason="CI preparation accepted the candidate after passed gates and bound review.",
+            decided_by="ci_prepare",
+            evidence_refs=tuple(evidence_refs),
+            tests_passed=True,
+            review_binding_current=True,
+            review_open_blocking_count=0,
+            patch_ref=candidate.patch_ref,
+            test_refs=tuple(candidate.test_refs),
+            review_report_ref=review.report_ref,
+        )
+    )
+    store = ExecutionStore(paths)
+    decision_ref = store.write_decision(result.decision)
+    store.write_candidate(
+        candidate.model_copy(
+            update={"status": result.candidate_status, "decision_ref": decision_ref}
+        )
+    )
+    _append_event(
+        paths,
+        {
+            "type": "candidate_decision_recorded",
+            "task_id": task.id,
+            "candidate_id": candidate.id,
+            "decision": result.decision.decision,
+            "decision_ref": decision_ref,
+            "evidence_refs": evidence_refs,
+        },
     )
 
 
