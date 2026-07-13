@@ -563,56 +563,26 @@ def test_run_auto_execution_passes_planner_json_to_plan_creation(monkeypatch, tm
     assert captured["planner_json"] == '{"plan":"from-planner"}'
 
 
-def test_run_prepared_plan_reports_stuck_state_when_runtime_state_repeats(monkeypatch, tmp_repo):
+def test_run_prepared_plan_waits_for_repeated_running_state_until_budget_exhausted(
+    monkeypatch, tmp_repo
+):
     _active_task(tmp_repo)
-    snapshots = [
-        ExecutionRuntimeSnapshot(
-            run_id="auto-run-01",
-            state="running",
-            running_subtasks=("subtask-01",),
-        ),
-        ExecutionRuntimeSnapshot(
-            run_id="auto-run-01",
-            state="running",
-            running_subtasks=("subtask-01",),
-        ),
-    ]
     tick_run_ids: list[str] = []
+    sleeps: list[float] = []
 
     def fake_tick(_runtime, _plan, *, run_id: str):
         tick_run_ids.append(run_id)
-        return snapshots[min(len(tick_run_ids) - 1, len(snapshots) - 1)]
-
-    monkeypatch.setattr(execution_pipeline.ExecutionRuntime, "tick", fake_tick)
-
-    result = execution_pipeline._run_prepared_plan(
-        _service(tmp_repo),
-        SimpleNamespace(id="auto-plan-01", subtasks=[]),
-    )
-
-    assert result.state == "stuck"
-    assert tick_run_ids == ["auto-run-01", "auto-run-01"]
-
-
-def test_run_prepared_plan_stops_at_max_tick_iterations_when_runtime_never_settles(monkeypatch, tmp_repo):
-    _active_task(tmp_repo)
-    # Always running, with a distinct state key each tick so "stuck" never triggers.
-    call_count = {"n": 0}
-
-    def fake_tick(_runtime, _plan, *, run_id: str):
-        call_count["n"] += 1
         return ExecutionRuntimeSnapshot(
             run_id="auto-run-01",
             state="running",
-            running_subtasks=(f"subtask-{call_count['n']}",),
+            running_subtasks=("subtask-01",),
         )
 
     monkeypatch.setattr(execution_pipeline.ExecutionRuntime, "tick", fake_tick)
-
     capped_config = AGOSConfig.model_validate(
         {
             "executor": {"name": "multica", "agent": "Lambda"},
-            "workers": {"editing": {"type": "local_worktree"}},
+            "workers": {"editing": {"type": "local_worktree", "poll_interval_seconds": 2}},
             "orchestration": {"max_parallel": 1, "max_tick_iterations": 2},
             "workflows": {"feature": {"gates": []}},
         }
@@ -621,11 +591,69 @@ def test_run_prepared_plan_stops_at_max_tick_iterations_when_runtime_never_settl
 
     result = execution_pipeline._run_prepared_plan(
         _service(tmp_repo),
-        SimpleNamespace(id="auto-plan-01", subtasks=[]),
+        SimpleNamespace(
+            id="auto-plan-01",
+            subtasks=[
+                SimpleNamespace(
+                    id="subtask-01",
+                    worker=SimpleNamespace(adapter="editing"),
+                    workspace_ref=None,
+                )
+            ],
+        ),
+        sleeper=sleeps.append,
     )
 
-    assert result.state == "running"
-    assert call_count["n"] == 3
+    assert result.state == "stuck"
+    assert tick_run_ids == ["auto-run-01", "auto-run-01", "auto-run-01"]
+    assert sleeps == [2, 2]
+
+
+def test_run_prepared_plan_completes_after_repeated_running_state(monkeypatch, tmp_repo):
+    _active_task(tmp_repo)
+    tick_run_ids: list[str] = []
+    sleeps: list[float] = []
+
+    def fake_tick(_runtime, _plan, *, run_id: str):
+        tick_run_ids.append(run_id)
+        if len(tick_run_ids) == 3:
+            return ExecutionRuntimeSnapshot(run_id="auto-run-01", state="completed")
+        return ExecutionRuntimeSnapshot(
+            run_id="auto-run-01",
+            state="running",
+            running_subtasks=("subtask-01",),
+        )
+
+    monkeypatch.setattr(execution_pipeline.ExecutionRuntime, "tick", fake_tick)
+
+    capped_config = AGOSConfig.model_validate(
+        {
+            "executor": {"name": "multica", "agent": "Lambda"},
+            "workers": {"editing": {"type": "local_worktree", "poll_interval_seconds": 2}},
+            "orchestration": {"max_parallel": 1, "max_tick_iterations": 2},
+            "workflows": {"feature": {"gates": []}},
+        }
+    )
+    monkeypatch.setattr(execution_pipeline, "load_config", lambda _root: capped_config)
+
+    result = execution_pipeline._run_prepared_plan(
+        _service(tmp_repo),
+        SimpleNamespace(
+            id="auto-plan-01",
+            subtasks=[
+                SimpleNamespace(
+                    id="subtask-01",
+                    worker=SimpleNamespace(adapter="editing"),
+                    workspace_ref=None,
+                )
+            ],
+        ),
+        sleeper=sleeps.append,
+    )
+
+    assert result.state == "completed"
+    assert tick_run_ids == ["auto-run-01", "auto-run-01", "auto-run-01"]
+    assert sleeps == [2, 2]
 
 
 def test_acceptance_reason_records_explicit_missing_review_override():
