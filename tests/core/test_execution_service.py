@@ -347,6 +347,11 @@ def test_submit_candidate_captures_scoped_patch_and_hash(tmp_repo):
     assert b"# changed" in patch_bytes
     assert candidate.status == "proposed"
     assert _ledger_types(paths)[-1] == "candidate_patch_created"
+    created = _ledger_records(paths)[-1]
+    assert candidate.provenance is not None
+    assert candidate.provenance.source == "worker_export"
+    assert candidate.provenance.ledger_head_hash == created["hash"]
+    assert ExecutionStore(paths).read_candidate(candidate.id).provenance == candidate.provenance
 
 
 def test_submit_candidate_routes_patch_export_through_worker_adapter(tmp_repo, monkeypatch):

@@ -107,3 +107,66 @@ def test_default_config_has_feature_workflow():
     assert tests_gate.timeout_seconds == 300
     assert cfg.trust_anchor.backend == "git-ref"
     assert cfg.trust_anchor.auto_publish_on_checkpoint is False
+    assert cfg.merge_gate.provenance_policy == "optional"
+
+
+def test_merge_gate_config_loads_required_policy_and_relative_trusted_signer():
+    cfg = AGOSConfig.model_validate(
+        {
+            "executor": {"name": "multica", "agent": "Lambda"},
+            "merge_gate": {
+                "provenance_policy": "required",
+                "trusted_signers": [
+                    {
+                        "issuer": "protected-ci",
+                        "key_id": "ci-2026",
+                        "public_key_path": "keys/ci-2026.pub.pem",
+                    }
+                ],
+            },
+        }
+    )
+
+    assert cfg.merge_gate.provenance_policy == "required"
+    assert cfg.merge_gate.trusted_signers[0].public_key_path == "keys/ci-2026.pub.pem"
+
+
+def test_merge_gate_config_rejects_duplicate_signer_identity():
+    with pytest.raises(Exception, match="duplicate trusted signer"):
+        AGOSConfig.model_validate(
+            {
+                "executor": {"name": "multica", "agent": "Lambda"},
+                "merge_gate": {
+                    "trusted_signers": [
+                        {
+                            "issuer": "protected-ci",
+                            "key_id": "ci-2026",
+                            "public_key_path": "keys/first.pem",
+                        },
+                        {
+                            "issuer": "protected-ci",
+                            "key_id": "ci-2026",
+                            "public_key_path": "keys/second.pem",
+                        },
+                    ]
+                },
+            }
+        )
+
+
+def test_merge_gate_config_rejects_empty_signer_fields():
+    with pytest.raises(Exception, match="trusted signer fields must be non-empty"):
+        AGOSConfig.model_validate(
+            {
+                "executor": {"name": "multica", "agent": "Lambda"},
+                "merge_gate": {
+                    "trusted_signers": [
+                        {
+                            "issuer": " ",
+                            "key_id": "ci-2026",
+                            "public_key_path": "keys/ci-2026.pub.pem",
+                        }
+                    ]
+                },
+            }
+        )

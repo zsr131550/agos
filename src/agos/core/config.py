@@ -11,6 +11,7 @@ from agos.core.review import ReviewSeverity
 
 GateType = Literal["secret_scan", "opa", "semgrep", "trufflehog", "codeql"]
 TrustAnchorBackend = Literal["file", "git-ref"]
+ProvenancePolicy = Literal["required", "optional", "disabled"]
 
 
 class GateSpec(BaseModel):
@@ -128,6 +129,37 @@ class TrustAnchorConfig(BaseModel):
     issuer: str = "agos"
 
 
+class TrustedSignerConfig(BaseModel):
+    """One allowed offline provenance signer from trusted configuration."""
+
+    issuer: str
+    key_id: str
+    public_key_path: str
+
+    @model_validator(mode="after")
+    def _non_empty_fields(self) -> "TrustedSignerConfig":
+        if any(
+            not value.strip()
+            for value in (self.issuer, self.key_id, self.public_key_path)
+        ):
+            raise ValueError("trusted signer fields must be non-empty")
+        return self
+
+
+class MergeGateConfig(BaseModel):
+    """Trusted merge-gate provenance policy."""
+
+    provenance_policy: ProvenancePolicy = "optional"
+    trusted_signers: list[TrustedSignerConfig] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def _unique_signer_identities(self) -> "MergeGateConfig":
+        identities = [(signer.issuer, signer.key_id) for signer in self.trusted_signers]
+        if len(set(identities)) != len(identities):
+            raise ValueError("duplicate trusted signer issuer/key_id")
+        return self
+
+
 class AGOSConfig(BaseModel):
     """Top-level `.agos/agos.yaml` structure."""
 
@@ -139,6 +171,7 @@ class AGOSConfig(BaseModel):
     allow_fake_reviewer: bool = False
     orchestration: OrchestrationConfig = Field(default_factory=OrchestrationConfig)
     trust_anchor: TrustAnchorConfig = Field(default_factory=TrustAnchorConfig)
+    merge_gate: MergeGateConfig = Field(default_factory=MergeGateConfig)
 
     @classmethod
     def default(
@@ -233,5 +266,4 @@ def resolve_gates(
     if missing:
         raise KeyError(f"override gates not in workflow {workflow!r}: {missing}")
     return [by_id[gate_id].model_copy(deep=True) for gate_id in override]
-
 
