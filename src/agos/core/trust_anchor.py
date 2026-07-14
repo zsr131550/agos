@@ -319,6 +319,8 @@ def verify_current_signed_anchor(
 
 def _current_anchor_payload(paths: AgosPaths, *, issuer: str) -> TrustAnchorPayload:
     task = load_task(paths.task_yaml)
+    if not paths.status_json.is_file():
+        raise ValueError("current task status is missing")
     status = load_status(paths)
     if status is None:
         raise ValueError("current task status is missing")

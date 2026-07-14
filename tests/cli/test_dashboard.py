@@ -12,6 +12,8 @@ def test_dashboard_command_is_registered() -> None:
     result = runner.invoke(app, ["dashboard", "--help"])
 
     assert result.exit_code == 0
+    assert "Start the local AGOS dashboard." in result.stdout
+    assert "read-only" not in result.stdout
 
 
 def test_dashboard_command_invokes_server(monkeypatch, tmp_repo) -> None:

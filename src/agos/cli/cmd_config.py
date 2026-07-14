@@ -32,7 +32,7 @@ def config_show_command(
             json.dumps(
                 {
                     "path": str(paths.agos_yaml),
-                    "config": config.model_dump(mode="json", exclude_none=True),
+                    "config": _config_dump(config, mode="json"),
                 },
                 sort_keys=True,
             )
@@ -41,10 +41,27 @@ def config_show_command(
 
     typer.echo(
         yaml.safe_dump(
-            config.model_dump(mode="python", exclude_none=True),
+            _config_dump(config, mode="python"),
             sort_keys=False,
         ).rstrip()
     )
+
+
+def _config_dump(config: AGOSConfig, *, mode: str) -> dict[str, object]:
+    permission_field = "dangerously_bypass_permissions"
+    exclude: dict[str, object] = {}
+    if permission_field not in config.executor.model_fields_set:
+        exclude["executor"] = {permission_field}
+
+    implicit_workers = {
+        name: {permission_field}
+        for name, worker in config.workers.items()
+        if permission_field not in worker.model_fields_set
+    }
+    if implicit_workers:
+        exclude["workers"] = implicit_workers
+
+    return config.model_dump(mode=mode, exclude_none=True, exclude=exclude)
 
 
 @config_app.command("validate")

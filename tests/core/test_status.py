@@ -9,7 +9,7 @@ import pytest
 from agos.core.adapter import ExecutorRun
 from agos.core.ledger import Ledger, LedgerTamperError
 from agos.core.repo import repo_paths
-from agos.core.status import GateState, Status, derive_status, load_status, save_status
+from agos.core.status import GateState, Status, derive_status, load_status, replay_status, save_status
 from agos.core.task import ExecutorBinding, Task, save_task
 
 
@@ -45,6 +45,54 @@ def test_save_and_load_status(tmp_repo: Path):
 def test_load_status_none_when_absent(tmp_repo: Path):
     paths = repo_paths(tmp_repo)
     assert load_status(paths) is None
+
+
+def test_load_status_preserves_invalid_cache_error_without_replay_inputs(tmp_repo: Path):
+    paths = repo_paths(tmp_repo)
+    paths.status_json.parent.mkdir(parents=True, exist_ok=True)
+    paths.status_json.write_text("{not-json", encoding="utf-8")
+
+    with pytest.raises(ValueError):
+        load_status(paths)
+
+
+def test_load_status_preserves_invalid_cache_error_with_empty_ledger(tmp_repo: Path):
+    paths = repo_paths(tmp_repo)
+    task = Task(
+        id="agos-empty-ledger",
+        title="Empty ledger",
+        workflow="feature",
+        gates=[],
+        executor=ExecutorBinding(adapter="multica", agent="Lambda"),
+    )
+    save_task(task, paths.task_yaml)
+    paths.ledger.touch()
+    paths.status_json.write_text("{not-json", encoding="utf-8")
+
+    with pytest.raises(ValueError):
+        load_status(paths)
+
+
+def test_load_status_returns_valid_cache_with_empty_ledger(tmp_repo: Path):
+    paths = repo_paths(tmp_repo)
+    task = Task(
+        id="agos-empty-ledger-cache",
+        title="Empty ledger cache",
+        workflow="feature",
+        gates=[],
+        executor=ExecutorBinding(adapter="multica", agent="Lambda"),
+    )
+    save_task(task, paths.task_yaml)
+    paths.ledger.touch()
+    cached = Status(
+        task_id=task.id,
+        phase="executing",
+        gates={},
+        ledger_head_hash="",
+    )
+    save_status(cached, paths)
+
+    assert load_status(paths) == cached
 
 
 def test_load_status_repairs_cache_after_crash_between_ledger_and_cache(tmp_repo: Path):
@@ -175,6 +223,39 @@ def test_load_status_rejects_tampered_ledger_without_replacing_cache(tmp_repo: P
         load_status(paths)
 
     assert paths.status_json.read_text(encoding="utf-8") == original_cache
+
+
+def test_replay_status_restores_dashboard_and_terminal_transitions():
+    task = Task(
+        id="agos-dashboard-replay",
+        title="Dashboard replay",
+        workflow="feature",
+        gates=[],
+        executor=ExecutorBinding(adapter="multica", agent="Lambda"),
+    )
+
+    restored = replay_status(task, [{"type": "dashboard_restored", "hash": "restore"}])
+    archived = replay_status(task, [{"type": "dashboard_archived", "hash": "archive"}])
+    running = replay_status(
+        task,
+        [{"type": "task_execution_completed", "state": "running", "hash": "running"}],
+        cached=Status(
+            task_id=task.id,
+            phase="blocked",
+            gates={},
+            ledger_head_hash="old",
+        ),
+    )
+    failed = replay_status(
+        task,
+        [{"type": "task_execution_blocked", "state": "failed", "hash": "failed"}],
+    )
+
+    assert restored.executor_run is not None
+    assert restored.executor_run.run_id == f"restored-{task.id}"
+    assert archived.phase == "done"
+    assert running.phase == "executing"
+    assert failed.phase == "blocked"
 
 
 def test_derive_status_uses_ledger_head(tmp_repo: Path):

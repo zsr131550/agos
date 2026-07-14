@@ -22,7 +22,7 @@ def dashboard_command(
         help="Authentication token required for mutations and remote API access.",
     ),
 ) -> None:
-    """Start the local read-only AGOS dashboard."""
+    """Start the local AGOS dashboard."""
 
     try:
         repo_root = find_repo_root()
