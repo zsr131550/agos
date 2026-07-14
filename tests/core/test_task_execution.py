@@ -5,6 +5,7 @@ from pathlib import Path
 from agos.core.config import AGOSConfig
 from agos.core.task import ExecutorBinding, Task, load_task
 from agos.core.task_execution import (
+    TaskExecutionRequest,
     TaskExecutionResult,
     effective_task_mode,
     task_requires_output_directory,
@@ -105,3 +106,7 @@ def test_normalized_result_has_stable_fields() -> None:
         "blocked_reason": None,
         "compatibility_warnings": [],
     }
+
+
+def test_task_execution_request_does_not_expose_unguarded_apply_switch() -> None:
+    assert "apply" not in TaskExecutionRequest.model_fields

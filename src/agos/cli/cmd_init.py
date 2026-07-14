@@ -14,10 +14,11 @@ import typer
 from agos.adapters.multica import resolve_multica_bin
 from agos.cli.worker_registry import register_configured_worker_adapters
 from agos.core.command import run_command
-from agos.core.config import AGOSConfig, ExecutorConfig, WorkerConfig
+from agos.core.config import AGOSConfig, ExecutorConfig, ReviewerConfig, WorkerConfig
 from agos.core.execution_service import ExecutionService
 from agos.core.ledger import append_repo_record
 from agos.core.repo import agos_dir, config_path, find_repo_root, repo_ledger_path, repo_paths
+from agos.core.task_execution import TaskExecutionConfig
 
 
 class InitAgentResolutionError(Exception):
@@ -457,6 +458,44 @@ def _abort_for_health_failures(failures: list[str]) -> None:
     raise typer.Exit(code=1)
 
 
+def _configure_task_execution(
+    config: AGOSConfig,
+    selected_agent: LocalAgentCandidate,
+) -> tuple[AGOSConfig, str | None]:
+    if selected_agent.executor_name in {"codex_cli", "claude_code"}:
+        reviewer_name = f"{selected_agent.worker_name}_reviewer"
+        return config.model_copy(
+            update={
+                "task_execution": TaskExecutionConfig(
+                    mode="candidate",
+                    output_contract="source_code",
+                ),
+                "reviewers": {
+                    reviewer_name: ReviewerConfig(
+                        type=selected_agent.executor_name,
+                        role="code_review",
+                        required=True,
+                        command=selected_agent.command,
+                        executor=selected_agent.executor_name,
+                    )
+                },
+            }
+        ), None
+
+    reason = (
+        f"selected executor {selected_agent.executor_name!r} cannot provide an automatic "
+        "local reviewer; using compatible legacy execution"
+    )
+    return config.model_copy(
+        update={
+            "task_execution": TaskExecutionConfig(
+                mode="legacy",
+                output_contract="legacy",
+            )
+        }
+    ), reason
+
+
 def _render_template(template_name: str, *, stage: str, legacy_hook: str) -> str:
     template = resources.files("agos.hooks.templates").joinpath(template_name).read_text(encoding="utf-8")
     return template.replace("__STAGE__", stage).replace("__LEGACY_HOOK__", legacy_hook)
@@ -545,6 +584,7 @@ def init_command(
         command=selected_agent.command,
         workers=workers,
     )
+    config, execution_fallback_reason = _configure_task_execution(config, selected_agent)
     config.save(config_path(repo_root))
 
     git_hooks_dir = repo_root / ".git" / "hooks"
@@ -561,6 +601,8 @@ def init_command(
     )
 
     typer.echo(f"Initialized AGOS in {agos_root}")
+    if execution_fallback_reason is not None:
+        typer.echo(f"Warning: {execution_fallback_reason}", err=True)
     if auto_run_title is None:
         for warning in validate_executor_environment(config.executor):
             typer.echo(f"Warning: {warning}", err=True)
@@ -575,5 +617,11 @@ def init_command(
     typer.echo("Starting AGOS task...")
     from agos.cli.cmd_start import start_command
 
-    start_command(title=auto_run_title, intent=auto_run_intent, workflow=None, gate=None)
-
+    start_command(
+        title=auto_run_title,
+        intent=auto_run_intent,
+        workflow=None,
+        gate=None,
+        mode=None,
+        json_output=False,
+    )

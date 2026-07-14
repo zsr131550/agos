@@ -39,7 +39,6 @@ class TaskExecutionRequest(BaseModel):
     gate_overrides: list[str] = Field(default_factory=list)
     mode: ExecutionMode | None = None
     executor_selection: ExecutorSelection | None = None
-    apply: bool = True
 
     @field_validator("title")
     @classmethod
