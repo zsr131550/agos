@@ -36,7 +36,7 @@
 - Persists optional `Task.execution_mode` and `Task.output_contract`.
 - Produces `effective_task_mode(task)` and `task_requires_output_directory(task)`.
 
-- [ ] **Step 1: Add failing compatibility tests**
+- [x] **Step 1: Add failing compatibility tests**
 
 ```python
 def test_old_config_defaults_to_legacy_execution():
@@ -57,7 +57,7 @@ def test_source_code_task_does_not_require_output_directory(task):
     assert task_requires_output_directory(task) is False
 ```
 
-- [ ] **Step 2: Verify RED**
+- [x] **Step 2: Verify RED**
 
 ```bash
 .venv/bin/python -m pytest tests/core/test_config.py tests/core/test_task.py \
@@ -66,7 +66,7 @@ def test_source_code_task_does_not_require_output_directory(task):
 
 Expected: FAIL because execution models and task fields do not exist.
 
-- [ ] **Step 3: Implement legacy-safe models**
+- [x] **Step 3: Implement legacy-safe models**
 
 ```python
 ExecutionMode = Literal["legacy", "candidate"]
@@ -111,7 +111,7 @@ class TaskExecutionResult(BaseModel):
 
 Add `task_execution: TaskExecutionConfig = Field(default_factory=TaskExecutionConfig)` to `AGOSConfig`. Add optional task fields so old YAML remains distinguishable from new explicit metadata. Interpret missing task fields as legacy through helpers rather than rewriting archives.
 
-- [ ] **Step 4: Verify GREEN and commit**
+- [x] **Step 4: Verify GREEN and commit**
 
 ```bash
 .venv/bin/python -m pytest tests/core/test_config.py tests/core/test_task.py \
@@ -136,7 +136,7 @@ git commit -m "feat: define compatible task execution modes"
 - Source-code completion requires a non-empty, valid governed repository change made during the run.
 - Legacy and standalone behavior remains unchanged.
 
-- [ ] **Step 1: Add failing contract tests**
+- [x] **Step 1: Add failing contract tests**
 
 ```python
 def test_source_code_executor_accepts_repo_edit_without_outputs(monkeypatch, tmp_repo):
@@ -163,18 +163,18 @@ def test_old_task_still_requires_outputs_directory(monkeypatch, tmp_repo):
     assert adapter.status(run.run_id).state == "failed"
 ```
 
-- [ ] **Step 2: Verify RED**
+- [x] **Step 2: Verify RED**
 
 ```bash
 .venv/bin/python -m pytest tests/adapters/test_local_cli_executor.py \
   tests/web/test_api.py -q
 ```
 
-- [ ] **Step 3: Implement contract-specific completion**
+- [x] **Step 3: Implement contract-specific completion**
 
 For `legacy` and `standalone`, retain current output directory, retry, prompt, and status behavior. For `source_code`, capture a repository-change fingerprint before dispatch (excluding `.agos/`), require a different post-run fingerprint plus `git diff --check`, retry once with a source-specific directive, and never create `outputs/<task-id>`. Update Dashboard business-output detection to use the persisted task contract, candidate/patch evidence, and governed Git changes.
 
-- [ ] **Step 4: Verify and commit**
+- [x] **Step 4: Verify and commit**
 
 ```bash
 .venv/bin/python -m pytest tests/adapters/test_local_cli_executor.py \
@@ -201,7 +201,7 @@ git commit -m "fix: distinguish source and standalone outputs"
 - Produces `CommandWorkerAdapter(name, argv, workspace_manager, timeout_seconds, env)`.
 - Runs explicit argv in the isolated worktree with `shell=False` and `stdin=DEVNULL`.
 
-- [ ] **Step 1: Add failing adapter tests**
+- [x] **Step 1: Add failing adapter tests**
 
 ```python
 def test_command_worker_requires_nonempty_argv():
@@ -223,18 +223,18 @@ def test_command_worker_never_uses_shell(monkeypatch, tmp_repo):
     assert captured.get("shell") in {None, False}
 ```
 
-- [ ] **Step 2: Verify RED**
+- [x] **Step 2: Verify RED**
 
 ```bash
 .venv/bin/python -m pytest tests/adapters/test_command_worker.py \
   tests/cli/test_worker_registry.py -q
 ```
 
-- [ ] **Step 3: Implement and register**
+- [x] **Step 3: Implement and register**
 
 Use `LocalWorktreeWorkerAdapter`'s prepare/export pattern. Cache synchronous terminal status by run ID. Map return code zero to `completed`; nonzero, timeout, and OSError to `failed`. Health checks only local executable availability. Register only explicit `type: command`; do not make it a hidden fallback.
 
-- [ ] **Step 4: Verify and commit**
+- [x] **Step 4: Verify and commit**
 
 ```bash
 .venv/bin/python -m pytest tests/adapters/test_command_worker.py \
@@ -262,7 +262,7 @@ git commit -m "feat: add offline command worker"
 - Persists `task_execution_started`, a mode-specific terminal event, status, and `execution/task-execution.json`.
 - Extends `run_auto_execution(service, *, apply=False, resume_run_id: str | None = None)` idempotently.
 
-- [ ] **Step 1: Add failing service tests**
+- [x] **Step 1: Add failing service tests**
 
 ```python
 def test_readiness_failure_publishes_no_task(tmp_repo):
@@ -289,14 +289,14 @@ def test_candidate_start_applies_guarded_candidate(tmp_repo):
     assert Path(tmp_repo, "README.md").read_text() == "# offline\n"
 ```
 
-- [ ] **Step 2: Verify RED**
+- [x] **Step 2: Verify RED**
 
 ```bash
 .venv/bin/python -m pytest tests/core/test_task_execution_service.py \
   tests/core/test_execution_pipeline.py -q
 ```
 
-- [ ] **Step 3: Implement validation, staging, and dispatch**
+- [x] **Step 3: Implement validation, staging, and dispatch**
 
 Validate active-task absence, config, workflow, gate selection, requested mode, and candidate readiness before staging. Stage `task.yaml`, ledger, and status, then atomically rename. Legacy retains pre-publication adapter dispatch. Candidate publishes initial state, invokes `run_auto_execution(service, apply=True)`, appends a terminal event, and normalizes status/result. Preserve a published candidate task and exact blocked stage/reason on failures.
 
@@ -307,11 +307,11 @@ if not patch_bytes.strip():
     raise ValueError(f"worker produced an empty candidate patch: {subtask_id}")
 ```
 
-- [ ] **Step 4: Add idempotent candidate resume**
+- [x] **Step 4: Add idempotent candidate resume**
 
 When `resume_run_id` is supplied, load the stored plan and tick its existing runtime. Reuse candidates already associated with completed subtasks. Already applied candidates populate normalized IDs without another review/decision/apply; only newly completed subtasks continue through the guarded path.
 
-- [ ] **Step 5: Verify and commit**
+- [x] **Step 5: Verify and commit**
 
 ```bash
 .venv/bin/python -m pytest tests/core/test_task_execution_service.py \
@@ -339,7 +339,7 @@ git commit -m "feat: unify task execution entrypoint"
 - Omitted mode uses config; old config output stays the legacy issue/run ID.
 - `agos run auto` remains registered as compatibility/advanced control.
 
-- [ ] **Step 1: Add failing CLI tests**
+- [x] **Step 1: Add failing CLI tests**
 
 ```python
 def test_start_help_exposes_mode_and_json():
@@ -372,22 +372,22 @@ def test_start_candidate_json_is_normalized(monkeypatch, tmp_repo):
     assert payload["candidate_ids"] == payload["applied_candidate_ids"]
 ```
 
-- [ ] **Step 2: Verify RED**
+- [x] **Step 2: Verify RED**
 
 ```bash
 .venv/bin/python -m pytest tests/cli/test_start.py tests/cli/test_init.py \
   tests/cli/test_run_auto.py -q
 ```
 
-- [ ] **Step 3: Wire the service at the CLI boundary**
+- [x] **Step 3: Wire the service at the CLI boundary**
 
 Construct legacy/provider adapters, workers, planner, and reviewers in `task_execution_registry.py`. `cmd_start` calls the service, prints the old legacy ID for old human calls, the candidate run ID for candidate human calls, and full normalized JSON for `--json`. Emit compatibility warnings to stderr without changing successful exit codes. Keep a `start_task()` legacy wrapper for import compatibility.
 
-- [ ] **Step 4: Make new init choose a ready mode**
+- [x] **Step 4: Make new init choose a ready mode**
 
 For selected Codex/Claude adapters, configure one required local CLI reviewer and write `candidate/source_code`. When automatic worker/reviewer readiness is structurally missing (for example Multica-only), write `legacy/legacy` and print the reason. Never contact a provider merely to choose the mode.
 
-- [ ] **Step 5: Verify and commit**
+- [x] **Step 5: Verify and commit**
 
 ```bash
 .venv/bin/python -m pytest tests/cli/test_start.py tests/cli/test_init.py \
@@ -414,7 +414,7 @@ git commit -m "feat: expose compatible task execution modes"
 - Response retains `run_id`, `issue_id`, `run`, and `current`, and adds `execution_result`.
 - Candidate resume/restart uses candidate runtime resume, never legacy redispatch.
 
-- [ ] **Step 1: Add failing Dashboard tests**
+- [x] **Step 1: Add failing Dashboard tests**
 
 ```python
 def test_dashboard_start_passes_candidate_mode_to_service(monkeypatch, tmp_repo):
@@ -435,18 +435,18 @@ def test_candidate_resume_never_dispatches_legacy_executor(monkeypatch, candidat
     assert resume_current_task_payload(candidate_repo)["execution_result"]["mode"] == "candidate"
 ```
 
-- [ ] **Step 2: Verify RED**
+- [x] **Step 2: Verify RED**
 
 ```bash
 .venv/bin/python -m pytest tests/web/test_api.py tests/web/test_server.py \
   tests/web/test_static_resources.py -q
 ```
 
-- [ ] **Step 3: Replace Dashboard dispatch**
+- [x] **Step 3: Replace Dashboard dispatch**
 
 Preserve agent, gates, and `replace_active`; validate optional mode; call the same registry-built service. Old/legacy lifecycle retains existing behavior. Candidate pause/cancel and resume/restart use persisted normalized run state; return a structured business error if a terminal governed run cannot safely restart. Add a compact mode selector to the existing form without redesigning the Dashboard.
 
-- [ ] **Step 4: Verify and commit**
+- [x] **Step 4: Verify and commit**
 
 ```bash
 .venv/bin/python -m pytest tests/web/test_api.py tests/web/test_server.py \
@@ -470,11 +470,11 @@ git commit -m "feat: unify dashboard task execution"
 - Proves task creation -> command worker -> real patch -> gates -> deterministic review -> accepted decision -> guarded apply -> merge-gate.
 - Documents mode/output migration and offline boundaries.
 
-- [ ] **Step 1: Add the real offline E2E test**
+- [x] **Step 1: Add the real offline E2E test**
 
 Create a committed temporary Git repository configured with `candidate/source_code`, a `command` worker using `sys.executable -c` to change `README.md`, a fake required reviewer with `allow_fake_reviewer: true`, deterministic gates, and disabled planner. Invoke `agos start --mode candidate --json`. Assert a non-empty `worker_export` patch, passing gates, completed review, accepted decision, applied candidate, changed root file, valid ledger, and `verify_merge_gate(paths).decision == "pass"`.
 
-- [ ] **Step 2: Run provider-free E2E**
+- [x] **Step 2: Run provider-free E2E**
 
 ```bash
 PATH="$PWD/.venv/bin:/usr/bin:/bin:/usr/sbin:/sbin" PYTHONPATH="$PWD/src" \
@@ -482,11 +482,11 @@ PATH="$PWD/.venv/bin:/usr/bin:/bin:/usr/sbin:/sbin" PYTHONPATH="$PWD/src" \
   tests/cli/test_start.py tests/web/test_server.py -q
 ```
 
-- [ ] **Step 3: Document operation and migration**
+- [x] **Step 3: Document operation and migration**
 
 Document omitted config as `legacy/legacy`, one-run `--mode` overrides, guarded candidate apply, the retained `agos run auto`, `source_code` versus `standalone`, explicit local argv command workers, and the development-only fake reviewer boundary.
 
-- [ ] **Step 4: Run full verification**
+- [x] **Step 4: Run full verification**
 
 ```bash
 .venv/bin/python -m ruff check src tests
@@ -499,7 +499,7 @@ PYTHONPATH="/Users/zhangrui/.cache/codex-runtimes/codex-primary-runtime/dependen
 .venv/bin/python -m build --no-isolation
 ```
 
-- [ ] **Step 5: Commit documentation**
+- [x] **Step 5: Commit documentation**
 
 ```bash
 git add README.md docs/execution-modes.md tests/integration/test_offline_task_execution.py
