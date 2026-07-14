@@ -1,13 +1,16 @@
 from __future__ import annotations
 
 import json
+import builtins
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
 from agos.core.adapter import ExecutorRun
-from agos.core.config import TrustAnchorConfig
+from agos.core import trust_anchor
+from agos.core import signing
+from agos.core.config import TrustedSignerConfig, TrustAnchorConfig
 from agos.core.ledger import Ledger
 from agos.core.repo import repo_paths
 from agos.core.status import TaskStatus, save_status
@@ -21,6 +24,20 @@ from agos.core.trust_anchor import (
     store_from_config,
     verify_current_anchor,
 )
+
+
+PRIVATE_KEY_PEM = """-----BEGIN PRIVATE KEY-----
+MC4CAQAwBQYDK2VwBCIEIJ1hsZ3v/VpguoRK9JLsLMREScVpezJpGXA7rAMcrn9g
+-----END PRIVATE KEY-----
+"""
+PUBLIC_KEY_PEM = """-----BEGIN PUBLIC KEY-----
+MCowBQYDK2VwAyEA11qYAYKxCrfVS/7TyWQHOg7hcvPapiMlrwIaaPcHURo=
+-----END PUBLIC KEY-----
+"""
+OTHER_PUBLIC_KEY_PEM = """-----BEGIN PUBLIC KEY-----
+MCowBQYDK2VwAyEAPUAXw+hDiVqStwqnTRt+vJyYLM8uxJaMwM1V8Sr0Zgw=
+-----END PUBLIC KEY-----
+"""
 
 
 def _payload(**overrides) -> TrustAnchorPayload:
@@ -62,8 +79,53 @@ def _write_active_task(tmp_repo: Path) -> tuple[Task, object]:
     return task, paths
 
 
+def _signer_files(tmp_repo: Path) -> tuple[Path, Path, TrustedSignerConfig]:
+    private_key_path = tmp_repo.parent / "ci-private.pem"
+    private_key_path.write_text(PRIVATE_KEY_PEM, encoding="ascii")
+    trusted_config_path = tmp_repo.parent / "trusted" / ".agos" / "agos.yaml"
+    public_key_path = trusted_config_path.parent / "keys" / "ci-public.pem"
+    public_key_path.parent.mkdir(parents=True)
+    public_key_path.write_text(PUBLIC_KEY_PEM, encoding="ascii")
+    trusted_config_path.write_text("merge_gate: {}\n", encoding="utf-8")
+    signer = TrustedSignerConfig(
+        issuer="protected-ci",
+        key_id="ci-2026",
+        public_key_path="keys/ci-public.pem",
+    )
+    return private_key_path, trusted_config_path, signer
+
+
+def _publish_signed_anchor(tmp_repo: Path):
+    _task, paths = _write_active_task(tmp_repo)
+    private_key_path, trusted_config_path, signer = _signer_files(tmp_repo)
+    assert getattr(trust_anchor, "SignedFileTrustAnchorStore", None) is not None
+    store = trust_anchor.SignedFileTrustAnchorStore(paths.evidence / "signed-anchor.json")
+    envelope = trust_anchor.publish_current_signed_anchor(
+        paths,
+        store,
+        issuer=signer.issuer,
+        key_id=signer.key_id,
+        private_key_path=private_key_path,
+    )
+    return paths, store, envelope, trusted_config_path, signer
+
+
 def test_canonical_json_is_sorted_compact():
     assert canonical_json({"b": 2, "a": 1}) == '{"a":1,"b":2}'
+
+
+def test_signing_helpers_report_missing_optional_dependency(monkeypatch):
+    real_import = builtins.__import__
+
+    def import_without_cryptography(name, *args, **kwargs):
+        if name.startswith("cryptography"):
+            raise ImportError(name)
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", import_without_cryptography)
+
+    with pytest.raises(RuntimeError, match="requires AGOS with the 'signing' extra"):
+        signing._crypto_types()
 
 
 def test_trust_anchor_payload_rejects_empty_fields():
@@ -86,6 +148,172 @@ def test_file_store_publish_and_verify_round_trip(monkeypatch: pytest.MonkeyPatc
     verification = verify_current_anchor(paths, store)
     assert verification.passed is True
     assert verification.anchor == payload
+    assert verification.signed is False
+
+
+def test_signed_file_store_publish_and_verify_round_trip(tmp_repo: Path):
+    paths, store, envelope, trusted_config_path, signer = _publish_signed_anchor(tmp_repo)
+
+    verification = trust_anchor.verify_current_signed_anchor(
+        paths,
+        store,
+        trusted_signers=[signer],
+        trusted_config_path=trusted_config_path,
+    )
+
+    assert envelope.algorithm == "Ed25519"
+    assert envelope.issuer == envelope.payload.issuer == signer.issuer
+    assert verification.passed is True
+    assert verification.signed is True
+    assert verification.signer_issuer == signer.issuer
+    assert verification.signer_key_id == signer.key_id
+
+
+def test_signed_anchor_rejects_tampered_payload(tmp_repo: Path):
+    paths, store, envelope, trusted_config_path, signer = _publish_signed_anchor(tmp_repo)
+    store.write(
+        envelope.model_copy(
+            update={
+                "payload": envelope.payload.model_copy(
+                    update={"ledger_head_hash": "f" * 64}
+                )
+            }
+        )
+    )
+
+    verification = trust_anchor.verify_current_signed_anchor(
+        paths,
+        store,
+        trusted_signers=[signer],
+        trusted_config_path=trusted_config_path,
+    )
+
+    assert verification.passed is False
+    assert verification.signed is False
+    assert any("signature" in issue for issue in verification.issues)
+
+
+def test_signed_anchor_rejects_tampered_signature(tmp_repo: Path):
+    paths, store, envelope, trusted_config_path, signer = _publish_signed_anchor(tmp_repo)
+    replacement = ("A" if envelope.signature[0] != "A" else "B") + envelope.signature[1:]
+    store.write(envelope.model_copy(update={"signature": replacement}))
+
+    verification = trust_anchor.verify_current_signed_anchor(
+        paths,
+        store,
+        trusted_signers=[signer],
+        trusted_config_path=trusted_config_path,
+    )
+
+    assert verification.passed is False
+    assert any("signature" in issue for issue in verification.issues)
+
+
+def test_signed_anchor_rejects_unknown_signer(tmp_repo: Path):
+    paths, store, _envelope, trusted_config_path, signer = _publish_signed_anchor(tmp_repo)
+    unknown = signer.model_copy(update={"key_id": "unknown-key"})
+
+    verification = trust_anchor.verify_current_signed_anchor(
+        paths,
+        store,
+        trusted_signers=[unknown],
+        trusted_config_path=trusted_config_path,
+    )
+
+    assert verification.passed is False
+    assert any("not trusted" in issue for issue in verification.issues)
+
+
+def test_signed_anchor_rejects_wrong_public_key(tmp_repo: Path):
+    paths, store, _envelope, trusted_config_path, signer = _publish_signed_anchor(tmp_repo)
+    public_key_path = trusted_config_path.parent / signer.public_key_path
+    public_key_path.write_text(OTHER_PUBLIC_KEY_PEM, encoding="ascii")
+
+    verification = trust_anchor.verify_current_signed_anchor(
+        paths,
+        store,
+        trusted_signers=[signer],
+        trusted_config_path=trusted_config_path,
+    )
+
+    assert verification.passed is False
+    assert any("signature" in issue for issue in verification.issues)
+
+
+def test_signed_anchor_rejects_unsupported_algorithm(tmp_repo: Path):
+    paths, store, envelope, trusted_config_path, signer = _publish_signed_anchor(tmp_repo)
+    payload = envelope.model_dump(mode="python")
+    payload["algorithm"] = "RSA"
+    store.path.write_text(json.dumps(payload), encoding="utf-8")
+
+    verification = trust_anchor.verify_current_signed_anchor(
+        paths,
+        store,
+        trusted_signers=[signer],
+        trusted_config_path=trusted_config_path,
+    )
+
+    assert verification.passed is False
+    assert any("anchor" in issue.lower() for issue in verification.issues)
+
+
+def test_signed_anchor_envelope_rejects_unknown_schema_version(tmp_repo: Path):
+    _paths, _store, envelope, _trusted_config_path, _signer = _publish_signed_anchor(tmp_repo)
+    payload = envelope.model_dump(mode="python")
+    payload["schema_version"] = 2
+
+    with pytest.raises(ValueError, match="schema_version"):
+        trust_anchor.SignedTrustAnchorEnvelope.model_validate(payload)
+
+
+def test_signed_anchor_rejects_stale_ledger_head(tmp_repo: Path):
+    paths, store, _envelope, trusted_config_path, signer = _publish_signed_anchor(tmp_repo)
+    Ledger(paths.ledger).append({"type": "checkpoint", "repo_head": "a" * 40})
+
+    verification = trust_anchor.verify_current_signed_anchor(
+        paths,
+        store,
+        trusted_signers=[signer],
+        trusted_config_path=trusted_config_path,
+    )
+
+    assert verification.passed is False
+    assert verification.signed is True
+    assert any("ledger head" in issue for issue in verification.issues)
+
+
+def test_signed_anchor_refuses_private_key_inside_agos(tmp_repo: Path):
+    _task, paths = _write_active_task(tmp_repo)
+    private_key_path = paths.agos_dir / "private.pem"
+    private_key_path.write_text(PRIVATE_KEY_PEM, encoding="ascii")
+    store_type = getattr(trust_anchor, "SignedFileTrustAnchorStore", None)
+    assert store_type is not None
+
+    with pytest.raises(ValueError, match="private key must be outside .agos"):
+        trust_anchor.publish_current_signed_anchor(
+            paths,
+            store_type(paths.evidence / "signed-anchor.json"),
+            issuer="protected-ci",
+            key_id="ci-2026",
+            private_key_path=private_key_path,
+        )
+
+
+def test_signed_anchor_refuses_private_key_symlink_inside_agos(tmp_repo: Path):
+    _task, paths = _write_active_task(tmp_repo)
+    external_private_key = tmp_repo.parent / "external-private.pem"
+    external_private_key.write_text(PRIVATE_KEY_PEM, encoding="ascii")
+    symlink_path = paths.agos_dir / "private-link.pem"
+    symlink_path.symlink_to(external_private_key)
+
+    with pytest.raises(ValueError, match="private key must be outside .agos"):
+        trust_anchor.publish_current_signed_anchor(
+            paths,
+            trust_anchor.SignedFileTrustAnchorStore(paths.evidence / "signed-anchor.json"),
+            issuer="protected-ci",
+            key_id="ci-2026",
+            private_key_path=symlink_path,
+        )
 
 
 def test_verify_current_anchor_rejects_stale_ledger_head(monkeypatch: pytest.MonkeyPatch, tmp_repo: Path):
