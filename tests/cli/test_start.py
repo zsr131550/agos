@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from types import SimpleNamespace
 
+from rich.text import Text
 import yaml
 from typer.testing import CliRunner
 
@@ -65,10 +66,11 @@ def _candidate_result(**updates) -> TaskExecutionResult:
 
 def test_start_help_exposes_mode_and_json() -> None:
     result = runner.invoke(app, ["start", "--help"])
+    help_text = Text.from_ansi(result.stdout).plain
 
     assert result.exit_code == 0
-    assert "--mode" in result.stdout
-    assert "--json" in result.stdout
+    assert "--mode" in help_text
+    assert "--json" in help_text
 
 
 def test_start_candidate_json_is_normalized(monkeypatch, tmp_repo) -> None:
