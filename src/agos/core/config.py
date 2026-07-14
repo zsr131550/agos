@@ -8,6 +8,7 @@ import yaml
 from pydantic import BaseModel, Field, model_validator
 
 from agos.core.review import ReviewSeverity
+from agos.core.task_execution import TaskExecutionConfig
 
 GateType = Literal["secret_scan", "opa", "semgrep", "trufflehog", "codeql"]
 TrustAnchorBackend = Literal["file", "git-ref"]
@@ -170,6 +171,7 @@ class AGOSConfig(BaseModel):
     reviewers: dict[str, ReviewerConfig] = Field(default_factory=dict)
     allow_fake_reviewer: bool = False
     orchestration: OrchestrationConfig = Field(default_factory=OrchestrationConfig)
+    task_execution: TaskExecutionConfig = Field(default_factory=TaskExecutionConfig)
     trust_anchor: TrustAnchorConfig = Field(default_factory=TrustAnchorConfig)
     merge_gate: MergeGateConfig = Field(default_factory=MergeGateConfig)
 
@@ -266,4 +268,3 @@ def resolve_gates(
     if missing:
         raise KeyError(f"override gates not in workflow {workflow!r}: {missing}")
     return [by_id[gate_id].model_copy(deep=True) for gate_id in override]
-

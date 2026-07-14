@@ -7,6 +7,8 @@ import yaml
 from pydantic import BaseModel, Field, field_validator
 from ulid import ULID
 
+from agos.core.task_execution import ExecutionMode, OutputContract
+
 
 class ExecutorBinding(BaseModel):
     """Which executor adapter and agent the task is bound to."""
@@ -25,6 +27,8 @@ class Task(BaseModel):
     workflow: str = "feature"
     gates: list[str] = Field(default_factory=list)
     executor: ExecutorBinding
+    execution_mode: ExecutionMode | None = None
+    output_contract: OutputContract | None = None
 
     @field_validator("title")
     @classmethod
@@ -56,7 +60,7 @@ def save_task(task: Task, path: Path) -> None:
     """Write `task.yaml` in a stable, human-readable form."""
 
     path.parent.mkdir(parents=True, exist_ok=True)
-    data = task.model_dump()
+    data = task.model_dump(exclude_none=True)
     path.write_text(
         yaml.safe_dump(data, sort_keys=False, allow_unicode=True),
         encoding="utf-8",
