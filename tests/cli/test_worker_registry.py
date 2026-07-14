@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import sys
+
 import yaml
 
 from agos.cli.worker_registry import register_configured_worker_adapters
@@ -62,6 +64,39 @@ def test_register_configured_worker_adapters_defaults_to_local_worktree(tmp_repo
     register_configured_worker_adapters(service)
 
     assert service.worker_adapter_names() == ["local_worktree"]
+
+
+def test_worker_registry_registers_explicit_command_worker(tmp_repo):
+    paths = repo_paths(tmp_repo)
+    paths.agos_dir.mkdir(parents=True, exist_ok=True)
+    argv = [sys.executable, "-c", "print('offline')"]
+    paths.agos_yaml.write_text(
+        yaml.safe_dump(
+            {
+                "executor": {"name": "multica", "agent": "Lambda"},
+                "workers": {
+                    "offline": {
+                        "type": "command",
+                        "argv": argv,
+                        "timeout_seconds": 17,
+                        "env": {"AGOS_OFFLINE": "1"},
+                    }
+                },
+                "workflows": {},
+            },
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+    service = ExecutionService(paths)
+
+    register_configured_worker_adapters(service)
+
+    adapter = service._worker_adapters["offline"]
+    assert adapter.argv == tuple(argv)
+    assert adapter.timeout_seconds == 17
+    assert adapter.env == {"AGOS_OFFLINE": "1"}
+    assert adapter.workspace_manager is service.workspace_manager
 
 
 def test_worker_registry_passes_runtime_fields(tmp_repo):

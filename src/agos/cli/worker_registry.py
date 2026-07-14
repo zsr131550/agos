@@ -4,6 +4,7 @@ from __future__ import annotations
 from agos.adapters.workers import (
     ClaudeWorkerAdapter,
     CodexWorkerAdapter,
+    CommandWorkerAdapter,
     LocalWorktreeWorkerAdapter,
     MulticaWorkerAdapter,
     OpenHandsWorkerAdapter,
@@ -21,6 +22,16 @@ def register_configured_worker_adapters(service: ExecutionService) -> None:
         if worker.type == "local_worktree":
             service.register_worker_adapter(
                 LocalWorktreeWorkerAdapter(service.workspace_manager, name=name)
+            )
+        elif worker.type == "command":
+            service.register_worker_adapter(
+                CommandWorkerAdapter(
+                    name=name,
+                    argv=worker.argv or [],
+                    workspace_manager=service.workspace_manager,
+                    timeout_seconds=worker.timeout_seconds,
+                    env=worker.env,
+                )
             )
         elif worker.type == "codex_cli":
             service.register_worker_adapter(
@@ -82,4 +93,3 @@ def register_configured_worker_adapters(service: ExecutionService) -> None:
             )
         else:
             raise ValueError(f"unsupported worker adapter type: {worker.type}")
-

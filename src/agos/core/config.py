@@ -55,6 +55,7 @@ class WorkerConfig(BaseModel):
 
     type: str
     command: str | None = None
+    argv: list[str] | None = None
     agent: str | None = None
     endpoint: str | None = None
     token: str | None = None
@@ -73,6 +74,14 @@ class WorkerConfig(BaseModel):
     # claude_code-only: reserved for follow-up `--resume` turns on completion.
     # Default off because each resumed turn incurs real cost; see P1-2.
     claude_resume_on_complete: bool = Field(default=False)
+
+    @model_validator(mode="after")
+    def _validate_command_argv(self) -> "WorkerConfig":
+        if self.type == "command" and (
+            not self.argv or any(not item.strip() for item in self.argv)
+        ):
+            raise ValueError("command worker argv must contain non-empty strings")
+        return self
 
 
 class ReviewerConfig(BaseModel):
