@@ -28,7 +28,7 @@ from agos.core.merge_gate_provenance import (
 )
 from agos.core.repo import AgosPaths
 from agos.core.review import ReviewReport
-from agos.core.status import load_status
+from agos.core.status import read_status_cache as load_status
 from agos.core.task import Task, load_task
 from agos.core.trust_anchor import (
     TrustAnchorPayload,

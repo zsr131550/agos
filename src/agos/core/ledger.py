@@ -112,6 +112,13 @@ class Ledger:
 
         return self._records()
 
+    def read_verified(self) -> list[dict]:
+        """Return one complete ledger snapshot after verifying its hash chain."""
+
+        records = self._records()
+        self._verify_records(records)
+        return records
+
     def head_hash(self) -> str:
         """Return the last record hash, or an empty string when empty."""
 
@@ -147,9 +154,13 @@ class Ledger:
     def verify_chain(self) -> None:
         """Recompute every hash from line 1 and raise on any mismatch."""
 
+        self._verify_records(self._records())
+
+    @staticmethod
+    def _verify_records(records: list[dict]) -> None:
         prev_hash = ""
         expected_seq = 1
-        for line_no, record in enumerate(self._records(), start=1):
+        for line_no, record in enumerate(records, start=1):
             if record.get("prev_hash") != prev_hash:
                 raise LedgerTamperError(
                     f"record {line_no}: prev_hash mismatch "

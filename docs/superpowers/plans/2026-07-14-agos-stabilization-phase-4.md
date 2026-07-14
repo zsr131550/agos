@@ -100,7 +100,7 @@ git commit -m "fix: serialize durable ledger appends"
 - A missing, invalid, or stale cache is rebuilt from a verified ledger and saved atomically.
 - Replay restores executor dispatch, checkpoint sequence, gate states, Dashboard phases, and terminal task state.
 
-- [ ] **Step 1: Add failing replay tests**
+- [x] **Step 1: Add failing replay tests**
 
 Cover these independent cases:
 
@@ -147,7 +147,7 @@ def test_load_status_rebuilds_missing_cache_from_legacy_events(tmp_repo):
 
 Also assert an invalid cache is repaired, a current old cache is returned without rewriting, and a tampered ledger raises `LedgerTamperError` without replacing the cache.
 
-- [ ] **Step 2: Verify RED**
+- [x] **Step 2: Verify RED**
 
 ```bash
 .venv/bin/python -m pytest tests/core/test_status.py tests/cli/test_status_command.py -q
@@ -155,7 +155,7 @@ Also assert an invalid cache is repaired, a current old cache is returned withou
 
 Expected: FAIL because `load_status()` currently trusts the cache and `derive_status()` always selects `executing`.
 
-- [ ] **Step 3: Implement deterministic event replay**
+- [x] **Step 3: Implement deterministic event replay**
 
 Replay rules, in ledger order:
 
@@ -169,7 +169,7 @@ Replay rules, in ledger order:
 
 Initialize configured gates from `task.gates`. Use cached executor/gate values only as a compatibility fallback when old ledgers lack the corresponding historical event. Verify the full chain before using it, set the actual ledger head, and repair through existing `save_status()`.
 
-- [ ] **Step 4: Verify and commit**
+- [x] **Step 4: Verify and commit**
 
 ```bash
 .venv/bin/python -m pytest tests/core/test_status.py tests/cli/test_status_command.py \
