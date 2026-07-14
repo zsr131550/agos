@@ -27,6 +27,7 @@ from agos.core.review_store import ReviewStore
 from agos.core.status import TaskStatus, load_status, save_status
 from agos.core.task import ExecutorBinding, Task, load_task, save_task
 from agos.core.task_execution import TaskExecutionResult
+from agos.core.task_execution_service import TaskExecutionError
 from agos.web.api import (
     DashboardApiError,
     archive_current_task_payload,
@@ -528,9 +529,15 @@ def test_current_task_lifecycle_payloads_dispatch_executor_runs(
     ]
 
 
+@pytest.mark.parametrize(
+    ("execution_state", "expected_phase"),
+    [("completed", "done"), ("running", "executing")],
+)
 def test_candidate_resume_never_dispatches_legacy_executor(
     dashboard_repo: Path,
     monkeypatch,
+    execution_state: str,
+    expected_phase: str,
 ) -> None:
     paths = repo_paths(dashboard_repo)
     task = load_task(paths.task_yaml).model_copy(
@@ -541,7 +548,7 @@ def test_candidate_resume_never_dispatches_legacy_executor(
         task_id=task.id,
         mode="candidate",
         run_id="candidate-run-resumed",
-        state="completed",
+        state=execution_state,
         candidate_ids=["candidate-01"],
         applied_candidate_ids=["candidate-01"],
     )
@@ -569,6 +576,7 @@ def test_candidate_resume_never_dispatches_legacy_executor(
     assert calls == ["resume"]
     assert payload["execution_result"]["mode"] == "candidate"
     assert payload["run_id"] == "candidate-run-resumed"
+    assert payload["run"]["phase"] == expected_phase
 
 
 def test_completed_candidate_restart_returns_structured_error(
@@ -605,6 +613,58 @@ def test_completed_candidate_restart_returns_structured_error(
 
     assert err.value.code == "candidate_restart_unsupported"
     assert "completed" in err.value.message
+
+
+def test_candidate_restart_reports_missing_persisted_execution_state(
+    dashboard_repo: Path,
+    monkeypatch,
+) -> None:
+    paths = repo_paths(dashboard_repo)
+    task = load_task(paths.task_yaml).model_copy(
+        update={"execution_mode": "candidate", "output_contract": "source_code"}
+    )
+    save_task(task, paths.task_yaml)
+
+    class FakeService:
+        def load_result(self):
+            raise TaskExecutionError("active task execution result is missing")
+
+    monkeypatch.setattr(
+        "agos.web.api.build_task_execution_service",
+        lambda _root: FakeService(),
+    )
+
+    with pytest.raises(DashboardApiError) as err:
+        restart_current_task_payload(dashboard_repo)
+
+    assert err.value.code == "candidate_state_missing"
+    assert "execution result is missing" in err.value.message
+
+
+def test_candidate_resume_reports_pipeline_failure(
+    dashboard_repo: Path,
+    monkeypatch,
+) -> None:
+    paths = repo_paths(dashboard_repo)
+    task = load_task(paths.task_yaml).model_copy(
+        update={"execution_mode": "candidate", "output_contract": "source_code"}
+    )
+    save_task(task, paths.task_yaml)
+
+    class FakeService:
+        def resume_candidate(self):
+            raise TaskExecutionError("candidate pipeline unavailable")
+
+    monkeypatch.setattr(
+        "agos.web.api.build_task_execution_service",
+        lambda _root: FakeService(),
+    )
+
+    with pytest.raises(DashboardApiError) as err:
+        resume_current_task_payload(dashboard_repo)
+
+    assert err.value.code == "candidate_resume_failed"
+    assert "pipeline unavailable" in err.value.message
 
 
 def test_start_run_payload_can_replace_active_task(dashboard_repo: Path, monkeypatch) -> None:

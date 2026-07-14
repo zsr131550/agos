@@ -2,6 +2,9 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+from pydantic import ValidationError
+
 from agos.core.config import AGOSConfig
 from agos.core.task import ExecutorBinding, Task, load_task
 from agos.core.task_execution import (
@@ -110,3 +113,8 @@ def test_normalized_result_has_stable_fields() -> None:
 
 def test_task_execution_request_does_not_expose_unguarded_apply_switch() -> None:
     assert "apply" not in TaskExecutionRequest.model_fields
+
+
+def test_task_execution_request_rejects_blank_title() -> None:
+    with pytest.raises(ValidationError, match="title must be non-empty"):
+        TaskExecutionRequest(title="   ")

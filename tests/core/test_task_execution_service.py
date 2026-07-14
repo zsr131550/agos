@@ -267,3 +267,61 @@ def test_candidate_resume_passes_persisted_run_id_to_runner(tmp_repo: Path) -> N
     assert calls == [None, started.run_id]
     assert resumed.state == "completed"
     assert resumed.applied_candidate_ids == ["candidate-01"]
+
+
+def test_candidate_resume_rejects_legacy_task(tmp_repo: Path) -> None:
+    _write_config(tmp_repo, mode="legacy")
+    service = _service(tmp_repo)
+    service.start(TaskExecutionRequest(title="Legacy task"))
+
+    with pytest.raises(TaskExecutionError, match="not a candidate-mode execution"):
+        service.resume_candidate()
+
+
+def test_completed_candidate_resume_returns_persisted_result_without_rerun(
+    tmp_repo: Path,
+) -> None:
+    _write_config(tmp_repo, mode="candidate", candidate_ready=True)
+    calls: list[str | None] = []
+
+    def candidate_runner(_paths, resume_run_id):
+        calls.append(resume_run_id)
+        return _auto_result()
+
+    service = _service(tmp_repo, candidate_runner=candidate_runner)
+    started = service.start(TaskExecutionRequest(title="Completed candidate"))
+
+    resumed = service.resume_candidate()
+
+    assert resumed == started
+    assert calls == [None]
+
+
+def test_candidate_resume_exception_preserves_run_id_and_failed_evidence(
+    tmp_repo: Path,
+) -> None:
+    _write_config(tmp_repo, mode="candidate", candidate_ready=True)
+
+    def candidate_runner(_paths, resume_run_id):
+        if resume_run_id is None:
+            return _auto_result(
+                run_state="stuck",
+                candidate_ids=[],
+                accepted_candidate_ids=[],
+                applied_candidate_ids=[],
+                blocked_stage="execution",
+                blocked_reason="polling budget exhausted",
+            )
+        raise RuntimeError("resume pipeline exploded")
+
+    service = _service(tmp_repo, candidate_runner=candidate_runner)
+    started = service.start(TaskExecutionRequest(title="Resume failure"))
+
+    with pytest.raises(TaskExecutionError, match="resume pipeline exploded"):
+        service.resume_candidate()
+
+    persisted = service.load_result()
+    assert persisted.run_id == started.run_id
+    assert persisted.state == "failed"
+    assert persisted.blocked_reason == "resume pipeline exploded"
+    assert Ledger(repo_paths(tmp_repo).ledger).read_all()[-1]["resumed"] is True

@@ -5,6 +5,7 @@ import sys
 import pytest
 import yaml
 
+from agos.core.config import AGOSConfig
 from agos.core.execution_pipeline import AutoExecutionResult
 from agos.core.repo import repo_paths
 from agos.core.task import load_task
@@ -79,3 +80,59 @@ def test_registry_readiness_rejects_missing_local_command_before_publish(tmp_rep
         )
 
     assert not repo_paths(tmp_repo).task_yaml.exists()
+
+
+def test_registry_readiness_reports_all_missing_local_cli_commands(
+    monkeypatch,
+    tmp_repo,
+) -> None:
+    from agos.cli.task_execution_registry import candidate_readiness_issues
+
+    config = AGOSConfig.model_validate(
+        {
+            "executor": {"agent": "unused"},
+            "workers": {
+                "codex_worker": {"type": "codex_cli"},
+                "claude_worker": {"type": "claude_code"},
+                "multica_worker": {"type": "multica"},
+            },
+            "reviewers": {
+                "codex_review": {"type": "codex_cli", "role": "reviewer"},
+                "claude_review": {"type": "claude_code", "role": "reviewer"},
+            },
+            "orchestration": {
+                "planner": {"enabled": True, "executor": "claude_code"}
+            },
+        }
+    )
+    monkeypatch.setattr("agos.cli.task_execution_registry.shutil.which", lambda _command: None)
+
+    issues = candidate_readiness_issues(config, tmp_repo)
+
+    assert issues == [
+        "worker codex_worker command not found: codex",
+        "worker claude_worker command not found: claude",
+        "worker multica_worker command not found: multica",
+        "reviewer codex_review command not found: codex",
+        "reviewer claude_review command not found: claude",
+        "planner command not found: claude",
+    ]
+
+
+def test_registry_readiness_accepts_executable_relative_to_repo(tmp_repo) -> None:
+    from agos.cli.task_execution_registry import candidate_readiness_issues
+
+    executable = tmp_repo / "tools" / "offline-worker"
+    executable.parent.mkdir()
+    executable.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    executable.chmod(0o755)
+    config = AGOSConfig.model_validate(
+        {
+            "executor": {"agent": "unused"},
+            "workers": {
+                "offline": {"type": "command", "argv": ["tools/offline-worker"]}
+            },
+        }
+    )
+
+    assert candidate_readiness_issues(config, tmp_repo) == []
