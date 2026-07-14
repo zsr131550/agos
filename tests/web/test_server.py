@@ -303,6 +303,7 @@ def test_dashboard_server_post_runs_starts_task(tmp_repo, monkeypatch) -> None:
     assert payload["run"]["workflow"] == "feature"
     assert payload["run"]["executor_run"]["run_id"] == "task-web-1"
     assert payload["issue_id"] == "AGO-WEB-1"
+    assert payload["execution_result"]["mode"] == "legacy"
 
     task_data = yaml.safe_load(
         (tmp_repo / ".agos" / "tasks" / "current" / "task.yaml").read_text(encoding="utf-8")
@@ -310,6 +311,24 @@ def test_dashboard_server_post_runs_starts_task(tmp_repo, monkeypatch) -> None:
     assert task_data["title"] == "Ship dashboard input"
     assert task_data["intent"] == "Create tasks from the local dashboard"
     assert task_data["gates"] == ["tests_pass"]
+
+
+def test_dashboard_server_rejects_unknown_execution_mode_without_task(tmp_repo) -> None:
+    write_dashboard_config(tmp_repo)
+
+    with running_dashboard_server(tmp_repo) as server:
+        request = urllib.request.Request(
+            f"http://127.0.0.1:{server.server_port}/api/runs",
+            data=json.dumps({"title": "Invalid mode", "mode": "unknown"}).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        status, payload = read_json_request_error(request)
+
+    assert status == 400
+    assert payload["error"]["code"] == "invalid_request"
+    assert "mode" in payload["error"]["message"]
+    assert not (tmp_repo / ".agos" / "tasks" / "current" / "task.yaml").exists()
 
 
 def test_dashboard_server_post_runs_can_replace_active_task(tmp_repo, monkeypatch) -> None:

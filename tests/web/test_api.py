@@ -25,7 +25,8 @@ from agos.core.repo import repo_paths, task_paths
 from agos.core.review import ReviewPacket, ReviewReport
 from agos.core.review_store import ReviewStore
 from agos.core.status import TaskStatus, load_status, save_status
-from agos.core.task import ExecutorBinding, Task, save_task
+from agos.core.task import ExecutorBinding, Task, load_task, save_task
+from agos.core.task_execution import TaskExecutionResult
 from agos.web.api import (
     DashboardApiError,
     archive_current_task_payload,
@@ -158,6 +159,70 @@ def test_start_run_payload_uses_selected_task_agent(tmp_repo: Path, monkeypatch)
     }
     task = yaml.safe_load(paths.task_yaml.read_text(encoding="utf-8"))
     assert task["executor"] == {"adapter": "codex_cli", "agent": "codex_local"}
+
+
+def test_dashboard_start_passes_candidate_mode_to_service(monkeypatch, tmp_repo: Path) -> None:
+    paths = repo_paths(tmp_repo)
+    paths.agos_dir.mkdir(parents=True, exist_ok=True)
+    AGOSConfig.default(agent="Lambda").save(paths.agos_yaml)
+    captured = {}
+    execution_result = TaskExecutionResult(
+        task_id="agos-candidate-01",
+        mode="candidate",
+        run_id="candidate-run-01",
+        state="completed",
+        candidate_ids=["candidate-01"],
+        applied_candidate_ids=["candidate-01"],
+    )
+
+    class FakeService:
+        def start(self, request):
+            captured["request"] = request
+            return execution_result
+
+    monkeypatch.setattr(
+        "agos.web.api.build_task_execution_service",
+        lambda _root: FakeService(),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        "agos.web.api.current_run_payload",
+        lambda _root: {"run": {"id": execution_result.task_id, "mode": "candidate"}},
+    )
+
+    payload = start_run_payload(
+        tmp_repo,
+        {"title": "Candidate change", "mode": "candidate"},
+    )
+
+    assert captured["request"].mode == "candidate"
+    assert payload["run_id"] == "candidate-run-01"
+    assert payload["execution_result"] == execution_result.model_dump(mode="json")
+
+
+def test_dashboard_rejects_unknown_mode_without_state(tmp_repo: Path) -> None:
+    paths = repo_paths(tmp_repo)
+    paths.agos_dir.mkdir(parents=True, exist_ok=True)
+    AGOSConfig.default(agent="Lambda").save(paths.agos_yaml)
+
+    with pytest.raises(DashboardApiError, match="mode") as err:
+        start_run_payload(tmp_repo, {"title": "Invalid mode", "mode": "unknown"})
+
+    assert err.value.code == "invalid_request"
+    assert not paths.task_yaml.exists()
+
+
+def test_dashboard_preserves_invalid_workflow_error_without_state(tmp_repo: Path) -> None:
+    paths = repo_paths(tmp_repo)
+    paths.agos_dir.mkdir(parents=True, exist_ok=True)
+    AGOSConfig.default(agent="Lambda").save(paths.agos_yaml)
+
+    with pytest.raises(DashboardApiError) as err:
+        start_run_payload(tmp_repo, {"title": "Invalid workflow", "workflow": "missing"})
+
+    assert err.value.code == "invalid_workflow"
+    assert "unknown workflow" in err.value.message
+    assert not paths.task_yaml.exists()
 
 
 def test_archive_current_task_payload_moves_active_task_to_archive(dashboard_repo: Path) -> None:
@@ -463,6 +528,85 @@ def test_current_task_lifecycle_payloads_dispatch_executor_runs(
     ]
 
 
+def test_candidate_resume_never_dispatches_legacy_executor(
+    dashboard_repo: Path,
+    monkeypatch,
+) -> None:
+    paths = repo_paths(dashboard_repo)
+    task = load_task(paths.task_yaml).model_copy(
+        update={"execution_mode": "candidate", "output_contract": "source_code"}
+    )
+    save_task(task, paths.task_yaml)
+    result = TaskExecutionResult(
+        task_id=task.id,
+        mode="candidate",
+        run_id="candidate-run-resumed",
+        state="completed",
+        candidate_ids=["candidate-01"],
+        applied_candidate_ids=["candidate-01"],
+    )
+    calls = []
+
+    class FakeService:
+        def resume_candidate(self):
+            calls.append("resume")
+            return result
+
+    monkeypatch.setattr(
+        "agos.web.api.build_task_execution_service",
+        lambda _root: FakeService(),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        "agos.cli.executor_registry.CodexCliExecutorAdapter.start",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("legacy executor must not be dispatched")
+        ),
+    )
+
+    payload = resume_current_task_payload(dashboard_repo)
+
+    assert calls == ["resume"]
+    assert payload["execution_result"]["mode"] == "candidate"
+    assert payload["run_id"] == "candidate-run-resumed"
+
+
+def test_completed_candidate_restart_returns_structured_error(
+    dashboard_repo: Path,
+    monkeypatch,
+) -> None:
+    paths = repo_paths(dashboard_repo)
+    task = load_task(paths.task_yaml).model_copy(
+        update={"execution_mode": "candidate", "output_contract": "source_code"}
+    )
+    save_task(task, paths.task_yaml)
+    completed = TaskExecutionResult(
+        task_id=task.id,
+        mode="candidate",
+        run_id="candidate-run-complete",
+        state="completed",
+    )
+
+    class FakeService:
+        def load_result(self):
+            return completed
+
+        def resume_candidate(self):
+            raise AssertionError("completed candidate must not restart")
+
+    monkeypatch.setattr(
+        "agos.web.api.build_task_execution_service",
+        lambda _root: FakeService(),
+        raising=False,
+    )
+
+    with pytest.raises(DashboardApiError) as err:
+        restart_current_task_payload(dashboard_repo)
+
+    assert err.value.code == "candidate_restart_unsupported"
+    assert "completed" in err.value.message
+
+
 def test_start_run_payload_can_replace_active_task(dashboard_repo: Path, monkeypatch) -> None:
     paths = repo_paths(dashboard_repo)
     captured = {}
@@ -533,11 +677,13 @@ def test_runs_and_current_run_payloads_include_pipeline_state(dashboard_repo: Pa
             "title": "构建可视化控制台",
             "workflow": "feature",
             "phase": "executing",
+            "mode": "legacy",
             "scope": "current",
         }
     ]
     assert current["run"]["id"] == "agos-dashboard-01"
     assert current["run"]["title"] == "构建可视化控制台"
+    assert current["run"]["mode"] == "legacy"
     assert current["run"]["workflow"] == "feature"
     assert current["run"]["phase"] == "executing"
     assert Path(current["run"]["output_dir"]).parts[-2:] == ("outputs", "agos-dashboard-01")

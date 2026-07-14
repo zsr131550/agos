@@ -38,6 +38,7 @@ def test_dashboard_static_index_is_packaged() -> None:
     assert 'id="new-run-workflow"' in text
     assert 'id="new-run-gates"' in text
     assert 'id="new-run-agent"' in text
+    assert 'id="new-run-mode"' in text
     assert 'id="replace-active-submit"' in text
     assert 'id="continue-active-task"' in text
     assert 'id="archive-active-task"' in text
@@ -72,6 +73,7 @@ def test_dashboard_static_index_is_packaged() -> None:
     assert "\u8fd4\u56de\u7ed9 Agent" in text
     assert "fetchJson('/api/runs', {" in text
     assert "replace_active" in text
+    assert "payload.mode = mode" in text
     assert "fetchJson('/api/runs/current/archive', {" in text
     assert "fetchJson('/api/agents')" in text
     assert "fetchJson('/api/reviews/run', {" in text

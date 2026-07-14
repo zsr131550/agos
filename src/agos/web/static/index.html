@@ -143,6 +143,7 @@
     .grid { display: grid; gap: 12px; }
     .grid.cols-2 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
     .grid.cols-3 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+    .grid.cols-4 { grid-template-columns: repeat(4, minmax(0, 1fr)); }
     .metric { background: var(--panel-soft); border: 1px solid var(--line); border-radius: 16px; padding: 13px; }
     .metric span { display: block; color: var(--muted); font-size: 12px; margin-bottom: 6px; }
     .metric strong { font-size: 18px; overflow-wrap: anywhere; }
@@ -204,12 +205,16 @@
       white-space: pre-wrap;
     }
 
+    @media (max-width: 1200px) {
+      .grid.cols-4 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    }
+
     @media (max-width: 980px) {
       header { position: static; }
       main#app { grid-template-columns: 1fr; }
       aside { position: static; }
       .run-list { max-height: none; }
-      .grid.cols-2, .grid.cols-3, .evidence-layout { grid-template-columns: 1fr; }
+      .grid.cols-2, .grid.cols-3, .grid.cols-4, .evidence-layout { grid-template-columns: 1fr; }
       .topbar { flex-direction: column; }
       .actions { justify-content: flex-start; }
     }
@@ -257,10 +262,17 @@
           <label>任务意图 / 范围
             <textarea id="new-run-intent" name="intent" placeholder="描述要完成的目标、边界和验收标准"></textarea>
           </label>
-          <div class="grid cols-3">
+          <div class="grid cols-4">
             <label>Agent
               <select id="new-run-agent" name="agent">
                 <option value="">正在扫描本地 agent...</option>
+              </select>
+            </label>
+            <label>执行模式
+              <select id="new-run-mode" name="mode">
+                <option value="">配置默认值</option>
+                <option value="legacy">Legacy</option>
+                <option value="candidate">Candidate</option>
               </select>
             </label>
             <label>Workflow
@@ -428,7 +440,9 @@
       const workflow = $('new-run-workflow').value.trim();
       const gates = $('new-run-gates').value.split(',').map((item) => item.trim()).filter(Boolean);
       const agent = $('new-run-agent').value.trim();
+      const mode = $('new-run-mode').value.trim();
       if (agent) payload.agent = agent;
+      if (mode) payload.mode = mode;
       if (workflow) payload.workflow = workflow;
       if (gates.length) payload.gates = gates;
       if (replaceActive) payload.replace_active = true;
@@ -725,7 +739,7 @@
         const archiveAction = run.scope === 'archived' && run.archive_id
           ? `<br><button type="button" data-archive-id="${escapeHtml(run.archive_id)}">继续任务</button>`
           : '';
-        return `<article class="run-card${active}" role="button" tabindex="0" data-run-index="${index}"><strong>${escapeHtml(title)}</strong><small>${statusBadge(phase)} ${run.scope === 'archived' ? statusBadge('archived') : ''}<br>${escapeHtml(run.created_at || run.updated_at || run.path || '')}</small>${archiveAction}</article>`;
+        return `<article class="run-card${active}" role="button" tabindex="0" data-run-index="${index}"><strong>${escapeHtml(title)}</strong><small>${statusBadge(phase)} ${statusBadge(run.mode || 'legacy')} ${run.scope === 'archived' ? statusBadge('archived') : ''}<br>${escapeHtml(run.created_at || run.updated_at || run.path || '')}</small>${archiveAction}</article>`;
       }).join('');
       document.querySelectorAll('[data-run-index]').forEach((button) => {
         button.addEventListener('click', async (event) => {

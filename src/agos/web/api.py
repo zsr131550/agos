@@ -18,10 +18,9 @@ from pydantic import BaseModel
 
 from agos.adapters.local_cli_executor import LocalCliExecutorAdapter
 from agos.adapters.reviewers import LlmCliReviewerAdapter
-from agos.cli.executor_registry import executor_adapter_for
 from agos.cli.cmd_review import run_review
-from agos.cli.cmd_start import StartTaskError, start_task
-from agos.cli.cmd_start import ExecutorSelection
+from agos.cli.executor_registry import executor_adapter_for
+from agos.cli.task_execution_registry import build_task_execution_service
 from agos.core.adapter import ExecutorRun, RunStatus
 from agos.core.config import load_config
 from agos.core.evidence import EvidenceStore
@@ -35,7 +34,13 @@ from agos.core.review_store import ReviewStore
 from agos.core.repo import AgosPaths, git_head, git_status_porcelain, repo_paths, task_paths
 from agos.core.status import TaskStatus, load_status, save_status
 from agos.core.task import Task, load_task, task_output_ref
-from agos.core.task_execution import effective_output_contract
+from agos.core.task_execution import (
+    ExecutorSelection,
+    TaskExecutionRequest,
+    effective_output_contract,
+    effective_task_mode,
+)
+from agos.core.task_execution_service import TaskExecutionError
 from agos.web.evidence import EvidenceResolutionError, read_evidence_text, resolve_evidence_ref
 
 
@@ -152,6 +157,7 @@ def runs_payload(repo_root: Path) -> dict[str, object]:
                 "title": task.title,
                 "workflow": task.workflow,
                 "phase": phase,
+                "mode": effective_task_mode(task),
                 "scope": "current",
             }
         )
@@ -192,6 +198,7 @@ def current_run_payload(repo_root: Path) -> dict[str, object]:
         "title": task.title,
         "workflow": task.workflow,
         "phase": status_phase,
+        "mode": effective_task_mode(task),
         "executor_run": _dump_model(status.executor_run),
         "output_ref": task_output_ref(task),
         "output_dir": str(paths.root / task_output_ref(task)),
@@ -260,30 +267,41 @@ def start_run_payload(repo_root: Path, request_payload: dict[str, Any]) -> dict[
         if not isinstance(workflow, str):
             raise DashboardApiError("invalid_request", "workflow must be a string")
         workflow = workflow.strip() or None
+    mode = _parse_execution_mode(request_payload.get("mode"))
+    gate_overrides = _parse_gate_request(request_payload.get("gates"))
     agent_selection = _resolve_task_agent(paths.root, request_payload.get("agent"))
+    config = load_config(paths.root)
+    try:
+        config.resolve_gates(
+            workflow or config.default_workflow,
+            gate_overrides or None,
+        )
+    except KeyError as exc:
+        raise DashboardApiError("invalid_workflow", str(exc)) from exc
     replace_active = bool(request_payload.get("replace_active"))
     if replace_active:
         archive_current_task_payload(paths.root)
 
     try:
-        _task, run = start_task(
-            repo_root=paths.root,
-            title=title.strip(),
-            intent=intent.strip() if isinstance(intent, str) else None,
-            workflow=workflow,
-            gate_overrides=_parse_gate_request(request_payload.get("gates")),
-            executor_selection=agent_selection,
+        execution_result = build_task_execution_service(paths.root).start(
+            TaskExecutionRequest(
+                title=title.strip(),
+                intent=intent.strip() if isinstance(intent, str) else "",
+                workflow=workflow,
+                gate_overrides=gate_overrides,
+                mode=mode,
+                executor_selection=agent_selection,
+            )
         )
-    except StartTaskError as exc:
+    except TaskExecutionError as exc:
         raise DashboardApiError("start_failed", str(exc)) from exc
-    except KeyError as exc:
-        raise DashboardApiError("invalid_workflow", str(exc)) from exc
 
     current = current_run_payload(paths.root)
     return {
         "ok": True,
-        "run_id": run.run_id,
-        "issue_id": run.issue_id,
+        "run_id": execution_result.run_id,
+        "issue_id": execution_result.issue_id,
+        "execution_result": execution_result.model_dump(mode="json"),
         "run": current["run"],
         "current": current,
     }
@@ -336,11 +354,19 @@ def pause_current_task_payload(repo_root: Path) -> dict[str, object]:
 
 
 def resume_current_task_payload(repo_root: Path) -> dict[str, object]:
-    return _redispatch_current_task_payload(repo_root, "dashboard_resumed")
+    return _resume_or_redispatch_current_task_payload(
+        repo_root,
+        "dashboard_resumed",
+        restart=False,
+    )
 
 
 def restart_current_task_payload(repo_root: Path) -> dict[str, object]:
-    return _redispatch_current_task_payload(repo_root, "dashboard_restarted")
+    return _resume_or_redispatch_current_task_payload(
+        repo_root,
+        "dashboard_restarted",
+        restart=True,
+    )
 
 
 def select_agent_option_payload(repo_root: Path, request_payload: dict[str, Any]) -> dict[str, object]:
@@ -764,6 +790,7 @@ def _archived_task_rows(paths: AgosPaths) -> list[dict[str, object]]:
                 "title": task.title,
                 "workflow": task.workflow,
                 "phase": phase,
+                "mode": effective_task_mode(task),
                 "scope": "archived",
                 "archive_id": archive_dir.name,
                 "path": str(archive_dir),
@@ -844,6 +871,83 @@ def _redispatch_current_task_payload(repo_root: Path, event_type: str) -> dict[s
             "ok": True,
             "run_id": run.run_id,
             "issue_id": run.issue_id,
+            "run": current["run"],
+            "current": current,
+        }
+
+
+def _resume_or_redispatch_current_task_payload(
+    repo_root: Path,
+    event_type: str,
+    *,
+    restart: bool,
+) -> dict[str, object]:
+    paths = _require_initialized(repo_root)
+    with _locked_task_state(paths):
+        task = _load_current_task(paths)
+        if effective_task_mode(task) == "legacy":
+            return _redispatch_current_task_payload(paths.root, event_type)
+        return _resume_candidate_task_payload(paths, task, event_type, restart=restart)
+
+
+def _resume_candidate_task_payload(
+    paths: AgosPaths,
+    task: Task,
+    event_type: str,
+    *,
+    restart: bool,
+) -> dict[str, object]:
+    with _locked_task_state(paths):
+        service = build_task_execution_service(paths.root)
+        if restart:
+            try:
+                previous = service.load_result()
+            except TaskExecutionError as exc:
+                raise DashboardApiError(
+                    "candidate_state_missing",
+                    str(exc),
+                    hint="Inspect the persisted candidate execution state before retrying.",
+                ) from exc
+            if previous.state in {"completed", "failed"}:
+                raise DashboardApiError(
+                    "candidate_restart_unsupported",
+                    f"Candidate execution is already {previous.state} and cannot be restarted safely.",
+                    hint="Archive this task and create a new candidate-mode task.",
+                )
+
+        try:
+            result = service.resume_candidate()
+        except (TaskExecutionError, ValueError) as exc:
+            raise DashboardApiError("candidate_resume_failed", str(exc)) from exc
+
+        phase = (
+            "done"
+            if result.state == "completed"
+            else "executing"
+            if result.state == "running"
+            else "blocked"
+        )
+        record = Ledger(paths.ledger).append(
+            {
+                "type": event_type,
+                "task_id": task.id,
+                "phase": phase,
+                "mode": "candidate",
+                "run_id": result.run_id,
+                "state": result.state,
+            }
+        )
+        status = load_status(paths)
+        if status is not None:
+            status.phase = phase
+            status.ledger_head_hash = str(record["hash"])
+            save_status(status, paths)
+        current = current_run_payload(paths.root)
+        return {
+            "ok": True,
+            "run_id": result.run_id,
+            "issue_id": result.issue_id,
+            "execution_result": result.model_dump(mode="json"),
             "run": current["run"],
             "current": current,
         }
@@ -1207,6 +1311,17 @@ def _parse_gate_request(value: Any) -> list[str]:
                 gates.append(stripped)
         return gates
     raise DashboardApiError("invalid_request", "gates must be a list of strings or comma-separated string")
+
+
+def _parse_execution_mode(value: Any) -> str | None:
+    if value is None or value == "":
+        return None
+    if not isinstance(value, str) or value not in {"legacy", "candidate"}:
+        raise DashboardApiError(
+            "invalid_request",
+            "mode must be one of: legacy, candidate",
+        )
+    return value
 
 
 def _parse_reviewer_request(value: Any) -> list[str]:
