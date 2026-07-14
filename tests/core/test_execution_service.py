@@ -232,6 +232,18 @@ def test_execute_plan_creates_workspaces_and_ledger_events(tmp_repo):
     assert _ledger_types(paths)[-2:] == ["execution_plan_created", "subtask_workspace_created"]
 
 
+def test_submit_candidate_rejects_empty_worker_patch_before_persisting_metadata(tmp_repo):
+    paths = _active_task(tmp_repo)
+    service = _service(tmp_repo)
+    service.execute_plan(_plan_file(tmp_repo))
+
+    with pytest.raises(ValueError, match="candidate patch is empty"):
+        service.submit_candidate("subtask-readme", summary="No repository changes.")
+
+    assert ExecutionStore(paths).read_candidates() == []
+    assert "candidate_patch_created" not in _ledger_types(paths)
+
+
 def test_start_execution_run_preflights_native_worker_readiness(tmp_repo):
     _active_task(tmp_repo)
     service = _service(tmp_repo)

@@ -383,6 +383,42 @@ def test_apply_requires_explicit_apply_flag(tmp_repo):
     assert (tmp_repo / "README.md").read_text(encoding="utf-8") == "# changed\n"
 
 
+def test_resume_reuses_applied_candidate_without_duplicate_governance_events(tmp_repo):
+    paths = _active_task(tmp_repo)
+    service = _service(tmp_repo)
+    reviewer_adapters, reviewer_specs = _reviewers()
+    first = run_auto_execution(
+        service,
+        apply=True,
+        reviewer_adapters=reviewer_adapters,
+        reviewer_specs=reviewer_specs,
+    )
+    before = Ledger(paths.ledger).read_all()
+
+    resumed = run_auto_execution(
+        service,
+        apply=True,
+        resume_run_id=first.run_id,
+        reviewer_adapters=reviewer_adapters,
+        reviewer_specs=reviewer_specs,
+    )
+    after = Ledger(paths.ledger).read_all()
+
+    assert resumed.run_id == first.run_id
+    assert resumed.candidate_ids == first.candidate_ids
+    assert resumed.accepted_candidate_ids == first.accepted_candidate_ids
+    assert resumed.applied_candidate_ids == first.applied_candidate_ids
+    for event_type in (
+        "candidate_patch_created",
+        "candidate_review_completed",
+        "candidate_decision_recorded",
+        "candidate_applied",
+    ):
+        assert sum(record["type"] == event_type for record in after) == sum(
+            record["type"] == event_type for record in before
+        )
+
+
 def test_submit_candidate_failure_is_reported_without_acceptance(monkeypatch, tmp_repo):
     _active_task(tmp_repo)
     service = _service(tmp_repo)
@@ -544,7 +580,7 @@ def test_run_auto_execution_passes_planner_json_to_plan_creation(monkeypatch, tm
     monkeypatch.setattr(
         execution_pipeline,
         "_run_prepared_plan",
-        lambda _service, plan: ExecutionRuntimeSnapshot(
+        lambda _service, plan, *, run_id=None: ExecutionRuntimeSnapshot(
             run_id="auto-run-01",
             state="completed",
             completed_subtasks=(),
