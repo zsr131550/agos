@@ -30,6 +30,14 @@ def test_repository_contains_complete_mit_license_and_package_metadata() -> None
     assert metadata["project"]["license-files"] == ["LICENSE"]
 
 
+def test_dev_extra_contains_no_isolation_build_backend() -> None:
+    metadata = tomllib.loads((PROJECT_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+
+    build_requirements = set(metadata["build-system"]["requires"])
+    dev_requirements = set(metadata["project"]["optional-dependencies"]["dev"])
+    assert build_requirements <= dev_requirements
+
+
 def test_dependabot_covers_python_and_github_actions_monthly() -> None:
     config = _yaml(PROJECT_ROOT / ".github" / "dependabot.yml")
 

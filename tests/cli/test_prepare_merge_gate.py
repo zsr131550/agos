@@ -5,6 +5,7 @@ import subprocess
 import sys
 from pathlib import Path
 
+from rich.text import Text
 import yaml
 from typer.testing import CliRunner
 
@@ -182,9 +183,10 @@ def test_prepare_merge_gate_fails_closed_when_candidate_gate_fails(monkeypatch, 
 
 def test_prepare_merge_gate_help_is_exposed():
     result = runner.invoke(app, ["prepare-merge-gate", "--help"])
+    help_text = Text.from_ansi(result.stdout).plain
 
     assert result.exit_code == 0
-    assert "--trusted-config" in result.stdout
+    assert "--trusted-config" in help_text
 
 
 def test_prepare_merge_gate_uses_trusted_config_instead_of_subject_config(
