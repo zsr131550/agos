@@ -39,6 +39,7 @@ from agos.core.task_execution import (
     TaskExecutionRequest,
     effective_output_contract,
     effective_task_mode,
+    executor_selection_id,
 )
 from agos.core.task_execution_service import TaskExecutionError
 from agos.web.evidence import EvidenceResolutionError, read_evidence_text, resolve_evidence_ref
@@ -678,29 +679,11 @@ def _executor_selection_for_task(paths: AgosPaths, task: Task) -> ExecutorSelect
             )
         return selection
 
-    matches: list[ExecutorSelection] = []
-    if config.executor.name == task.executor.adapter and config.executor.agent == task.executor.agent:
-        matches.append(
-            ExecutorSelection(
-                adapter=config.executor.name,
-                agent=config.executor.agent,
-                command=config.executor.command,
-                dangerously_bypass_permissions=config.executor.dangerously_bypass_permissions,
-            )
-        )
-    for name, worker in config.workers.items():
-        if worker.type != task.executor.adapter:
-            continue
-        if worker.agent == task.executor.agent or name == task.executor.agent:
-            matches.append(
-                ExecutorSelection(
-                    adapter=worker.type,
-                    agent=worker.agent or name,
-                    command=worker.command,
-                    worker_adapter=name,
-                    dangerously_bypass_permissions=worker.dangerously_bypass_permissions,
-                )
-            )
+    matches = [
+        selection
+        for selection in _task_agent_selections(config).values()
+        if selection.adapter == task.executor.adapter and selection.agent == task.executor.agent
+    ]
     if len(matches) > 1:
         raise DashboardApiError(
             "executor_selection_ambiguous",
@@ -709,7 +692,11 @@ def _executor_selection_for_task(paths: AgosPaths, task: Task) -> ExecutorSelect
         )
     if matches:
         return matches[0]
-    return ExecutorSelection(adapter=task.executor.adapter, agent=task.executor.agent)
+    raise DashboardApiError(
+        "executor_selection_unavailable",
+        "Legacy task executor binding no longer matches a configured or local executor: "
+        f"{task.executor.adapter}:{task.executor.agent}",
+    )
 
 
 def _safe_dashboard_initial_run_status(adapter: object, run: ExecutorRun) -> RunStatus | None:
@@ -1414,7 +1401,7 @@ def _resolve_task_agent(repo_root: Path, value: Any) -> ExecutorSelection | None
 def _task_agent_rows(config) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     seen_ids: set[str] = set()
-    default_id = _executor_agent_id(config.executor.name, config.executor.agent)
+    default_id = executor_selection_id(config.executor.name, config.executor.agent)
     seen_ids.add(default_id)
     rows.append(
         {
@@ -1449,7 +1436,7 @@ def _task_agent_rows(config) -> list[dict[str, Any]]:
 
 
 def _task_agent_selections(config) -> dict[str, ExecutorSelection]:
-    default_id = _executor_agent_id(config.executor.name, config.executor.agent)
+    default_id = executor_selection_id(config.executor.name, config.executor.agent)
     selections = {
         default_id: ExecutorSelection(
             adapter=config.executor.name,
@@ -1616,10 +1603,6 @@ def _run_local_review_agent(paths: AgosPaths, reviewer_id: str) -> dict[str, obj
         "state": result.state,
         "finding_count": len(report.findings),
     }
-
-
-def _executor_agent_id(adapter: str, agent: str) -> str:
-    return f"executor:{adapter}:{agent}"
 
 
 def _command_for_adapter(adapter: str, command: str | None) -> str | None:

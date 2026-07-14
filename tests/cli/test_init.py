@@ -290,7 +290,11 @@ def test_init_interactively_prompts_title_plans_workers_and_auto_starts(monkeypa
     task = yaml.safe_load((tmp_repo / ".agos" / "tasks" / "current" / "task.yaml").read_text(encoding="utf-8"))
     assert task["title"] == "Build interactive init"
     assert task["intent"] == "Ship init/start intent"
-    assert task["executor"] == {"adapter": "codex_cli", "agent": "codex"}
+    assert task["executor"] == {
+        "adapter": "codex_cli",
+        "agent": "codex",
+        "selection_id": "executor:codex_cli:codex",
+    }
     status = json.loads((tmp_repo / ".agos" / "tasks" / "current" / "status.json").read_text(encoding="utf-8"))
     assert status["executor_run"]["run_id"] == "codex-run-1"
 

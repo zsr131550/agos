@@ -65,6 +65,12 @@ class TaskExecutionResult(BaseModel):
     compatibility_warnings: list[str] = Field(default_factory=list)
 
 
+def executor_selection_id(adapter: str, agent: str) -> str:
+    """Return the canonical ID for a configured default executor selection."""
+
+    return f"executor:{adapter}:{agent}"
+
+
 def effective_task_mode(task: Task) -> ExecutionMode:
     """Interpret missing v0.1 mode metadata without rewriting the task."""
 

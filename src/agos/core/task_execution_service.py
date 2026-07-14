@@ -34,6 +34,7 @@ from agos.core.task_execution import (
     TaskExecutionRequest,
     TaskExecutionResult,
     effective_task_mode,
+    executor_selection_id,
 )
 
 
@@ -181,7 +182,14 @@ class TaskExecutionService:
             executor=ExecutorBinding(
                 adapter=selection.adapter if selection else prepared.config.executor.name,
                 agent=selection.agent if selection else prepared.config.executor.agent,
-                selection_id=selection.selection_id if selection else None,
+                selection_id=(
+                    selection.selection_id
+                    if selection
+                    else executor_selection_id(
+                        prepared.config.executor.name,
+                        prepared.config.executor.agent,
+                    )
+                ),
             ),
             execution_mode=prepared.mode,
             output_contract=prepared.config.task_execution.output_contract,
