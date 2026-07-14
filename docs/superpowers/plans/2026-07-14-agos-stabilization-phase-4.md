@@ -455,7 +455,7 @@ git commit -m "ci: add trusted open source release pipeline"
 - Documents lock files, automatic status repair, explicit dangerous permission migration, loopback/remote Dashboard token behavior, and the boundary between patch scope and OS sandboxing.
 - Proves the complete repository from a provider-free, network-free local environment.
 
-- [ ] **Step 1: Write migration and operations documentation**
+- [x] **Step 1: Write migration and operations documentation**
 
 Document:
 
@@ -466,7 +466,7 @@ Document:
 - command workers and fake reviewers remain the deterministic offline test path;
 - write scope validates Git evidence but cannot prevent arbitrary non-Git side effects from a trusted executable.
 
-- [ ] **Step 2: Run focused security/state verification**
+- [x] **Step 2: Run focused security/state verification**
 
 ```bash
 PATH="$PWD/.venv/bin:/usr/bin:/bin:/usr/sbin:/sbin" \
@@ -477,7 +477,7 @@ PYTHONPATH="/Users/zhangrui/.cache/codex-runtimes/codex-primary-runtime/dependen
   tests/packaging/test_wheel_contents.py -q
 ```
 
-- [ ] **Step 3: Run full offline verification**
+- [x] **Step 3: Run full offline verification**
 
 ```bash
 PATH="$PWD/.venv/bin:/usr/bin:/bin:/usr/sbin:/sbin" \
@@ -497,7 +497,7 @@ PYTHONPATH="/Users/zhangrui/.cache/codex-runtimes/codex-primary-runtime/dependen
 .venv/bin/python scripts/verify_release.py --tag v0.1.0 --dist dist
 ```
 
-- [ ] **Step 4: Run isolated wheel smoke and inspect the worktree**
+- [x] **Step 4: Run isolated wheel smoke and inspect the worktree**
 
 Install the wheel with `--no-index --no-deps` into a temporary target, run from outside the checkout with that target first on `PYTHONPATH`, and verify `agos version`, `agos --help`, `agos doctor --help`, and `agos dashboard --help`. Then run:
 
@@ -507,7 +507,7 @@ git diff --check
 git log --oneline --decorate -20
 ```
 
-- [ ] **Step 5: Mark the plan complete and commit docs**
+- [x] **Step 5: Mark the plan complete and commit docs**
 
 ```bash
 git add README.md docs/execution-modes.md docs/state-security.md \

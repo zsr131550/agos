@@ -100,7 +100,7 @@ agos start --title "Governed source change" --mode candidate --json
 
 旧配置没有 `task_execution` 时按 `legacy/legacy` 解释，旧 task YAML 不会被重写。新 Codex/Claude init 默认写入 `candidate/source_code`；无法提供自动 reviewer 的初始化会显式回退 `legacy/legacy` 并打印原因。
 
-完全离线自动化可使用结构化 argv 的 `command` worker 和禁用 planner 的 deterministic fallback。AGOS 不会为 readiness 或 command worker 主动发起网络请求，但被执行的命令本身是否联网仍由该命令决定。完整配置、output contract 和迁移说明见 [`docs/execution-modes.md`](docs/execution-modes.md)。
+完全离线自动化可使用结构化 argv 的 `command` worker 和禁用 planner 的 deterministic fallback。AGOS 不会为 readiness 或 command worker 主动发起网络请求，但被执行的命令本身是否联网仍由该命令决定。完整配置、output contract 和迁移说明见 [`docs/execution-modes.md`](docs/execution-modes.md)；状态恢复、agent 权限和本地安全边界见 [`docs/state-security.md`](docs/state-security.md)。
 
 ---
 
@@ -115,6 +115,7 @@ agos dashboard --port 0 --open
 默认行为：
 
 - 绑定 `127.0.0.1`，不对外暴露。
+- loopback 启动时自动生成临时 token；页面自动使用该 token，所有写请求同时校验 Bearer token 和同源 `Origin`。
 - 支持从页面输入任务标题、意图、execution mode、workflow 和 gate override，创建并启动新的 AGOS task。
 - 独立小游戏、demo 或网页类产物默认要求执行器输出到 `outputs/<task-id>/`，Dashboard 的运行概览会展示该输出目录。
 - 除“创建任务并启动”外，其余控制台区域仍以读取 `.agos/` 状态和 evidence 为主。
@@ -128,6 +129,15 @@ agos dashboard
 agos dashboard --host 127.0.0.1 --port 8788
 agos dashboard --port 0 --no-open
 ```
+
+非 loopback 地址必须显式提供 token，否则 AGOS 会在绑定端口前拒绝启动：
+
+```bash
+export AGOS_DASHBOARD_TOKEN="$(python -c 'import secrets; print(secrets.token_urlsafe(32))')"
+agos dashboard --host 0.0.0.0 --port 8788 --no-open
+```
+
+远程浏览器首次打开 `http://SERVER:8788/#token=TOKEN`。URL fragment 不会发送给服务器；页面会将 token 移入 `sessionStorage` 并从地址栏移除。远程 API 读取也要求该 token。完整边界见 [`docs/state-security.md`](docs/state-security.md)。
 
 如果页面提示尚未初始化，请先运行：
 
@@ -275,6 +285,7 @@ executor:
   name: codex_cli
   agent: codex
   command: codex
+  dangerously_bypass_permissions: false
 
 default_workflow: feature
 
@@ -282,6 +293,7 @@ workers:
   docs_agent:
     type: codex_cli
     command: codex
+    dangerously_bypass_permissions: false
     timeout_seconds: 180
     artifact_globs:
       - .agos-worker/*.json
@@ -1014,9 +1026,13 @@ agos run auto --dry-run --allow-missing-review --json
 ### AGOS 的信任边界是什么？
 
 - `.agos/tasks/current/ledger.jsonl` 是 tamper-evident，不是不可变存储。
+- `status.json` 只是派生 cache；缺失、损坏或落后时会从验证通过的 ledger 自动回放，ledger 篡改则直接失败而不会用其覆盖 cache。
 - trust anchor 把 ledger head 发布到 ledger 外部，用于 CI 验证。
 - file anchor 适合本地和 GitHub artifact；protected git ref 或可信 CI publisher 更适合生产。
+- candidate write scope 只验证 Git patch evidence，不能阻止可信执行器产生 ignored-file、其他目录、进程或网络副作用；Codex/Claude 的 provider sandbox 才承担执行侧限制。
 - AGOS 不能替你配置 GitHub branch protection；你必须单独要求 `merge-gate` status check。
+
+并发写入、cache 恢复、权限迁移和 Dashboard token 的完整运维说明见 [`docs/state-security.md`](docs/state-security.md)。
 
 ---
 

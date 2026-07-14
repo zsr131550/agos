@@ -15,6 +15,9 @@ Existing repositories do not need a migration before upgrading.
 - Human-readable legacy `agos start` output remains the executor issue ID when
   one exists, otherwise the executor run ID.
 - `agos run auto` remains available for dry runs and advanced/manual control.
+- Existing Codex and Claude executor/worker configs that omit
+  `dangerously_bypass_permissions` now select safe, non-interactive provider
+  permissions. Task and `.agos` state compatibility is unchanged.
 
 To make the default explicit:
 
@@ -87,6 +90,36 @@ New Codex CLI and Claude Code initialization selects
 initialization that cannot provide an automatic reviewer, such as a Multica-only
 selection, writes `legacy/legacy` and prints the reason.
 
+## Agent permission migration
+
+Codex and Claude Code adapters now use safe defaults when the compatibility
+field is omitted:
+
+- Codex: `--sandbox workspace-write -c 'approval_policy="never"'`
+- Claude Code: `--safe-mode --permission-mode dontAsk`
+
+Repositories that temporarily require the former unrestricted behavior must
+opt in on each affected executor or worker:
+
+```yaml
+executor:
+  name: codex_cli
+  agent: codex
+  command: codex
+  dangerously_bypass_permissions: true
+
+workers:
+  legacy_claude:
+    type: claude_code
+    command: claude
+    dangerously_bypass_permissions: true
+```
+
+`agos doctor` reports `agent_permissions: warning` with the affected config
+identifiers. This remains a warning for CLI compatibility and does not change
+the doctor exit code. Command workers do not use this field: their argv is
+trusted local code and runs exactly as configured.
+
 ## Deterministic offline command worker
 
 The `command` worker runs an explicit argv list in the isolated worktree. AGOS
@@ -119,7 +152,9 @@ orchestration:
 
 AGOS itself performs no network request in this configuration. The executable
 named in `argv` is still trusted code and may use the network on its own; choose
-an offline command and environment when network isolation is required.
+an offline command and environment when network isolation is required. Candidate
+write scope validates exported Git patch evidence; it is not an operating-system
+sandbox and cannot prevent non-Git side effects from that executable.
 
 ## Reviewer boundary
 
@@ -158,6 +193,17 @@ Legacy resume/restart redispatches its executor as before. Candidate
 resume/restart reuses the persisted candidate runtime and never redispatches the
 legacy executor. A completed or failed candidate cannot be safely restarted in
 place; archive it and create a new task.
+
+Loopback Dashboard startup creates an ephemeral token automatically. Every API
+mutation sends that token as a Bearer credential and must have an `Origin` that
+matches the request host. A non-loopback bind is refused unless `--token` or
+`AGOS_DASHBOARD_TOKEN` supplies an explicit token; remote API reads require it
+as well. Pass the token to a remote page through `#token=...`, which the page
+moves into `sessionStorage` without sending the fragment in the HTTP request.
+
+Ledger locking, automatic `status.json` recovery, Dashboard authentication, and
+the patch-scope/provider-sandbox distinction are documented in
+[`state-security.md`](state-security.md).
 
 ## Migration examples
 
