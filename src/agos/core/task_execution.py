@@ -28,6 +28,7 @@ class ExecutorSelection(BaseModel):
     agent: str
     command: str | None = None
     worker_adapter: str | None = None
+    dangerously_bypass_permissions: bool = False
 
 
 class TaskExecutionRequest(BaseModel):

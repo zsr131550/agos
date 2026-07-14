@@ -27,7 +27,7 @@ from agos.core.provenance import CandidateAttestationPayload, sign_candidate_att
 from agos.core.repo import repo_paths
 from agos.core.review import Finding, ReviewReport
 from agos.core.review_store import ReviewStore
-from agos.core.status import TaskStatus, save_status
+from agos.core.status import TaskStatus, read_status_cache, save_status
 from agos.core.task import ExecutorBinding, Task, save_task
 from agos.core.trust_anchor import (
     FileTrustAnchorStore,
@@ -336,6 +336,9 @@ def test_merge_gate_passes_clean_ledger_without_execution_store(tmp_repo: Path):
     assert result.passed is True
     assert _check(result, "ledger_chain").state == "pass"
     assert _check(result, "candidate_evidence").state == "pass"
+    repaired = read_status_cache(paths)
+    assert repaired is not None
+    assert repaired.ledger_head_hash == Ledger(paths.ledger).head_hash()
 
 
 def test_merge_gate_blocks_tampered_ledger(tmp_repo: Path):
@@ -377,15 +380,38 @@ def test_merge_gate_blocks_when_not_initialized(tmp_repo: Path):
     assert _check(result, "initialized").state == "block"
 
 
-def test_merge_gate_blocks_when_status_is_missing(monkeypatch, tmp_repo: Path):
+def test_merge_gate_repairs_missing_status_cache(tmp_repo: Path):
     _task, paths = _write_active_task(tmp_repo)
-    monkeypatch.setattr("agos.core.merge_gate.load_status", lambda _paths: None)
+    paths.status_json.unlink()
+
+    result = verify_merge_gate(paths)
+
+    assert result.passed is True
+    assert _check(result, "initialized").state == "pass"
+    assert paths.status_json.is_file()
+
+
+def test_merge_gate_repairs_invalid_status_cache(tmp_repo: Path):
+    _task, paths = _write_active_task(tmp_repo)
+    paths.status_json.write_text("{not-json", encoding="utf-8")
+
+    result = verify_merge_gate(paths)
+
+    assert result.passed is True
+    assert _check(result, "initialized").state == "pass"
+    assert read_status_cache(paths) is not None
+
+
+def test_merge_gate_blocks_empty_verified_ledger(tmp_repo: Path):
+    _task, paths = _write_active_task(tmp_repo)
+    paths.ledger.write_text("", encoding="utf-8")
 
     result = verify_merge_gate(paths)
 
     assert result.passed is False
     assert _check(result, "initialized").state == "block"
-    assert "current task status is missing" in _check(result, "initialized").message
+    assert "empty ledger" in _check(result, "initialized").message
+    assert _check(result, "ledger_chain").state == "pass"
 
 
 def test_merge_gate_blocks_when_gates_locked_missing(tmp_repo: Path):

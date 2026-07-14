@@ -34,6 +34,7 @@ def build_task_execution_service(repo_root: Path) -> TaskExecutionService:
                 staging_paths,
                 selection.adapter,
                 command=selection.command,
+                dangerously_bypass_permissions=selection.dangerously_bypass_permissions,
             )
             if selection is not None
             else configured_executor_adapter(staging_paths)

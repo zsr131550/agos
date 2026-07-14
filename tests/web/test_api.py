@@ -133,7 +133,11 @@ def test_start_run_payload_uses_selected_task_agent(tmp_repo: Path, monkeypatch)
         executor="multica",
         agent="Lambda",
         workers={
-            "codex_local": WorkerConfig(type="codex_cli", command="codex"),
+            "codex_local": WorkerConfig(
+                type="codex_cli",
+                command="codex",
+                dangerously_bypass_permissions=True,
+            ),
         },
     ).save(paths.agos_yaml)
     captured = {}
@@ -141,6 +145,7 @@ def test_start_run_payload_uses_selected_task_agent(tmp_repo: Path, monkeypatch)
     def fake_start(self, task):
         captured["adapter"] = self.name
         captured["task_executor"] = task.executor.model_dump()
+        captured["dangerously_bypass_permissions"] = self.dangerously_bypass_permissions
         return ExecutorRun(adapter=self.name, run_id="codex-local-run", issue_id=None)
 
     monkeypatch.setattr("agos.adapters.local_cli_executor.CodexCliExecutorAdapter.start", fake_start)
@@ -157,9 +162,48 @@ def test_start_run_payload_uses_selected_task_agent(tmp_repo: Path, monkeypatch)
     assert captured == {
         "adapter": "codex_cli",
         "task_executor": {"adapter": "codex_cli", "agent": "codex_local"},
+        "dangerously_bypass_permissions": True,
     }
     task = yaml.safe_load(paths.task_yaml.read_text(encoding="utf-8"))
     assert task["executor"] == {"adapter": "codex_cli", "agent": "codex_local"}
+
+
+def test_start_run_payload_preserves_default_executor_permission_mode(
+    tmp_repo: Path,
+    monkeypatch,
+) -> None:
+    paths = repo_paths(tmp_repo)
+    paths.agos_dir.mkdir(parents=True, exist_ok=True)
+    AGOSConfig.model_validate(
+        {
+            "executor": {
+                "name": "codex_cli",
+                "agent": "codex",
+                "command": "codex",
+                "dangerously_bypass_permissions": True,
+            },
+            "default_workflow": "feature",
+            "workflows": {"feature": {"gates": []}},
+        }
+    ).save(paths.agos_yaml)
+    captured = {}
+
+    def fake_start(self, task):
+        captured["dangerously_bypass_permissions"] = self.dangerously_bypass_permissions
+        return ExecutorRun(adapter=self.name, run_id="codex-default-run", issue_id=None)
+
+    monkeypatch.setattr("agos.adapters.local_cli_executor.CodexCliExecutorAdapter.start", fake_start)
+
+    payload = start_run_payload(
+        tmp_repo,
+        {
+            "title": "Use dangerous-compatible default",
+            "agent": "executor:codex_cli:codex",
+        },
+    )
+
+    assert payload["ok"] is True
+    assert captured["dangerously_bypass_permissions"] is True
 
 
 def test_dashboard_start_passes_candidate_mode_to_service(monkeypatch, tmp_repo: Path) -> None:

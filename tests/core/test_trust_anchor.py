@@ -376,7 +376,7 @@ def test_store_from_config_uses_repo_relative_file_path(tmp_repo: Path):
     assert store.path == paths.evidence / "anchors.json"
 
 
-def test_publish_current_anchor_requires_status(tmp_repo: Path):
+def test_publish_current_anchor_repairs_missing_status_cache(tmp_repo: Path):
     paths = repo_paths(tmp_repo)
     paths.agos_dir.mkdir(parents=True, exist_ok=True)
     task = Task(
@@ -387,10 +387,58 @@ def test_publish_current_anchor_requires_status(tmp_repo: Path):
         executor=ExecutorBinding(adapter="multica", agent="Lambda"),
     )
     save_task(task, paths.task_yaml)
-    Ledger(paths.ledger).append({"type": "task_started", "task_id": task.id})
+    started = Ledger(paths.ledger).append({"type": "task_started", "task_id": task.id})
 
-    with pytest.raises(ValueError, match="status"):
-        publish_current_anchor(paths, FileTrustAnchorStore(paths.evidence / "anchor.json"), issuer="CI")
+    anchor = publish_current_anchor(
+        paths,
+        FileTrustAnchorStore(paths.evidence / "anchor.json"),
+        issuer="CI",
+    )
+
+    assert paths.status_json.is_file()
+    assert anchor.ledger_head_hash == started["hash"]
+    assert anchor.ledger_seq == 1
+
+
+def test_publish_current_anchor_uses_one_verified_ledger_snapshot(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_repo: Path,
+):
+    _task, paths = _write_active_task(tmp_repo)
+    records = Ledger(paths.ledger).read_verified()
+    monkeypatch.setattr(Ledger, "head_hash", lambda _self: "f" * 64)
+    monkeypatch.setattr(Ledger, "next_seq", lambda _self: 999)
+
+    anchor = publish_current_anchor(
+        paths,
+        FileTrustAnchorStore(paths.evidence / "anchor.json"),
+        issuer="CI",
+    )
+
+    assert anchor.ledger_head_hash == records[-1]["hash"]
+    assert anchor.ledger_seq == records[-1]["seq"]
+
+
+def test_publish_current_anchor_rejects_task_without_ledger_evidence(tmp_repo: Path):
+    paths = repo_paths(tmp_repo)
+    paths.agos_dir.mkdir(parents=True, exist_ok=True)
+    save_task(
+        Task(
+            id="agos-empty-ledger",
+            title="Missing ledger evidence",
+            workflow="feature",
+            gates=[],
+            executor=ExecutorBinding(adapter="multica", agent="Lambda"),
+        ),
+        paths.task_yaml,
+    )
+
+    with pytest.raises(ValueError, match="status is missing"):
+        publish_current_anchor(
+            paths,
+            FileTrustAnchorStore(paths.evidence / "anchor.json"),
+            issuer="CI",
+        )
 
 
 def test_verify_current_anchor_handles_missing_task_and_tampered_ledger(tmp_repo: Path):

@@ -17,7 +17,7 @@ from agos.core.signing import (
     trusted_public_key_path,
     verify_ed25519,
 )
-from agos.core.status import load_status
+from agos.core.status import load_status_from_verified_records
 from agos.core.task import load_task
 
 
@@ -244,12 +244,12 @@ def verify_current_anchor(
 
     ledger = Ledger(paths.ledger)
     try:
-        ledger.verify_chain()
+        records = ledger.read_verified()
     except Exception as exc:
         issues.append(f"ledger verification failed: {exc}")
         return TrustAnchorVerification(task_id=task.id, passed=False, issues=issues)
 
-    current = _anchor_payload_from_verified_ledger(paths, task.id, ledger)
+    current = _anchor_payload_from_verified_records(paths, task.id, records)
     try:
         anchor = store.read(task.id)
     except Exception as exc:
@@ -279,14 +279,14 @@ def verify_current_signed_anchor(
 
     ledger = Ledger(paths.ledger)
     try:
-        ledger.verify_chain()
+        records = ledger.read_verified()
     except Exception as exc:
         return TrustAnchorVerification(
             task_id=task.id,
             passed=False,
             issues=[f"ledger verification failed: {exc}"],
         )
-    current = _anchor_payload_from_verified_ledger(paths, task.id, ledger)
+    current = _anchor_payload_from_verified_records(paths, task.id, records)
     try:
         envelope = store.read(task.id)
     except Exception as exc:
@@ -319,27 +319,25 @@ def verify_current_signed_anchor(
 
 def _current_anchor_payload(paths: AgosPaths, *, issuer: str) -> TrustAnchorPayload:
     task = load_task(paths.task_yaml)
-    if not paths.status_json.is_file():
-        raise ValueError("current task status is missing")
-    status = load_status(paths)
+    records = Ledger(paths.ledger).read_verified()
+    status = load_status_from_verified_records(paths, task, records)
     if status is None:
         raise ValueError("current task status is missing")
-    ledger = Ledger(paths.ledger)
-    ledger.verify_chain()
-    return _anchor_payload_from_verified_ledger(paths, task.id, ledger, issuer=issuer)
+    return _anchor_payload_from_verified_records(paths, task.id, records, issuer=issuer)
 
 
-def _anchor_payload_from_verified_ledger(
+def _anchor_payload_from_verified_records(
     paths: AgosPaths,
     task_id: str,
-    ledger: Ledger,
+    records: list[dict],
     *,
     issuer: str = "current",
 ) -> TrustAnchorPayload:
+    tail = records[-1] if records else None
     return TrustAnchorPayload(
         task_id=task_id,
-        ledger_head_hash=ledger.head_hash(),
-        ledger_seq=ledger.next_seq() - 1,
+        ledger_head_hash=str(tail["hash"]) if tail is not None else "",
+        ledger_seq=int(tail["seq"]) if tail is not None else 0,
         repo_head=git_head(paths.root),
         created_at=utc_now(),
         issuer=issuer,

@@ -58,13 +58,20 @@ def test_pr_jobs_install_and_configure_only_from_protected_base() -> None:
 
 def test_pr_jobs_exchange_only_subject_task_evidence() -> None:
     workflow, _text = _workflow()
-    prepare_text = _job_text(workflow["jobs"]["agos-prepare"])
+    prepare_job = workflow["jobs"]["agos-prepare"]
+    prepare_text = _job_text(prepare_job)
     merge_text = _job_text(workflow["jobs"]["merge-gate"])
+    upload = next(
+        step
+        for step in prepare_job["steps"]
+        if step.get("uses") == "actions/upload-artifact@v4"
+    )
 
     assert "subject/.agos/tasks/current" in prepare_text
     assert "subject/.agos/tasks/current" in merge_text
     assert "path: .agos/tasks/current" not in prepare_text
     assert "path: .agos/tasks/current" not in merge_text
+    assert upload["with"]["include-hidden-files"] is True
 
 
 def test_pr_merge_gate_jobs_have_no_model_provider_secrets() -> None:

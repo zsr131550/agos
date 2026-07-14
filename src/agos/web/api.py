@@ -1424,6 +1424,7 @@ def _task_agent_selections(config) -> dict[str, ExecutorSelection]:
             adapter=config.executor.name,
             agent=config.executor.agent,
             command=config.executor.command,
+            dangerously_bypass_permissions=config.executor.dangerously_bypass_permissions,
         )
     }
     supported = {"multica", "codex_cli", "claude_code"}
@@ -1434,6 +1435,7 @@ def _task_agent_selections(config) -> dict[str, ExecutorSelection]:
             adapter=worker.type,
             agent=worker.agent or name,
             command=worker.command,
+            dangerously_bypass_permissions=worker.dangerously_bypass_permissions,
         )
     for row in _local_task_agent_rows(config, set(selections)):
         row_id = str(row["id"])

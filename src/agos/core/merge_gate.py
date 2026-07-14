@@ -28,7 +28,10 @@ from agos.core.merge_gate_provenance import (
 )
 from agos.core.repo import AgosPaths
 from agos.core.review import ReviewReport
-from agos.core.status import read_status_cache as load_status
+from agos.core.status import (
+    read_status_cache as load_status,
+    repair_status_from_verified_records,
+)
 from agos.core.task import Task, load_task
 from agos.core.trust_anchor import (
     TrustAnchorPayload,
@@ -95,21 +98,51 @@ def verify_merge_gate(
         effective_policy = provenance_policy or config.merge_gate.provenance_policy
         provenance_state = "disabled" if effective_policy == "disabled" else "unprovenanced"
         task = load_task(paths.task_yaml)
-        status = load_status(paths)
-        if status is None:
-            raise ValueError("current task status is missing")
-        checks.append(MergeGateCheck(name="initialized", state="pass", message="AGOS task is active"))
     except Exception as exc:
         checks.append(MergeGateCheck(name="initialized", state="block", message=str(exc)))
         return _result(checks, task_id=None, provenance_state=provenance_state)
 
-    ledger = Ledger(paths.ledger)
+    cached_status = None
+    cache_error: Exception | None = None
     try:
-        ledger.verify_chain()
-        records = ledger.read_all()
-        checks.append(MergeGateCheck(name="ledger_chain", state="pass", message="ledger chain verified"))
+        cached_status = load_status(paths)
     except Exception as exc:
-        checks.append(MergeGateCheck(name="ledger_chain", state="block", message=str(exc)))
+        cache_error = exc
+
+    ledger = Ledger(paths.ledger)
+    ledger_error: Exception | None = None
+    try:
+        records = ledger.read_verified()
+    except Exception as exc:
+        ledger_error = exc
+
+    if ledger_error is None:
+        try:
+            repair_status_from_verified_records(paths, task, records, cached=cached_status)
+        except Exception as exc:
+            checks.append(MergeGateCheck(name="initialized", state="block", message=str(exc)))
+            checks.append(
+                MergeGateCheck(name="ledger_chain", state="pass", message="ledger chain verified")
+            )
+            return _result(checks, task_id=task.id, provenance_state=provenance_state)
+        checks.append(MergeGateCheck(name="initialized", state="pass", message="AGOS task is active"))
+        checks.append(MergeGateCheck(name="ledger_chain", state="pass", message="ledger chain verified"))
+    else:
+        initialization_message = (
+            str(cache_error)
+            if cache_error is not None
+            else "AGOS task is active"
+            if cached_status is not None
+            else "current task status is missing"
+        )
+        checks.append(
+            MergeGateCheck(
+                name="initialized",
+                state="pass" if cached_status is not None else "block",
+                message=initialization_message,
+            )
+        )
+        checks.append(MergeGateCheck(name="ledger_chain", state="block", message=str(ledger_error)))
 
     try:
         if trusted_config_path is not None:

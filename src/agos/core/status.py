@@ -66,20 +66,44 @@ TaskStatus = Status
 def load_status(paths: AgosPaths) -> Status | None:
     """Load the cache and repair it from verified ledger events when stale."""
 
-    cached, cache_error = _read_cached_status(paths)
     if not paths.task_yaml.is_file() or not paths.ledger.is_file():
+        cached, cache_error = _read_cached_status(paths)
         if cache_error is not None:
             raise cache_error
         return cached
 
     ledger = Ledger(paths.ledger)
     records = ledger.read_verified()
+    task = load_task(paths.task_yaml)
+    return load_status_from_verified_records(paths, task, records)
+
+
+def load_status_from_verified_records(
+    paths: AgosPaths,
+    task: Task,
+    records: list[dict[str, Any]],
+) -> Status | None:
+    """Load or repair status using one caller-verified ledger snapshot."""
+
+    cached, cache_error = _read_cached_status(paths)
     if not records:
         if cache_error is not None:
             raise cache_error
         return cached
+    return repair_status_from_verified_records(paths, task, records, cached=cached)
 
-    task = load_task(paths.task_yaml)
+
+def repair_status_from_verified_records(
+    paths: AgosPaths,
+    task: Task,
+    records: list[dict[str, Any]],
+    *,
+    cached: Status | None,
+) -> Status:
+    """Reconcile a cache against a non-empty, already verified ledger snapshot."""
+
+    if not records:
+        raise ValueError("cannot repair status from an empty ledger")
     ledger_head = str(records[-1]["hash"])
     if (
         cached is not None
@@ -88,7 +112,8 @@ def load_status(paths: AgosPaths) -> Status | None:
     ):
         return cached
 
-    recovered = replay_status(task, records, cached=cached)
+    compatible_cached = cached if cached is not None and cached.task_id == task.id else None
+    recovered = replay_status(task, records, cached=compatible_cached)
     save_status(recovered, paths)
     return recovered
 
