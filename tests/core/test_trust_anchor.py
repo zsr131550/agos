@@ -128,6 +128,29 @@ def test_signing_helpers_report_missing_optional_dependency(monkeypatch):
         signing._crypto_types()
 
 
+def test_signing_rejects_missing_private_key(tmp_path: Path):
+    with pytest.raises(ValueError, match="private key could not be read"):
+        signing.sign_ed25519(b"message", tmp_path / "missing-private.pem")
+
+
+def test_signing_rejects_invalid_private_key(tmp_path: Path):
+    private_key_path = tmp_path / "invalid-private.pem"
+    private_key_path.write_text("not a PEM key", encoding="ascii")
+
+    with pytest.raises(ValueError, match="invalid Ed25519 private key"):
+        signing.sign_ed25519(b"message", private_key_path)
+
+
+def test_signing_rejects_invalid_base64_signature(tmp_path: Path):
+    with pytest.raises(ValueError, match="signature is not valid base64"):
+        signing.verify_ed25519(b"message", "not/base64!", tmp_path / "unused-public.pem")
+
+
+def test_signing_rejects_missing_public_key(tmp_path: Path):
+    with pytest.raises(ValueError, match="public key could not be read"):
+        signing.verify_ed25519(b"message", "AA==", tmp_path / "missing-public.pem")
+
+
 def test_trust_anchor_payload_rejects_empty_fields():
     with pytest.raises(ValueError):
         _payload(task_id="")
