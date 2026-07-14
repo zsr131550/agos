@@ -286,6 +286,41 @@ def test_completed_executor_without_outputs_is_blocked_not_done(dashboard_repo: 
     assert load_status(paths).phase == "blocked"
 
 
+def test_completed_source_code_executor_with_repo_change_is_done(tmp_repo: Path) -> None:
+    paths = repo_paths(tmp_repo)
+    paths.agos_dir.mkdir(parents=True, exist_ok=True)
+    AGOSConfig.default(agent="Lambda").save(paths.agos_yaml)
+    task = Task(
+        id="agos-source-code",
+        title="Edit source",
+        workflow="feature",
+        gates=[],
+        executor=ExecutorBinding(adapter="codex_cli", agent="codex"),
+        execution_mode="legacy",
+        output_contract="source_code",
+    )
+    save_task(task, paths.task_yaml)
+    ledger = Ledger(paths.ledger)
+    started = ledger.append({"type": "task_started", "task_id": task.id, "title": task.title})
+    run = ExecutorRun(adapter="codex_cli", run_id="source-run", issue_id=None)
+    save_status(
+        TaskStatus.for_started_task(task=task, run=run, ledger_head_hash=started["hash"]),
+        paths,
+    )
+    run_state = paths.evidence / "executor_runs" / "source-run.json"
+    run_state.parent.mkdir(parents=True, exist_ok=True)
+    run_state.write_text(
+        json.dumps({"run_id": "source-run", "adapter": "codex_cli", "state": "completed"}),
+        encoding="utf-8",
+    )
+    (tmp_repo / "README.md").write_text("# changed source\n", encoding="utf-8")
+
+    payload = current_run_payload(tmp_repo)
+
+    assert payload["run"]["phase"] == "done"
+    assert not (tmp_repo / "outputs" / task.id).exists()
+
+
 def test_completed_executor_without_outputs_lifecycle_actions_dispatch_new_executor(
     dashboard_repo: Path,
     monkeypatch,

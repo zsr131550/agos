@@ -2,15 +2,17 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import subprocess
 from collections.abc import Iterator
 from pathlib import Path
 from uuid import uuid4
 
 from agos.core.adapter import Event, ExecutorRun, RunStatus
-from agos.core.command import run_command
+from agos.core.command import run_command, run_command as _run_git_command
 from agos.core.execution import utc_now_iso
 from agos.core.task import Task, load_task, task_output_ref
+from agos.core.task_execution import task_requires_output_directory
 
 
 class LocalCliExecutorAdapter:
@@ -35,24 +37,41 @@ class LocalCliExecutorAdapter:
         run_id = f"{self.name}-{uuid4().hex[:12]}"
         output_ref = task_output_ref(task)
         output_dir = self.cwd / output_ref
-        output_dir.mkdir(parents=True, exist_ok=True)
+        requires_output_directory = task_requires_output_directory(task)
+        baseline = (
+            None if requires_output_directory else _repository_change_fingerprint(self.cwd)
+        )
+        if requires_output_directory:
+            output_dir.mkdir(parents=True, exist_ok=True)
         prompt = _task_prompt(task)
         args = self._start_args(prompt)
         proc = self._run_args(args)
-        if proc.returncode == 0 and _output_dir_is_empty(output_dir):
+        if proc.returncode == 0 and not _task_contract_satisfied(
+            task,
+            repo_root=self.cwd,
+            output_dir=output_dir,
+            baseline=baseline,
+        ):
             retry_prompt = _retry_prompt(task, _detail(proc))
             retry_args = self._start_args(retry_prompt)
             retry_proc = self._run_args(retry_args)
-            if retry_proc.returncode != 0 or not _output_dir_is_empty(output_dir):
+            if retry_proc.returncode != 0 or _task_contract_satisfied(
+                task,
+                repo_root=self.cwd,
+                output_dir=output_dir,
+                baseline=baseline,
+            ):
                 proc = retry_proc
 
         state = "completed" if proc.returncode == 0 else "failed"
-        if state == "completed" and _output_dir_is_empty(output_dir):
+        if state == "completed" and not _task_contract_satisfied(
+            task,
+            repo_root=self.cwd,
+            output_dir=output_dir,
+            baseline=baseline,
+        ):
             original_output = _detail(proc)
-            message = (
-                f"Executor completed without writing files to {output_ref}. "
-                "This usually means the agent stopped for clarification or approval instead of implementing."
-            )
+            message = _missing_output_message(task)
             if original_output:
                 message = f"{message}\n\nAgent output:\n{original_output}"
             proc = subprocess.CompletedProcess(
@@ -161,6 +180,8 @@ class LocalCliExecutorAdapter:
             task = load_task(task_path)
         except Exception:
             return None
+        if not task_requires_output_directory(task):
+            return None
         output_ref = task_output_ref(task)
         if not _output_dir_is_empty(self.cwd / output_ref):
             return None
@@ -205,23 +226,32 @@ class ClaudeCodeExecutorAdapter(LocalCliExecutorAdapter):
 
 def _task_prompt(task: Task) -> str:
     output_ref = task_output_ref(task)
-    parts = [
-        f"Task: {task.title}",
-        "\n".join(
+    contract = [
+        "AGOS execution contract:",
+        "- You are running as an AGOS background executor/subagent, not as an interactive assistant.",
+        "- This AGOS execution contract overrides any local skill, project rule, plugin workflow, or prompt that would require asking the user before implementation.",
+        "- Run non-interactively. Do not ask clarifying questions; make reasonable assumptions and implement the task.",
+        "- Do not wait for user approval, browser-companion approval, design approval, or additional confirmation.",
+        "- Do not invoke brainstorming or design-approval gates; treat this prompt as the approved implementation request.",
+        "- Implement immediately and write concrete artifacts before returning.",
+    ]
+    if task_requires_output_directory(task):
+        contract.extend(
             [
-                "AGOS execution contract:",
-                "- You are running as an AGOS background executor/subagent, not as an interactive assistant.",
-                "- This AGOS execution contract overrides any local skill, project rule, plugin workflow, or prompt that would require asking the user before implementation.",
-                "- Run non-interactively. Do not ask clarifying questions; make reasonable assumptions and implement the task.",
-                "- Do not wait for user approval, browser-companion approval, design approval, or additional confirmation.",
-                "- Do not invoke brainstorming or design-approval gates; treat this prompt as the approved implementation request.",
-                "- Implement immediately and write concrete artifacts before returning.",
                 f"- Use `{output_ref}` as the default output directory for standalone deliverables.",
                 "- If the task is a game, demo, or website, create a runnable entrypoint such as `index.html` in that output directory.",
                 "- Report the output directory and key files in the final response.",
             ]
-        ),
-    ]
+        )
+    else:
+        contract.extend(
+            [
+                "- Change governed repository files directly; do not stop after describing a solution.",
+                "- A standalone outputs directory is not required for this source-code task.",
+                "- Finish only after producing a concrete, valid repository change.",
+            ]
+        )
+    parts = [f"Task: {task.title}", "\n".join(contract)]
     if task.intent.strip():
         parts.append(task.intent.strip())
     if task.acceptance:
@@ -231,18 +261,26 @@ def _task_prompt(task: Task) -> str:
 
 def _retry_prompt(task: Task, previous_output: str) -> str:
     output_ref = task_output_ref(task)
+    if not task_requires_output_directory(task):
+        directive = [
+            "AGOS retry directive:",
+            "- Your previous response stopped without changing governed source files.",
+            "- Do not ask questions or request approval.",
+            "- Make reasonable assumptions and implement the requested source change now.",
+            "- Before returning, make at least one concrete, valid repository change.",
+        ]
+    else:
+        directive = [
+            "AGOS retry directive:",
+            f"- Your previous response stopped without writing output to `{output_ref}`.",
+            "- Do not ask questions or request approval.",
+            "- Ignore any skill, plugin, browser-companion, brainstorming, or design process that would require user input.",
+            "- Make reasonable assumptions and implement now.",
+            f"- Before returning, write at least one concrete file under `{output_ref}`.",
+        ]
     parts = [
         _task_prompt(task),
-        "\n".join(
-            [
-                "AGOS retry directive:",
-                f"- Your previous response stopped without writing output to `{output_ref}`.",
-                "- Do not ask questions or request approval.",
-                "- Ignore any skill, plugin, browser-companion, brainstorming, or design process that would require user input.",
-                "- Make reasonable assumptions and implement now.",
-                f"- Before returning, write at least one concrete file under `{output_ref}`.",
-            ]
-        ),
+        "\n".join(directive),
     ]
     if previous_output:
         parts.append(f"Previous executor output:\n{previous_output}")
@@ -281,3 +319,88 @@ def _output_dir_is_empty(output_dir: Path) -> bool:
         return not any(output_dir.iterdir())
     except FileNotFoundError:
         return True
+
+
+def _task_contract_satisfied(
+    task: Task,
+    *,
+    repo_root: Path,
+    output_dir: Path,
+    baseline: str | None,
+) -> bool:
+    if task_requires_output_directory(task):
+        return not _output_dir_is_empty(output_dir)
+    if baseline is None or _repository_change_fingerprint(repo_root) == baseline:
+        return False
+    return _repository_diff_is_valid(repo_root)
+
+
+def _missing_output_message(task: Task) -> str:
+    if not task_requires_output_directory(task):
+        return (
+            "Executor completed without changing governed source files. "
+            "This usually means the agent stopped for clarification or approval instead of implementing."
+        )
+    output_ref = task_output_ref(task)
+    return (
+        f"Executor completed without writing files to {output_ref}. "
+        "This usually means the agent stopped for clarification or approval instead of implementing."
+    )
+
+
+def _repository_change_fingerprint(repo_root: Path) -> str:
+    pathspec = ["--", ".", ":(exclude).agos", ":(exclude)outputs"]
+    diff = _run_git_command(
+        ["git", "diff", "--binary", "--no-ext-diff", "HEAD", *pathspec],
+        cwd=repo_root,
+        capture_output=True,
+        check=True,
+    )
+    untracked = _run_git_command(
+        [
+            "git",
+            "ls-files",
+            "--others",
+            "--exclude-standard",
+            "-z",
+            *pathspec,
+        ],
+        cwd=repo_root,
+        capture_output=True,
+        check=True,
+    )
+    digest = hashlib.sha256()
+    digest.update(_as_bytes(diff.stdout))
+    for raw_path in _as_bytes(untracked.stdout).split(b"\0"):
+        if not raw_path:
+            continue
+        digest.update(raw_path)
+        path = repo_root / raw_path.decode("utf-8", errors="surrogateescape")
+        if path.is_file():
+            digest.update(path.read_bytes())
+    return digest.hexdigest()
+
+
+def _repository_diff_is_valid(repo_root: Path) -> bool:
+    checked = _run_git_command(
+        [
+            "git",
+            "diff",
+            "--check",
+            "HEAD",
+            "--",
+            ".",
+            ":(exclude).agos",
+            ":(exclude)outputs",
+        ],
+        cwd=repo_root,
+        capture_output=True,
+        check=False,
+    )
+    return checked.returncode == 0
+
+
+def _as_bytes(value: str | bytes | None) -> bytes:
+    if value is None:
+        return b""
+    return value.encode("utf-8") if isinstance(value, str) else value

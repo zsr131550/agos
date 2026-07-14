@@ -32,6 +32,15 @@ def _task() -> Task:
     )
 
 
+def _source_code_task() -> Task:
+    return _task().model_copy(
+        update={
+            "execution_mode": "legacy",
+            "output_contract": "source_code",
+        }
+    )
+
+
 def test_local_cli_executor_records_success_events_and_status(monkeypatch, tmp_repo):
     calls: list[tuple[list[str], dict[str, object]]] = []
 
@@ -234,3 +243,76 @@ def test_local_cli_executor_retries_once_when_agent_asks_instead_of_writing(
     assert len(calls) == 2
     assert status.state == "completed"
     assert status.detail == "done"
+
+
+def test_source_code_executor_accepts_repo_edit_without_outputs(monkeypatch, tmp_repo):
+    calls: list[list[str]] = []
+
+    def fake_run_command(args, **kwargs):
+        del kwargs
+        calls.append(args)
+        (tmp_repo / "README.md").write_text("# changed by executor\n", encoding="utf-8")
+        return SimpleNamespace(returncode=0, stdout="changed README", stderr="")
+
+    monkeypatch.setattr("agos.adapters.local_cli_executor.run_command", fake_run_command)
+    adapter = _TestExecutor(evidence_dir=tmp_repo / ".agos" / "evidence", cwd=tmp_repo)
+
+    run = adapter.start(_source_code_task())
+    status = adapter.status(run.run_id)
+
+    assert len(calls) == 1
+    assert status.state == "completed"
+    assert status.detail == "changed README"
+    assert not (tmp_repo / "outputs" / "agos-01").exists()
+    assert "Change governed repository files directly" in calls[0][-1]
+
+
+def test_source_code_executor_retries_and_rejects_no_repo_change(monkeypatch, tmp_repo):
+    calls: list[list[str]] = []
+
+    def fake_run_command(args, **kwargs):
+        del kwargs
+        calls.append(args)
+        return SimpleNamespace(returncode=0, stdout="answered only", stderr="")
+
+    monkeypatch.setattr("agos.adapters.local_cli_executor.run_command", fake_run_command)
+    adapter = _TestExecutor(evidence_dir=tmp_repo / ".agos" / "evidence", cwd=tmp_repo)
+
+    run = adapter.start(_source_code_task())
+    status = adapter.status(run.run_id)
+
+    assert len(calls) == 2
+    assert "previous response stopped without changing governed source files" in calls[1][-1]
+    assert status.state == "failed"
+    assert "completed without changing governed source files" in status.detail
+
+
+def test_source_code_executor_does_not_accept_preexisting_dirty_state(monkeypatch, tmp_repo):
+    (tmp_repo / "README.md").write_text("# dirty before start\n", encoding="utf-8")
+    monkeypatch.setattr(
+        "agos.adapters.local_cli_executor.run_command",
+        lambda *_args, **_kwargs: SimpleNamespace(returncode=0, stdout="no edit", stderr=""),
+    )
+    adapter = _TestExecutor(evidence_dir=tmp_repo / ".agos" / "evidence", cwd=tmp_repo)
+
+    run = adapter.start(_source_code_task())
+
+    assert adapter.status(run.run_id).state == "failed"
+
+
+def test_source_code_completed_status_does_not_require_output_directory(tmp_repo):
+    task = _source_code_task()
+    current_dir = tmp_repo / ".agos" / "tasks" / "current"
+    task.save(current_dir / "task.yaml")
+    adapter = _TestExecutor(evidence_dir=current_dir / "evidence", cwd=tmp_repo)
+    path = adapter._state_path("source-code-run")
+    path.parent.mkdir(parents=True)
+    path.write_text(
+        '{"state": "completed", "detail": "changed source", "events": []}',
+        encoding="utf-8",
+    )
+
+    status = adapter.status("source-code-run")
+
+    assert status.state == "completed"
+    assert status.detail == "changed source"

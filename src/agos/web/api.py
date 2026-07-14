@@ -32,9 +32,10 @@ from agos.core.merge_gate import verify_merge_gate
 from agos.core.review_orchestrator import ParallelReviewOrchestrator, ReviewerSpec
 from agos.core.review_service import ReviewService
 from agos.core.review_store import ReviewStore
-from agos.core.repo import AgosPaths, git_head, repo_paths, task_paths
+from agos.core.repo import AgosPaths, git_head, git_status_porcelain, repo_paths, task_paths
 from agos.core.status import TaskStatus, load_status, save_status
 from agos.core.task import Task, load_task, task_output_ref
+from agos.core.task_execution import effective_output_contract
 from agos.web.evidence import EvidenceResolutionError, read_evidence_text, resolve_evidence_ref
 
 
@@ -1043,6 +1044,11 @@ def _task_has_business_output(paths: AgosPaths) -> bool:
         output_dir = paths.root / task_output_ref(task)
         if _directory_has_files(output_dir):
             return True
+        if (
+            effective_output_contract(task) == "source_code"
+            and _governed_repo_has_changes(paths.root)
+        ):
+            return True
     execution_dir = paths.current_task / "execution"
     candidate_dir = execution_dir / "candidates"
     if any(candidate_dir.glob("*.json")):
@@ -1058,6 +1064,21 @@ def _directory_has_files(path: Path) -> bool:
         return any(item.is_file() for item in path.rglob("*"))
     except OSError:
         return False
+
+
+def _governed_repo_has_changes(repo_root: Path) -> bool:
+    try:
+        status = git_status_porcelain(repo_root)
+    except Exception:
+        return False
+    for line in status.splitlines():
+        path = line[3:]
+        if " -> " in path:
+            _old, path = path.split(" -> ", 1)
+        normalized = path.strip('"').replace("\\", "/")
+        if normalized and not normalized.startswith((".agos/", "outputs/")):
+            return True
+    return False
 
 
 def _terminate_task_processes(paths: AgosPaths) -> dict[str, object]:
