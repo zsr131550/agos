@@ -1,14 +1,17 @@
 """Local HTTP server for the AGOS dashboard."""
 from __future__ import annotations
 
+import hmac
+import ipaddress
 import json
+import secrets
 import webbrowser
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from importlib import resources
 from pathlib import Path
 from typing import Any, Callable
-from urllib.parse import parse_qs, urlsplit
+from urllib.parse import parse_qs, quote, urlsplit
 
 from agos.web.api import (
     DashboardApiError,
@@ -35,6 +38,7 @@ from agos.web.api import (
 )
 
 PayloadBuilder = Callable[[Path], dict[str, object]]
+MAX_REQUEST_BODY_BYTES = 64 * 1024
 
 
 _API_ROUTES: dict[str, PayloadBuilder] = {
@@ -57,10 +61,24 @@ class DashboardHTTPServer(ThreadingHTTPServer):
     allow_reuse_address = True
     daemon_threads = True
     repo_root: Path
+    auth_token: str
+    remote_binding: bool
+    expose_token_in_index: bool
 
-    def __init__(self, server_address: tuple[str, int], repo_root: Path) -> None:
+    def __init__(
+        self,
+        server_address: tuple[str, int],
+        repo_root: Path,
+        *,
+        auth_token: str,
+        remote_binding: bool,
+        expose_token_in_index: bool,
+    ) -> None:
         super().__init__(server_address, DashboardRequestHandler)
         self.repo_root = Path(repo_root)
+        self.auth_token = auth_token
+        self.remote_binding = remote_binding
+        self.expose_token_in_index = expose_token_in_index
 
 
 class DashboardRequestHandler(BaseHTTPRequestHandler):
@@ -77,12 +95,21 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
             self._serve_index()
             return
         if path.startswith("/api/"):
+            if self.server.remote_binding and not self._has_valid_token():
+                self._write_access_error(
+                    HTTPStatus.UNAUTHORIZED,
+                    "unauthorized",
+                    "Dashboard API authentication is required",
+                )
+                return
             self._serve_api(path, parse_qs(parsed.query, keep_blank_values=True))
             return
         self.send_error(HTTPStatus.NOT_FOUND)
 
     def do_POST(self) -> None:
         parsed = urlsplit(self.path)
+        if parsed.path.startswith("/api/") and not self._authorize_mutation():
+            return
         if parsed.path == "/api/runs":
             self._serve_start_run()
             return
@@ -122,11 +149,19 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
 
     def _serve_index(self) -> None:
         index = resources.files("agos.web").joinpath("static/index.html")
-        body = index.read_text(encoding="utf-8").encode("utf-8")
+        embedded_token = self.server.auth_token if self.server.expose_token_in_index else ""
+        text = index.read_text(encoding="utf-8").replace(
+            "__AGOS_DASHBOARD_TOKEN__",
+            json.dumps(embedded_token),
+        )
+        body = text.encode("utf-8")
         self.send_response(HTTPStatus.OK)
         self.send_header("Content-Type", "text/html; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
+        self.send_header("Referrer-Policy", "no-referrer")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("X-Frame-Options", "DENY")
         self.end_headers()
         self.wfile.write(body)
 
@@ -260,7 +295,7 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
             raise DashboardApiError("invalid_request", "invalid Content-Length") from exc
         if content_length <= 0:
             raise DashboardApiError("invalid_request", "JSON body is required")
-        if content_length > 64 * 1024:
+        if content_length > MAX_REQUEST_BODY_BYTES:
             raise DashboardApiError("invalid_request", "JSON body is too large")
         raw = self.rfile.read(content_length).decode("utf-8")
         try:
@@ -279,29 +314,126 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
+        self.send_header("X-Content-Type-Options", "nosniff")
         self.end_headers()
         self.wfile.write(body)
 
+    def _authorize_mutation(self) -> bool:
+        if not self._has_valid_token():
+            self._write_access_error(
+                HTTPStatus.UNAUTHORIZED,
+                "unauthorized",
+                "Dashboard mutation authentication is required",
+            )
+            return False
+        if not self._has_same_origin():
+            self._write_access_error(
+                HTTPStatus.FORBIDDEN,
+                "origin_forbidden",
+                "Dashboard mutation origin is not allowed",
+            )
+            return False
+        return True
 
-def create_dashboard_server(repo_root: Path, *, host: str, port: int) -> DashboardHTTPServer:
+    def _has_valid_token(self) -> bool:
+        authorization = self.headers.get("Authorization", "")
+        prefix = "Bearer "
+        if not authorization.startswith(prefix):
+            return False
+        supplied = authorization[len(prefix) :]
+        return bool(supplied) and hmac.compare_digest(supplied, self.server.auth_token)
+
+    def _has_same_origin(self) -> bool:
+        origin = self.headers.get("Origin")
+        host = self.headers.get("Host")
+        if not origin or not host or origin == "null":
+            return False
+        try:
+            supplied = urlsplit(origin)
+            expected = urlsplit(f"http://{host}")
+            supplied_port = supplied.port or 80
+            expected_port = expected.port or 80
+        except ValueError:
+            return False
+        return (
+            supplied.scheme == "http"
+            and supplied.username is None
+            and supplied.password is None
+            and supplied.hostname is not None
+            and expected.hostname is not None
+            and supplied.hostname.casefold() == expected.hostname.casefold()
+            and supplied_port == expected_port
+            and supplied.path in {"", "/"}
+            and not supplied.query
+            and not supplied.fragment
+        )
+
+    def _write_access_error(
+        self,
+        status: HTTPStatus,
+        code: str,
+        message: str,
+    ) -> None:
+        self._write_json(
+            {"ok": False, "error": {"code": code, "message": message}},
+            status=status,
+        )
+
+
+def create_dashboard_server(
+    repo_root: Path,
+    *,
+    host: str,
+    port: int,
+    token: str | None = None,
+) -> DashboardHTTPServer:
     """Create a local dashboard HTTP server without starting it."""
 
-    return DashboardHTTPServer((host, port), Path(repo_root))
+    loopback = _is_loopback_host(host)
+    explicit_token = token.strip() if token is not None else ""
+    if not loopback and not explicit_token:
+        raise ValueError("non-loopback dashboard binding requires an authentication token")
+    auth_token = explicit_token or secrets.token_urlsafe(32)
+    return DashboardHTTPServer(
+        (host, port),
+        Path(repo_root),
+        auth_token=auth_token,
+        remote_binding=not loopback,
+        expose_token_in_index=loopback and not explicit_token,
+    )
 
 
 def serve_dashboard_forever(
-    repo_root: Path, *, host: str, port: int, open_browser: bool
+    repo_root: Path,
+    *,
+    host: str,
+    port: int,
+    open_browser: bool,
+    token: str | None = None,
 ) -> str:
     """Serve the AGOS dashboard until interrupted and close the server on exit."""
 
-    server = create_dashboard_server(repo_root, host=host, port=port)
+    server = create_dashboard_server(repo_root, host=host, port=port, token=token)
     open_host = "127.0.0.1" if host in {"0.0.0.0", "::"} else host
     url = f"http://{open_host}:{server.server_port}"
     print(f"AGOS dashboard: {url}", flush=True)
     if open_browser:
-        webbrowser.open(url)
+        browser_url = url
+        if not server.expose_token_in_index:
+            browser_url = f"{url}/#token={quote(server.auth_token, safe='')}"
+        webbrowser.open(browser_url)
     try:
         server.serve_forever()
     finally:
         server.server_close()
     return url
+
+
+def _is_loopback_host(host: str) -> bool:
+    normalized = host.strip().strip("[]").casefold()
+    if normalized == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(normalized).is_loopback
+    except ValueError:
+        return False

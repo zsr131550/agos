@@ -8,9 +8,11 @@ import yaml
 from pydantic import BaseModel, Field, model_validator
 
 from agos.core.review import ReviewSeverity
+from agos.core.task_execution import TaskExecutionConfig
 
 GateType = Literal["secret_scan", "opa", "semgrep", "trufflehog", "codeql"]
 TrustAnchorBackend = Literal["file", "git-ref"]
+ProvenancePolicy = Literal["required", "optional", "disabled"]
 
 
 class GateSpec(BaseModel):
@@ -46,6 +48,7 @@ class ExecutorConfig(BaseModel):
     name: str = "multica"
     agent: str
     command: str | None = None
+    dangerously_bypass_permissions: bool = False
 
 
 class WorkerConfig(BaseModel):
@@ -53,6 +56,7 @@ class WorkerConfig(BaseModel):
 
     type: str
     command: str | None = None
+    argv: list[str] | None = None
     agent: str | None = None
     endpoint: str | None = None
     token: str | None = None
@@ -61,6 +65,7 @@ class WorkerConfig(BaseModel):
     artifact_globs: list[str] = Field(default_factory=list)
     env: dict[str, str] = Field(default_factory=dict)
     health_probe: bool = Field(default=False)
+    dangerously_bypass_permissions: bool = False
     # codex_cli-only: opt into hermetic execution that ignores local Codex
     # user config/rules. Default off so real local Codex smoke uses the user's
     # configured CLI authentication and preferences.
@@ -71,6 +76,14 @@ class WorkerConfig(BaseModel):
     # claude_code-only: reserved for follow-up `--resume` turns on completion.
     # Default off because each resumed turn incurs real cost; see P1-2.
     claude_resume_on_complete: bool = Field(default=False)
+
+    @model_validator(mode="after")
+    def _validate_command_argv(self) -> "WorkerConfig":
+        if self.type == "command" and (
+            not self.argv or any(not item.strip() for item in self.argv)
+        ):
+            raise ValueError("command worker argv must contain non-empty strings")
+        return self
 
 
 class ReviewerConfig(BaseModel):
@@ -128,6 +141,37 @@ class TrustAnchorConfig(BaseModel):
     issuer: str = "agos"
 
 
+class TrustedSignerConfig(BaseModel):
+    """One allowed offline provenance signer from trusted configuration."""
+
+    issuer: str
+    key_id: str
+    public_key_path: str
+
+    @model_validator(mode="after")
+    def _non_empty_fields(self) -> "TrustedSignerConfig":
+        if any(
+            not value.strip()
+            for value in (self.issuer, self.key_id, self.public_key_path)
+        ):
+            raise ValueError("trusted signer fields must be non-empty")
+        return self
+
+
+class MergeGateConfig(BaseModel):
+    """Trusted merge-gate provenance policy."""
+
+    provenance_policy: ProvenancePolicy = "optional"
+    trusted_signers: list[TrustedSignerConfig] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def _unique_signer_identities(self) -> "MergeGateConfig":
+        identities = [(signer.issuer, signer.key_id) for signer in self.trusted_signers]
+        if len(set(identities)) != len(identities):
+            raise ValueError("duplicate trusted signer issuer/key_id")
+        return self
+
+
 class AGOSConfig(BaseModel):
     """Top-level `.agos/agos.yaml` structure."""
 
@@ -138,7 +182,9 @@ class AGOSConfig(BaseModel):
     reviewers: dict[str, ReviewerConfig] = Field(default_factory=dict)
     allow_fake_reviewer: bool = False
     orchestration: OrchestrationConfig = Field(default_factory=OrchestrationConfig)
+    task_execution: TaskExecutionConfig = Field(default_factory=TaskExecutionConfig)
     trust_anchor: TrustAnchorConfig = Field(default_factory=TrustAnchorConfig)
+    merge_gate: MergeGateConfig = Field(default_factory=MergeGateConfig)
 
     @classmethod
     def default(
@@ -233,5 +279,3 @@ def resolve_gates(
     if missing:
         raise KeyError(f"override gates not in workflow {workflow!r}: {missing}")
     return [by_id[gate_id].model_copy(deep=True) for gate_id in override]
-
-

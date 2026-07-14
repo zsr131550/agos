@@ -180,11 +180,54 @@ def test_codex_worker_adapter_starts_cli_with_workspace_and_prompt(monkeypatch, 
     assert args[:2] == ["codex", "exec"]
     assert "--ignore-user-config" not in args
     assert "--ignore-rules" not in args
-    assert "--dangerously-bypass-approvals-and-sandbox" in args
+    assert "--dangerously-bypass-approvals-and-sandbox" not in args
+    assert args[args.index("--sandbox") : args.index("--sandbox") + 2] == [
+        "--sandbox",
+        "workspace-write",
+    ]
+    assert args[args.index("-c") : args.index("-c") + 2] == [
+        "-c",
+        'approval_policy="never"',
+    ]
     assert "--json" in args
     assert args[-1] == "-"
     assert "Implement README change" in kwargs["input"]
     assert "Do not ask clarifying questions" in kwargs["input"]
+
+
+def test_codex_worker_adapter_can_explicitly_bypass_permissions(monkeypatch, tmp_path):
+    from agos.adapters.workers.codex_cli import CodexWorkerAdapter
+    import agos.adapters.workers.codex_cli as codex_module
+
+    calls: list[list[str]] = []
+
+    class FakeProc:
+        returncode = 0
+        stdout = '{"run_id": "codex-run-01"}'
+        stderr = ""
+
+    def fake_run(args, **kwargs):
+        del kwargs
+        calls.append(args)
+        return FakeProc()
+
+    monkeypatch.setattr(codex_module, "run_command", fake_run)
+
+    CodexWorkerAdapter(
+        command="codex",
+        dangerously_bypass_permissions=True,
+    ).start(
+        WorkerStartRequest(
+            run_id="execution-run-01",
+            subtask_id="subtask-01",
+            prompt="Implement README change",
+            workspace_path=str(tmp_path),
+        )
+    )
+
+    assert "--dangerously-bypass-approvals-and-sandbox" in calls[0]
+    assert "--sandbox" not in calls[0]
+    assert "-c" not in calls[0]
 
 
 def test_codex_worker_adapter_can_opt_into_hermetic_user_config(monkeypatch, tmp_path):
@@ -299,7 +342,9 @@ def test_codex_worker_adapter_parses_exec_jsonl_and_polls_cached_status(monkeypa
     assert args[:2] == ["codex", "exec"]
     assert "--ignore-user-config" not in args
     assert "--ignore-rules" not in args
-    assert "--dangerously-bypass-approvals-and-sandbox" in args
+    assert "--dangerously-bypass-approvals-and-sandbox" not in args
+    assert "--sandbox" in args
+    assert 'approval_policy="never"' in args
     assert "--json" in args
     assert args[-1] == "-"
     assert "Do the work" in kwargs["input"]
@@ -662,6 +707,7 @@ def test_codex_worker_health_reports_command_availability(monkeypatch):
     assert health.state == "healthy"
     assert health.metadata["timeout_seconds"] == "120"
     assert health.metadata["artifact_globs"] == ".agos-worker/*.json"
+    assert health.metadata["dangerously_bypass_permissions"] == "False"
 
 
 def test_codex_worker_health_reports_missing_command(monkeypatch):

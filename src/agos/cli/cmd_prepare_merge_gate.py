@@ -11,12 +11,12 @@ import typer
 
 from agos.core.adapter import ExecutorRun
 from agos.core.command import run_command
-from agos.core.config import load_config, resolve_gates
+from agos.core.config import AGOSConfig, load_config, resolve_gates
 from agos.core.execution import (
     CandidatePatch,
+    CandidateProvenance,
     CandidateTestRun,
     ExecutionSubtask,
-    ReviewBinding,
     WorkspaceBinding,
 )
 from agos.core.execution_store import ExecutionStore
@@ -25,8 +25,6 @@ from agos.core.gate import GateContext, build_gate, gate_command_text, gates_loc
 from agos.core.ledger import Ledger
 from agos.core.repo import find_initialized_repo_root, git_head, repo_paths
 from agos.core.status import TaskStatus, load_status, save_status
-from agos.core.review import ReviewPacket, ReviewReport
-from agos.core.review_store import ReviewStore
 from agos.core.task import ExecutorBinding, Task, new_task_id, save_task
 from agos.core.trust_anchor import FileTrustAnchorStore, publish_current_anchor
 
@@ -46,14 +44,24 @@ def prepare_merge_gate_command(
         help="Human-readable AGOS task title.",
     ),
     workflow: str | None = typer.Option(None, "--workflow", help="Workflow name from agos.yaml."),
+    trusted_config: Path | None = typer.Option(
+        None,
+        "--trusted-config",
+        help="Protected-base agos.yaml used for workflow and gate resolution.",
+    ),
 ) -> None:
     """Prepare a fresh active AGOS task plus candidate evidence for CI merge-gate."""
 
     try:
         repo_root = find_initialized_repo_root()
         paths = repo_paths(repo_root)
-        config = load_config(repo_root)
-        workflow_name = workflow or config.default_workflow
+        config = AGOSConfig.load(trusted_config) if trusted_config is not None else load_config(repo_root)
+        if trusted_config is not None and workflow not in {None, config.default_workflow}:
+            raise ValueError(
+                "--workflow must match the trusted config default_workflow: "
+                f"{workflow!r} != {config.default_workflow!r}"
+            )
+        workflow_name = config.default_workflow if trusted_config is not None else (workflow or config.default_workflow)
         resolved_gates = resolve_gates(config, workflow_name)
         _require_head_checkout(repo_root, head)
 
@@ -169,7 +177,7 @@ def _materialize_candidate_evidence(
     store.write_subtask(subtask)
 
     patch_ref, patch_sha = store.write_candidate_patch(candidate_id, patch_bytes)
-    _append_event(
+    created = _append_event(
         paths,
         {
             "type": "candidate_patch_created",
@@ -178,6 +186,11 @@ def _materialize_candidate_evidence(
             "candidate_id": candidate_id,
             "patch_ref": patch_ref,
             "patch_sha256": patch_sha,
+            "provenance_source": "ci_reconstructed",
+            "source_agent": "ci_prepare",
+            "workspace_ref": workspace.ref,
+            "base_commit": base,
+            "attestation_ref": None,
         },
     )
 
@@ -192,6 +205,10 @@ def _materialize_candidate_evidence(
         base_commit=base,
         summary="Submitted pull-request diff",
         status="testing",
+        provenance=CandidateProvenance(
+            source="ci_reconstructed",
+            ledger_head_hash=str(created["hash"]),
+        ),
     )
     store.write_candidate(candidate)
 
@@ -212,115 +229,12 @@ def _materialize_candidate_evidence(
 
     test_refs = [store.write_test_run(run) for run in runs]
     failed = [run.gate_id for run in runs if run.state != "passed"]
-    final_status = "applied" if not failed else "proposed"
+    final_status = "tested" if not failed else "proposed"
     candidate = candidate.model_copy(update={"status": final_status, "test_refs": test_refs})
     store.write_candidate(candidate)
 
     if failed:
         raise ValueError("candidate gates failed: " + ", ".join(failed))
-
-    _materialize_clean_ci_review(paths, candidate=candidate, task=task)
-    candidate = store.read_candidate(candidate.id)
-
-    _append_event(
-        paths,
-        {
-            "type": "candidate_applied",
-            "task_id": task.id,
-            "candidate_id": candidate.id,
-            "patch_ref": candidate.patch_ref,
-            "decision_ref": candidate.decision_ref,
-        },
-    )
-
-
-def _materialize_clean_ci_review(paths, *, candidate: CandidatePatch, task: Task) -> None:
-    """Create deterministic candidate-bound CI review evidence for PR diff candidates."""
-
-    review_store = ReviewStore(paths)
-    review_id = "review-ci-pr-diff"
-    packet = ReviewPacket(
-        review_id=review_id,
-        task_id=task.id,
-        task_title=task.title,
-        task_intent=task.intent,
-        acceptance=list(task.acceptance),
-        subject={
-            "type": "candidate",
-            "candidate_id": candidate.id,
-            "subtask_id": candidate.subtask_id,
-            "task_id": task.id,
-        },
-        context_refs=[
-            f"execution/candidates/{candidate.id}.json",
-            f"execution/subtasks/{candidate.subtask_id}.json",
-            candidate.workspace_ref,
-            *candidate.test_refs,
-        ],
-        diff_kind="candidate_patch",
-        diff_evidence_ref=candidate.patch_ref,
-        ledger_head_hash=_ledger_head(paths),
-    )
-    packet_ref = review_store.write_packet(packet)
-    raw_ref = review_store.write_raw_output(
-        review_id,
-        "ci_prepare",
-        {
-            "reviewer_id": "ci_prepare",
-            "state": "completed",
-            "findings": [],
-            "policy": "CI prepared PR diff passed locked gates; no missing-review override used.",
-        },
-    )
-    report = ReviewReport(
-        review_id=review_id,
-        task_id=task.id,
-        packet_ref=packet_ref,
-        findings=[],
-    )
-    report_ref = review_store.write_report(report)
-    review_store.write_markdown_report(report)
-    completed = _append_event(
-        paths,
-        {
-            "type": "candidate_review_completed",
-            "task_id": task.id,
-            "candidate_id": candidate.id,
-            "review_id": review_id,
-            "report_ref": report_ref,
-            "open_blocking_count": 0,
-        },
-    )
-    binding = ReviewBinding(
-        review_id=review_id,
-        packet_ref=packet_ref,
-        report_ref=report_ref,
-        raw_refs=[raw_ref],
-        patch_sha256=candidate.patch_sha256,
-        base_commit=candidate.base_commit,
-        write_scope=sorted(candidate_patch_paths((paths.current_task / candidate.patch_ref).read_bytes())),
-        test_refs=list(candidate.test_refs),
-        ledger_head_at_start=completed["prev_hash"],
-        ledger_head_at_completion=completed["hash"],
-        open_blocking_count=0,
-        state="completed",
-        completed_at=_utc_now(),
-    )
-    store = ExecutionStore(paths)
-    latest = store.read_candidate(candidate.id)
-    store.write_candidate(
-        latest.model_copy(
-            update={
-                "status": "applied",
-                "review_refs": [*latest.review_refs, binding],
-            }
-        )
-    )
-
-
-def _ledger_head(paths) -> str:
-    status = load_status(paths)
-    return status.ledger_head_hash if status is not None else ""
 
 
 def _record_patch_applies(

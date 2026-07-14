@@ -28,17 +28,29 @@ def test_repository_autonomous_config_enables_planner_multi_worker_and_required_
     )
 
 
-def test_ci_policy_runs_autonomous_readiness_and_real_agent_smokes_without_missing_review_escape() -> None:
-    workflow_path = PROJECT_ROOT / ".github" / "workflows" / "ci.yml"
-    workflow_text = workflow_path.read_text(encoding="utf-8")
-    workflow = yaml.safe_load(workflow_text)
-    jobs = workflow["jobs"]
+def test_default_ci_is_offline_and_real_agent_smokes_are_opt_in() -> None:
+    ci_path = PROJECT_ROOT / ".github" / "workflows" / "ci.yml"
+    ci_text = ci_path.read_text(encoding="utf-8")
+    ci = yaml.safe_load(ci_text)
 
-    assert "autonomous-readiness" in jobs
-    assert "real-agent-smoke" in jobs
-    assert "--allow-missing-review" not in workflow_text
+    assert "autonomous-readiness" in ci["jobs"]
+    assert "real-agent-smoke" not in ci["jobs"]
+    assert "--allow-missing-review" not in ci_text
+    for token in (
+        "OPENAI_API_KEY",
+        "ANTHROPIC_API_KEY",
+        "MULTICA_API_KEY",
+        "AGOS_OPENHANDS_TOKEN",
+    ):
+        assert token not in ci_text
 
-    smoke_text = yaml.safe_dump(jobs["real-agent-smoke"], sort_keys=False)
+    smoke_path = PROJECT_ROOT / ".github" / "workflows" / "real-agent-smoke.yml"
+    smoke_text = smoke_path.read_text(encoding="utf-8")
+    smoke = yaml.safe_load(smoke_text)
+    triggers = smoke.get("on", smoke.get(True))
+    assert "workflow_dispatch" in triggers
+    assert "schedule" in triggers
+
     required_tokens = [
         "AGOS_PLANNER_SMOKE",
         "AGOS_REVIEWER_SMOKE",

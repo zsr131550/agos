@@ -8,6 +8,7 @@ from typer.testing import CliRunner
 
 from agos.cli.main import app
 from agos.core.adapter import ExecutorRun
+from agos.core.config import AGOSConfig
 from agos.core.execution_worker import WorkerHealth, WorkerHealthCheck
 from agos.core.ledger import Ledger
 from agos.core.repo import repo_paths
@@ -89,6 +90,40 @@ def test_doctor_json_reports_healthy_initialized_repo(monkeypatch, tmp_repo):
     assert checks["python_version"]["state"] == "passed"
     assert checks["cli_entrypoint"]["state"] == "passed"
     assert checks["git_hooks"]["state"] == "warning"
+    assert checks["agent_permissions"]["state"] == "passed"
+
+
+def test_doctor_agent_permissions_warns_with_sorted_dangerous_adapters():
+    from agos.cli.cmd_doctor import _agent_permissions_check
+
+    config = AGOSConfig.model_validate(
+        {
+            "executor": {
+                "name": "codex_cli",
+                "agent": "codex",
+                "dangerously_bypass_permissions": True,
+            },
+            "workers": {
+                "z-claude": {
+                    "type": "claude_code",
+                    "dangerously_bypass_permissions": True,
+                },
+                "a-codex": {
+                    "type": "codex_cli",
+                    "dangerously_bypass_permissions": True,
+                },
+                "safe": {"type": "local_worktree"},
+            },
+        }
+    )
+
+    check = _agent_permissions_check(config)
+
+    assert check.state == "warning"
+    assert check.detail == (
+        "dangerous permission bypass active: executor:codex_cli, "
+        "worker:a-codex, worker:z-claude"
+    )
 
 
 def test_doctor_warns_on_dev_only_reviewer(monkeypatch, tmp_repo):
@@ -252,6 +287,7 @@ def test_doctor_json_fails_for_invalid_config(monkeypatch, tmp_repo):
     checks = {check["name"]: check for check in payload["checks"]}
     assert checks["config"]["state"] == "failed"
     assert "invalid AGOS configuration" in checks["config"]["detail"]
+    assert checks["agent_permissions"]["state"] == "skipped"
 
 
 def test_doctor_reports_missing_hooks_as_warning(monkeypatch, tmp_repo):
@@ -310,6 +346,7 @@ def test_doctor_reports_uninitialized_repo(monkeypatch, tmp_repo):
     checks = {check["name"]: check for check in payload["checks"]}
     assert checks["agos_initialized"]["state"] == "failed"
     assert checks["git_hooks"]["state"] == "skipped"
+    assert checks["agent_permissions"]["state"] == "skipped"
 
 
 def test_doctor_reports_non_git_directory(monkeypatch, tmp_path):

@@ -4,6 +4,7 @@ from __future__ import annotations
 from agos.adapters.workers import (
     ClaudeWorkerAdapter,
     CodexWorkerAdapter,
+    CommandWorkerAdapter,
     LocalWorktreeWorkerAdapter,
     MulticaWorkerAdapter,
     OpenHandsWorkerAdapter,
@@ -22,6 +23,16 @@ def register_configured_worker_adapters(service: ExecutionService) -> None:
             service.register_worker_adapter(
                 LocalWorktreeWorkerAdapter(service.workspace_manager, name=name)
             )
+        elif worker.type == "command":
+            service.register_worker_adapter(
+                CommandWorkerAdapter(
+                    name=name,
+                    argv=worker.argv or [],
+                    workspace_manager=service.workspace_manager,
+                    timeout_seconds=worker.timeout_seconds,
+                    env=worker.env,
+                )
+            )
         elif worker.type == "codex_cli":
             service.register_worker_adapter(
                 CodexWorkerAdapter(
@@ -35,6 +46,7 @@ def register_configured_worker_adapters(service: ExecutionService) -> None:
                     health_probe=worker.health_probe,
                     ignore_user_config=worker.ignore_user_config,
                     ignore_rules=worker.ignore_rules,
+                    dangerously_bypass_permissions=worker.dangerously_bypass_permissions,
                 )
             )
         elif worker.type == "claude_code":
@@ -50,6 +62,7 @@ def register_configured_worker_adapters(service: ExecutionService) -> None:
                     health_probe=worker.health_probe,
                     claude_async_poll=worker.claude_async_poll,
                     claude_resume_on_complete=worker.claude_resume_on_complete,
+                    dangerously_bypass_permissions=worker.dangerously_bypass_permissions,
                 )
             )
         elif worker.type == "multica":
@@ -82,4 +95,3 @@ def register_configured_worker_adapters(service: ExecutionService) -> None:
             )
         else:
             raise ValueError(f"unsupported worker adapter type: {worker.type}")
-

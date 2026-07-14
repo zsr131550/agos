@@ -72,12 +72,11 @@ def ci_local_command(
 
     repo_root = find_repo_root()
     paths = repo_paths(repo_root)
-    status = load_status(paths)
-    if status is None:
-        return
-
     ledger = Ledger(paths.ledger)
     try:
+        status = load_status(paths)
+        if status is None:
+            return
         ledger.verify_chain()
     except LedgerTamperError as exc:
         typer.echo(f"Ledger verification failed: {exc}", err=True)

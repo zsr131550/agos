@@ -56,6 +56,22 @@ def test_status_human_reports_active_task(monkeypatch, tmp_repo):
     assert "phase: executing" in result.stdout
 
 
+def test_status_command_repairs_stale_cache_from_terminal_ledger_event(monkeypatch, tmp_repo):
+    paths = _active_task(tmp_repo)
+    terminal = Ledger(paths.ledger).append(
+        {"type": "executor_completed", "run_id": "run-01", "state": "completed"}
+    )
+    monkeypatch.chdir(tmp_repo)
+
+    result = runner.invoke(app, ["status", "--json"])
+
+    assert result.exit_code == 0, result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["task"]["phase"] == "done"
+    assert payload["task"]["executor_run"]["run_id"] == "run-01"
+    assert payload["task"]["ledger_head_hash"] == terminal["hash"]
+
+
 def _active_task(tmp_repo):
     paths = repo_paths(tmp_repo)
     paths.agos_dir.mkdir(parents=True, exist_ok=True)

@@ -6,10 +6,21 @@ from types import SimpleNamespace
 import yaml
 from typer.testing import CliRunner
 
-from agos.core.adapter import RunStatus
 from agos.cli.main import app
+from agos.core.adapter import RunStatus
+from agos.core.task_execution import TaskExecutionResult
 
 runner = CliRunner()
+
+
+class _FakeTaskExecutionService:
+    def __init__(self, result: TaskExecutionResult) -> None:
+        self.result = result
+        self.requests = []
+
+    def start(self, request):
+        self.requests.append(request)
+        return self.result
 
 
 def _write_config(tmp_repo) -> None:
@@ -37,6 +48,91 @@ def _write_config(tmp_repo) -> None:
         },
     }
     (agos_dir / "agos.yaml").write_text(yaml.safe_dump(config, sort_keys=False), encoding="utf-8")
+
+
+def _candidate_result(**updates) -> TaskExecutionResult:
+    values = {
+        "task_id": "agos-candidate-1",
+        "mode": "candidate",
+        "run_id": "candidate-run-1",
+        "state": "completed",
+        "candidate_ids": ["candidate-1"],
+        "applied_candidate_ids": ["candidate-1"],
+    }
+    values.update(updates)
+    return TaskExecutionResult.model_validate(values)
+
+
+def test_start_help_exposes_mode_and_json() -> None:
+    result = runner.invoke(app, ["start", "--help"])
+
+    assert result.exit_code == 0
+    assert "--mode" in result.stdout
+    assert "--json" in result.stdout
+
+
+def test_start_candidate_json_is_normalized(monkeypatch, tmp_repo) -> None:
+    _write_config(tmp_repo)
+    monkeypatch.chdir(tmp_repo)
+    service = _FakeTaskExecutionService(_candidate_result())
+    monkeypatch.setattr(
+        "agos.cli.cmd_start.build_task_execution_service",
+        lambda _root: service,
+        raising=False,
+    )
+
+    result = runner.invoke(
+        app,
+        ["start", "--title", "Candidate", "--mode", "candidate", "--json"],
+    )
+
+    assert result.exit_code == 0, result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["mode"] == "candidate"
+    assert payload["candidate_ids"] == payload["applied_candidate_ids"]
+    assert service.requests[0].mode == "candidate"
+
+
+def test_start_candidate_human_output_uses_run_id(monkeypatch, tmp_repo) -> None:
+    _write_config(tmp_repo)
+    monkeypatch.chdir(tmp_repo)
+    service = _FakeTaskExecutionService(_candidate_result())
+    monkeypatch.setattr(
+        "agos.cli.cmd_start.build_task_execution_service",
+        lambda _root: service,
+        raising=False,
+    )
+
+    result = runner.invoke(app, ["start", "--title", "Candidate", "--mode", "candidate"])
+
+    assert result.exit_code == 0, result.stderr
+    assert result.stdout.strip() == "candidate-run-1"
+
+
+def test_start_emits_compatibility_warnings_only_to_stderr(monkeypatch, tmp_repo) -> None:
+    _write_config(tmp_repo)
+    monkeypatch.chdir(tmp_repo)
+    service = _FakeTaskExecutionService(
+        TaskExecutionResult(
+            task_id="agos-legacy-1",
+            mode="legacy",
+            run_id="legacy-run-1",
+            issue_id="AGO-1",
+            state="running",
+            compatibility_warnings=["configuration uses legacy defaults"],
+        )
+    )
+    monkeypatch.setattr(
+        "agos.cli.cmd_start.build_task_execution_service",
+        lambda _root: service,
+        raising=False,
+    )
+
+    result = runner.invoke(app, ["start", "--title", "Compatible"])
+
+    assert result.exit_code == 0
+    assert result.stdout.strip() == "AGO-1"
+    assert "Warning: configuration uses legacy defaults" in result.stderr
 
 
 def test_start_writes_task_status_and_dispatches(monkeypatch, tmp_repo):
@@ -79,6 +175,7 @@ def test_start_writes_task_status_and_dispatches(monkeypatch, tmp_repo):
     assert [record["type"] for record in records] == [
         "task_started",
         "gates_locked",
+        "task_execution_started",
         "executor_dispatched",
     ]
     assert [gate["id"] for gate in records[1]["gates"]] == ["tests_pass", "build_clean"]
@@ -153,9 +250,11 @@ def test_start_marks_terminal_executor_failure_blocked(monkeypatch, tmp_repo):
         .read_text(encoding="utf-8")
         .splitlines()
     ]
-    assert records[-1]["type"] == "executor_blocked"
-    assert records[-1]["state"] == "failed"
-    assert "without writing files" in records[-1]["detail"]
+    assert records[-2]["type"] == "executor_blocked"
+    assert records[-2]["state"] == "failed"
+    assert "without writing files" in records[-2]["detail"]
+    assert records[-1]["type"] == "task_execution_blocked"
+    assert records[-1]["blocked_stage"] == "executor"
 
 
 def test_start_cleans_up_current_task_when_dispatch_fails(monkeypatch, tmp_repo):

@@ -20,6 +20,15 @@ from agos.core.trust_anchor import GitRefTrustAnchorStore
 
 runner = CliRunner()
 
+PRIVATE_KEY_PEM = """-----BEGIN PRIVATE KEY-----
+MC4CAQAwBQYDK2VwBCIEIJ1hsZ3v/VpguoRK9JLsLMREScVpezJpGXA7rAMcrn9g
+-----END PRIVATE KEY-----
+"""
+PUBLIC_KEY_PEM = """-----BEGIN PUBLIC KEY-----
+MCowBQYDK2VwAyEA11qYAYKxCrfVS/7TyWQHOg7hcvPapiMlrwIaaPcHURo=
+-----END PUBLIC KEY-----
+"""
+
 
 def _write_active_task(tmp_repo: Path) -> object:
     paths = repo_paths(tmp_repo)
@@ -100,6 +109,116 @@ def test_anchor_publish_requires_file_path(monkeypatch, tmp_repo: Path):
 
     assert result.exit_code == 1
     assert "--path is required" in result.stderr
+
+
+def test_anchor_signed_file_publish_and_verify_round_trip(monkeypatch, tmp_repo: Path):
+    _write_active_task(tmp_repo)
+    monkeypatch.chdir(tmp_repo)
+    private_key_path = tmp_repo.parent / "ci-private.pem"
+    private_key_path.write_text(PRIVATE_KEY_PEM, encoding="ascii")
+    public_key_path = tmp_repo / "trusted" / "keys" / "ci-public.pem"
+    public_key_path.parent.mkdir(parents=True)
+    public_key_path.write_text(PUBLIC_KEY_PEM, encoding="ascii")
+    trusted_config_path = tmp_repo / "trusted" / "agos.yaml"
+    trusted_config_path.write_text(
+        yaml.safe_dump(
+            {
+                "executor": {"name": "multica", "agent": "Lambda"},
+                "merge_gate": {
+                    "trusted_signers": [
+                        {
+                            "issuer": "protected-ci",
+                            "key_id": "ci-2026",
+                            "public_key_path": "keys/ci-public.pem",
+                        }
+                    ]
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    anchor_path = tmp_repo / ".agos" / "signed-anchor.json"
+
+    publish = runner.invoke(
+        app,
+        [
+            "anchor",
+            "publish",
+            "--backend",
+            "signed-file",
+            "--path",
+            str(anchor_path),
+            "--issuer",
+            "protected-ci",
+            "--key-id",
+            "ci-2026",
+            "--private-key",
+            str(private_key_path),
+        ],
+    )
+    verify = runner.invoke(
+        app,
+        [
+            "anchor",
+            "verify",
+            "--backend",
+            "signed-file",
+            "--path",
+            str(anchor_path),
+            "--trusted-config",
+            str(trusted_config_path),
+            "--json",
+        ],
+    )
+
+    assert publish.exit_code == 0, publish.stderr
+    assert verify.exit_code == 0, verify.stderr
+    payload = json.loads(verify.stdout)
+    assert payload["passed"] is True
+    assert payload["signed"] is True
+    assert payload["signer_key_id"] == "ci-2026"
+
+
+def test_anchor_signed_file_publish_requires_signing_arguments(monkeypatch, tmp_repo: Path):
+    _write_active_task(tmp_repo)
+    monkeypatch.chdir(tmp_repo)
+
+    result = runner.invoke(
+        app,
+        [
+            "anchor",
+            "publish",
+            "--backend",
+            "signed-file",
+            "--path",
+            str(tmp_repo / "anchor.json"),
+            "--issuer",
+            "protected-ci",
+        ],
+    )
+
+    assert result.exit_code == 1
+    assert "--key-id and --private-key are required" in result.stderr
+
+
+def test_anchor_signed_file_verify_requires_trusted_config(monkeypatch, tmp_repo: Path):
+    _write_active_task(tmp_repo)
+    monkeypatch.chdir(tmp_repo)
+
+    result = runner.invoke(
+        app,
+        [
+            "anchor",
+            "verify",
+            "--backend",
+            "signed-file",
+            "--path",
+            str(tmp_repo / "anchor.json"),
+        ],
+    )
+
+    assert result.exit_code == 1
+    assert "--trusted-config is required" in result.stderr
 
 
 def test_anchor_verify_mismatch_human_output(monkeypatch, tmp_repo: Path):

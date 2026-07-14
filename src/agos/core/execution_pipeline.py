@@ -1,12 +1,22 @@
 """Automatic execution pipeline built on the existing execution service."""
 from __future__ import annotations
 
+from collections.abc import Callable
+from dataclasses import replace
+import time
+
 from pydantic import BaseModel, Field
 
 from agos.core.config import load_config
+from agos.core.execution import CandidatePatch
 from agos.core.execution_runtime import ExecutionRuntime, ExecutionRuntimeSnapshot
 from agos.core.execution_service import ExecutionService
-from agos.core.execution_planner import PlanSource, PlannerAdapter, create_execution_plan_with_provenance
+from agos.core.execution_planner import (
+    ExecutionPlanResult,
+    PlanSource,
+    PlannerAdapter,
+    create_execution_plan_with_provenance,
+)
 from agos.core.review_adapter import ReviewerAdapter
 from agos.core.review_orchestrator import ReviewerSpec
 from agos.core.status import load_status
@@ -43,6 +53,7 @@ def run_auto_execution(
     planner: PlannerAdapter | None = None,
     reviewer_adapters: dict[str, ReviewerAdapter] | None = None,
     reviewer_specs: list[ReviewerSpec] | None = None,
+    resume_run_id: str | None = None,
 ) -> AutoExecutionResult:
     """Generate, run, test, review, decide, and optionally apply a plan."""
 
@@ -51,16 +62,25 @@ def run_auto_execution(
         raise ValueError("No active AGOS task found")
     task = load_task(service.paths.task_yaml)
     config = load_config(service.paths.root)
-    plan_result = create_execution_plan_with_provenance(
-        task,
-        config,
-        config.workers,
-        planner_json=planner_json,
-        planner=planner,
-    )
-    plan = plan_result.plan
-    prepared = service.execute_plan_model(plan)
-    snapshot = _run_prepared_plan(service, prepared)
+    if resume_run_id is None:
+        plan_result = create_execution_plan_with_provenance(
+            task,
+            config,
+            config.workers,
+            planner_json=planner_json,
+            planner=planner,
+        )
+        plan = plan_result.plan
+        prepared = service.execute_plan_model(plan)
+    else:
+        prepared = service.store.read_plan()
+        if prepared.task_id != task.id:
+            raise ValueError(
+                f"persisted execution plan task_id {prepared.task_id!r} "
+                f"does not match active task {task.id!r}"
+            )
+        plan_result = ExecutionPlanResult(plan=prepared, source="fallback")
+    snapshot = _run_prepared_plan(service, prepared, run_id=resume_run_id)
 
     candidate_ids: list[str] = []
     accepted_candidate_ids: list[str] = []
@@ -72,7 +92,7 @@ def run_auto_execution(
     blocked_reason: str | None = None
     notes: list[str] = []
     if snapshot.state == "stuck":
-        note = "execution runtime stopped after repeated state observations; manual inspection required"
+        note = "execution runtime exhausted its polling budget; resume or inspect persisted worker state"
         notes.append(note)
         blocked_stage, blocked_reason = _first_block(blocked_stage, blocked_reason, "execution", note)
     if snapshot.failed_subtasks:
@@ -81,8 +101,53 @@ def run_auto_execution(
         blocked_stage, blocked_reason = _first_block(blocked_stage, blocked_reason, "execution", note)
     reviewers = dict(reviewer_adapters or {})
     specs = list(reviewer_specs or [])
+    existing_by_subtask = (
+        _existing_candidates_by_subtask(service) if resume_run_id is not None else {}
+    )
 
     for subtask_id in snapshot.completed_subtasks:
+        existing = existing_by_subtask.get(subtask_id)
+        if existing is not None:
+            candidate_ids.append(existing.id)
+            _record_existing_review(
+                existing,
+                candidate_review_ids,
+                candidate_review_raw_refs,
+            )
+            if existing.status in {"accepted", "applied"}:
+                accepted_candidate_ids.append(existing.id)
+            if existing.status == "applied":
+                applied_candidate_ids.append(existing.id)
+                continue
+            if existing.status == "accepted" and apply:
+                try:
+                    service.apply_candidate(existing.id)
+                except Exception as exc:
+                    note = f"candidate {existing.id} apply failed: {exc}"
+                    notes.append(note)
+                    blocked_stage, blocked_reason = _first_block(
+                        blocked_stage,
+                        blocked_reason,
+                        "apply",
+                        note,
+                    )
+                    continue
+                applied_candidate_ids.append(existing.id)
+                continue
+            if existing.status == "accepted":
+                continue
+            note = (
+                f"candidate {existing.id} already exists with status "
+                f"{existing.status}; resume requires manual continuation"
+            )
+            notes.append(note)
+            blocked_stage, blocked_reason = _first_block(
+                blocked_stage,
+                blocked_reason,
+                "candidate",
+                note,
+            )
+            continue
         try:
             candidate = service.submit_candidate(subtask_id, summary=f"Automatic candidate for {subtask_id}.")
         except Exception as exc:
@@ -189,7 +254,13 @@ def run_auto_execution(
     )
 
 
-def _run_prepared_plan(service: ExecutionService, plan) -> ExecutionRuntimeSnapshot:
+def _run_prepared_plan(
+    service: ExecutionService,
+    plan,
+    *,
+    run_id: str | None = None,
+    sleeper: Callable[[float], None] = time.sleep,
+) -> ExecutionRuntimeSnapshot:
     config = load_config(service.paths.root)
     runtime_config = config.orchestration
     worker_timeout_seconds = runtime_config.worker_timeout_seconds
@@ -209,36 +280,68 @@ def _run_prepared_plan(service: ExecutionService, plan) -> ExecutionRuntimeSnaps
         retry_backoff_seconds=runtime_config.retry_backoff_seconds,
         worker_timeout_seconds=worker_timeout_seconds,
     )
-    run_id = "auto-run-" + plan.id.removeprefix("auto-plan-")
-    snapshot = runtime.tick(plan, run_id=run_id)
-    previous: tuple[str, str, tuple[str, ...], tuple[str, ...]] | None = None
+    execution_run_id = run_id or ("auto-run-" + plan.id.removeprefix("auto-plan-"))
+    snapshot = runtime.tick(plan, run_id=execution_run_id)
     for _ in range(runtime_config.max_tick_iterations):
-        state_key = (
-            snapshot.state,
-            ",".join(snapshot.running_subtasks),
-            snapshot.completed_subtasks,
-            snapshot.failed_subtasks,
-        )
         if snapshot.state not in {"queued", "running"}:
             break
-        if previous == state_key:
-            snapshot = ExecutionRuntimeSnapshot(
-                run_id=snapshot.run_id,
-                running_subtasks=snapshot.running_subtasks,
-                completed_subtasks=snapshot.completed_subtasks,
-                failed_subtasks=snapshot.failed_subtasks,
-                cancelled_subtasks=snapshot.cancelled_subtasks,
-                backend=snapshot.backend,
-                state="stuck",
-                waiting_nodes=snapshot.waiting_nodes,
-                completed_nodes=snapshot.completed_nodes,
-                failed_nodes=snapshot.failed_nodes,
-                output_refs=dict(snapshot.output_refs),
-            )
-            break
-        previous = state_key
-        snapshot = runtime.tick(plan, run_id=run_id)
+        interval = _running_poll_interval(config, plan, snapshot.running_subtasks)
+        if interval > 0:
+            sleeper(interval)
+        snapshot = runtime.tick(plan, run_id=execution_run_id)
+    if snapshot.state in {"queued", "running"}:
+        snapshot = replace(snapshot, state="stuck")
     return snapshot
+
+
+def _existing_candidates_by_subtask(
+    service: ExecutionService,
+) -> dict[str, CandidatePatch]:
+    by_subtask: dict[str, CandidatePatch] = {}
+    status_rank = {
+        "proposed": 0,
+        "testing": 1,
+        "tested": 2,
+        "reviewing": 3,
+        "reviewed": 4,
+        "accepted": 5,
+        "applied": 6,
+        "rejected": -1,
+        "superseded": -1,
+    }
+    for candidate in service.store.read_candidates():
+        previous = by_subtask.get(candidate.subtask_id)
+        if previous is None or status_rank.get(candidate.status, 0) > status_rank.get(
+            previous.status, 0
+        ):
+            by_subtask[candidate.subtask_id] = candidate
+    return by_subtask
+
+
+def _record_existing_review(
+    candidate: CandidatePatch,
+    review_ids: dict[str, str],
+    raw_refs: dict[str, list[str]],
+) -> None:
+    completed = [binding for binding in candidate.review_refs if binding.state == "completed"]
+    if not completed:
+        return
+    latest = completed[-1]
+    review_ids[candidate.id] = latest.review_id
+    raw_refs[candidate.id] = list(latest.raw_refs)
+
+
+def _running_poll_interval(config, plan, running_subtasks: tuple[str, ...]) -> int:
+    subtasks_by_id = {subtask.id: subtask for subtask in plan.subtasks}
+    intervals = []
+    for subtask_id in running_subtasks:
+        subtask = subtasks_by_id.get(subtask_id)
+        if subtask is None:
+            continue
+        worker = config.workers.get(subtask.worker.adapter)
+        if worker is not None:
+            intervals.append(worker.poll_interval_seconds)
+    return max(intervals, default=0)
 
 
 def _acceptance_reason(*, reviewed: bool) -> str:

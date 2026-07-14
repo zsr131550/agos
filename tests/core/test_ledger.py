@@ -2,11 +2,38 @@
 from __future__ import annotations
 
 import json
+import multiprocessing
 from pathlib import Path
+import time
 
 import pytest
 
 from agos.core.ledger import Ledger, LedgerTamperError, canonical_json, compute_hash
+
+
+def _append_batch(
+    path_text: str,
+    worker: int,
+    count: int,
+    start_event,
+) -> None:
+    """Append from one spawned process with an enlarged tail/write race window."""
+
+    import agos.core.ledger as ledger_module
+
+    original_dumps = ledger_module.json.dumps
+
+    def delayed_dumps(value, *args, **kwargs):
+        if isinstance(value, dict) and "hash" in value:
+            time.sleep(0.01)
+        return original_dumps(value, *args, **kwargs)
+
+    ledger_module.json.dumps = delayed_dumps
+    if not start_event.wait(timeout=10):
+        raise RuntimeError("concurrent ledger test start timed out")
+    ledger = Ledger(Path(path_text))
+    for index in range(count):
+        ledger.append({"type": "concurrent", "worker": worker, "index": index})
 
 
 def test_canonical_json_is_sorted_compact():
@@ -135,3 +162,27 @@ def test_append_reads_existing_tail_once(tmp_path: Path, monkeypatch: pytest.Mon
     led.append({"type": "checkpoint"})
 
     assert calls <= 1
+
+
+def test_concurrent_process_appends_preserve_one_chain(tmp_path: Path):
+    path = tmp_path / "ledger.jsonl"
+    context = multiprocessing.get_context("spawn")
+    start_event = context.Event()
+    processes = [
+        context.Process(
+            target=_append_batch,
+            args=(str(path), worker, 10, start_event),
+        )
+        for worker in range(4)
+    ]
+    for process in processes:
+        process.start()
+    start_event.set()
+    for process in processes:
+        process.join(timeout=20)
+        assert process.exitcode == 0
+
+    records = Ledger(path).read_all()
+    assert [record["seq"] for record in records] == list(range(1, 41))
+    assert len({(record["worker"], record["index"]) for record in records}) == 40
+    Ledger(path).verify_chain()

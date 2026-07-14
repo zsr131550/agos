@@ -19,3 +19,4 @@ dist_test/
 .worktrees/
 .idea/
 .obsidian/
+.DS_Store

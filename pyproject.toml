@@ -9,6 +9,7 @@ description = "Executor-agnostic governance layer for AI coding agents"
 readme = "README.md"
 requires-python = ">=3.11"
 license = "MIT"
+license-files = ["LICENSE"]
 authors = [
     {name = "AGOS project"},
 ]
@@ -36,8 +37,12 @@ Source = "https://github.com/zsr131550/agos"
 Issues = "https://github.com/zsr131550/agos/issues"
 
 [project.optional-dependencies]
+signing = [
+    "cryptography>=42",
+]
 dev = [
     "build>=1.2",
+    "cryptography>=42",
     "pytest>=8.0",
     "pytest-cov>=5.0",
     "ruff>=0.8",
