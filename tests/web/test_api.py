@@ -25,7 +25,9 @@ from agos.core.repo import repo_paths, task_paths
 from agos.core.review import ReviewPacket, ReviewReport
 from agos.core.review_store import ReviewStore
 from agos.core.status import TaskStatus, load_status, save_status
-from agos.core.task import ExecutorBinding, Task, save_task
+from agos.core.task import ExecutorBinding, Task, load_task, save_task
+from agos.core.task_execution import TaskExecutionResult
+from agos.core.task_execution_service import TaskExecutionError
 from agos.web.api import (
     DashboardApiError,
     archive_current_task_payload,
@@ -131,7 +133,11 @@ def test_start_run_payload_uses_selected_task_agent(tmp_repo: Path, monkeypatch)
         executor="multica",
         agent="Lambda",
         workers={
-            "codex_local": WorkerConfig(type="codex_cli", command="codex"),
+            "codex_local": WorkerConfig(
+                type="codex_cli",
+                command="codex",
+                dangerously_bypass_permissions=True,
+            ),
         },
     ).save(paths.agos_yaml)
     captured = {}
@@ -139,6 +145,7 @@ def test_start_run_payload_uses_selected_task_agent(tmp_repo: Path, monkeypatch)
     def fake_start(self, task):
         captured["adapter"] = self.name
         captured["task_executor"] = task.executor.model_dump()
+        captured["dangerously_bypass_permissions"] = self.dangerously_bypass_permissions
         return ExecutorRun(adapter=self.name, run_id="codex-local-run", issue_id=None)
 
     monkeypatch.setattr("agos.adapters.local_cli_executor.CodexCliExecutorAdapter.start", fake_start)
@@ -154,10 +161,504 @@ def test_start_run_payload_uses_selected_task_agent(tmp_repo: Path, monkeypatch)
     assert payload["ok"] is True
     assert captured == {
         "adapter": "codex_cli",
-        "task_executor": {"adapter": "codex_cli", "agent": "codex_local"},
+        "task_executor": {
+            "adapter": "codex_cli",
+            "agent": "codex_local",
+            "selection_id": "worker:codex_local",
+        },
+        "dangerously_bypass_permissions": True,
     }
     task = yaml.safe_load(paths.task_yaml.read_text(encoding="utf-8"))
-    assert task["executor"] == {"adapter": "codex_cli", "agent": "codex_local"}
+    assert task["executor"] == {
+        "adapter": "codex_cli",
+        "agent": "codex_local",
+        "selection_id": "worker:codex_local",
+    }
+
+
+def test_start_run_payload_preserves_default_executor_permission_mode(
+    tmp_repo: Path,
+    monkeypatch,
+) -> None:
+    paths = repo_paths(tmp_repo)
+    paths.agos_dir.mkdir(parents=True, exist_ok=True)
+    AGOSConfig.model_validate(
+        {
+            "executor": {
+                "name": "codex_cli",
+                "agent": "codex",
+                "command": "codex",
+                "dangerously_bypass_permissions": True,
+            },
+            "default_workflow": "feature",
+            "workflows": {"feature": {"gates": []}},
+        }
+    ).save(paths.agos_yaml)
+    captured = {}
+
+    def fake_start(self, task):
+        captured["dangerously_bypass_permissions"] = self.dangerously_bypass_permissions
+        return ExecutorRun(adapter=self.name, run_id="codex-default-run", issue_id=None)
+
+    monkeypatch.setattr("agos.adapters.local_cli_executor.CodexCliExecutorAdapter.start", fake_start)
+
+    payload = start_run_payload(
+        tmp_repo,
+        {
+            "title": "Use dangerous-compatible default",
+            "agent": "executor:codex_cli:codex",
+        },
+    )
+
+    assert payload["ok"] is True
+    assert captured["dangerously_bypass_permissions"] is True
+
+
+def test_dashboard_resume_keeps_implicit_default_executor_identity(
+    tmp_repo: Path,
+    monkeypatch,
+) -> None:
+    paths = repo_paths(tmp_repo)
+    paths.agos_dir.mkdir(parents=True, exist_ok=True)
+    AGOSConfig.model_validate(
+        {
+            "executor": {
+                "name": "codex_cli",
+                "agent": "shared",
+                "command": "safe-default-codex",
+            },
+            "default_workflow": "feature",
+            "workflows": {"feature": {"gates": []}},
+            "workers": {
+                "danger": {
+                    "type": "codex_cli",
+                    "agent": "shared",
+                    "command": "danger-worker-codex",
+                    "dangerously_bypass_permissions": True,
+                }
+            },
+        }
+    ).save(paths.agos_yaml)
+    seen: list[tuple[str, bool]] = []
+
+    def fake_start(self, _task):
+        seen.append((self.command, self.dangerously_bypass_permissions))
+        return ExecutorRun(adapter=self.name, run_id=f"default-run-{len(seen)}", issue_id=None)
+
+    monkeypatch.setattr("agos.adapters.local_cli_executor.CodexCliExecutorAdapter.start", fake_start)
+
+    start_run_payload(tmp_repo, {"title": "Keep implicit default", "mode": "legacy"})
+    resume_current_task_payload(tmp_repo)
+
+    assert seen == [("safe-default-codex", False), ("safe-default-codex", False)]
+    assert load_task(paths.task_yaml).executor.selection_id == "executor:codex_cli:shared"
+
+
+def test_dashboard_resume_keeps_selected_worker_permission_identity(
+    tmp_repo: Path,
+    monkeypatch,
+) -> None:
+    paths = repo_paths(tmp_repo)
+    paths.agos_dir.mkdir(parents=True, exist_ok=True)
+    AGOSConfig.default(
+        executor="multica",
+        agent="Lambda",
+        workers={
+            "danger": WorkerConfig(
+                type="codex_cli",
+                agent="shared",
+                command="danger-codex",
+                dangerously_bypass_permissions=True,
+            ),
+            "safe": WorkerConfig(
+                type="codex_cli",
+                agent="shared",
+                command="safe-codex",
+                dangerously_bypass_permissions=False,
+            ),
+        },
+    ).save(paths.agos_yaml)
+    seen: list[tuple[str, bool]] = []
+
+    def fake_start(self, _task):
+        seen.append((self.command, self.dangerously_bypass_permissions))
+        return ExecutorRun(adapter=self.name, run_id=f"worker-run-{len(seen)}", issue_id=None)
+
+    monkeypatch.setattr("agos.adapters.local_cli_executor.CodexCliExecutorAdapter.start", fake_start)
+
+    start_run_payload(
+        tmp_repo,
+        {"title": "Keep safe worker", "mode": "legacy", "agent": "worker:safe"},
+    )
+    resume_current_task_payload(tmp_repo)
+
+    assert seen == [("safe-codex", False), ("safe-codex", False)]
+
+
+def test_dashboard_resume_blocks_when_selected_worker_was_removed(
+    tmp_repo: Path,
+    monkeypatch,
+) -> None:
+    paths = repo_paths(tmp_repo)
+    paths.agos_dir.mkdir(parents=True, exist_ok=True)
+    config = AGOSConfig.default(
+        executor="multica",
+        agent="Lambda",
+        workers={
+            "safe": WorkerConfig(
+                type="codex_cli",
+                agent="shared",
+                command="safe-codex",
+            ),
+        },
+    )
+    config.save(paths.agos_yaml)
+    starts: list[str] = []
+
+    def fake_start(self, _task):
+        starts.append(self.command)
+        return ExecutorRun(adapter=self.name, run_id=f"removed-run-{len(starts)}", issue_id=None)
+
+    monkeypatch.setattr("agos.adapters.local_cli_executor.CodexCliExecutorAdapter.start", fake_start)
+    start_run_payload(
+        tmp_repo,
+        {"title": "Removed worker", "mode": "legacy", "agent": "worker:safe"},
+    )
+    config.model_copy(update={"workers": {}}).save(paths.agos_yaml)
+
+    with pytest.raises(DashboardApiError) as err:
+        resume_current_task_payload(tmp_repo)
+
+    assert err.value.code == "executor_selection_unavailable"
+    assert starts == ["safe-codex"]
+    status = load_status(paths)
+    assert status is not None
+    assert status.phase == "blocked"
+    records = Ledger(paths.ledger).read_all()
+    assert records[-1]["type"] == "dashboard_executor_dispatch_failed"
+    assert status.ledger_head_hash == records[-1]["hash"]
+
+
+def test_dashboard_resume_blocks_when_selected_worker_changes_adapter(
+    tmp_repo: Path,
+    monkeypatch,
+) -> None:
+    paths = repo_paths(tmp_repo)
+    paths.agos_dir.mkdir(parents=True, exist_ok=True)
+    config = AGOSConfig.default(
+        executor="multica",
+        agent="Lambda",
+        workers={
+            "stable": WorkerConfig(
+                type="codex_cli",
+                agent="shared",
+                command="stable-codex",
+            ),
+        },
+    )
+    config.save(paths.agos_yaml)
+    starts: list[tuple[str, str]] = []
+
+    def fake_codex_start(self, _task):
+        starts.append((self.name, self.command))
+        return ExecutorRun(adapter=self.name, run_id="changed-adapter-run", issue_id=None)
+
+    monkeypatch.setattr(
+        "agos.adapters.local_cli_executor.CodexCliExecutorAdapter.start",
+        fake_codex_start,
+    )
+    monkeypatch.setattr(
+        "agos.adapters.local_cli_executor.ClaudeCodeExecutorAdapter.start",
+        lambda self, _task: starts.append((self.name, self.command)),
+    )
+    start_run_payload(
+        tmp_repo,
+        {"title": "Changed adapter", "mode": "legacy", "agent": "worker:stable"},
+    )
+    config.model_copy(
+        update={
+            "workers": {
+                "stable": WorkerConfig(
+                    type="claude_code",
+                    agent="shared",
+                    command="stable-claude",
+                )
+            }
+        }
+    ).save(paths.agos_yaml)
+
+    with pytest.raises(DashboardApiError) as err:
+        resume_current_task_payload(tmp_repo)
+
+    assert err.value.code == "executor_selection_changed"
+    assert starts == [("codex_cli", "stable-codex")]
+    status = load_status(paths)
+    assert status is not None
+    assert status.phase == "blocked"
+    records = Ledger(paths.ledger).read_all()
+    assert records[-1]["type"] == "dashboard_executor_dispatch_failed"
+    assert status.ledger_head_hash == records[-1]["hash"]
+
+
+def test_dashboard_resume_keeps_selected_local_agent_safe(
+    tmp_repo: Path,
+    monkeypatch,
+) -> None:
+    paths = repo_paths(tmp_repo)
+    paths.agos_dir.mkdir(parents=True, exist_ok=True)
+    AGOSConfig.model_validate(
+        {
+            "executor": {
+                "name": "codex_cli",
+                "agent": "codex",
+                "command": "danger-codex",
+                "dangerously_bypass_permissions": True,
+            },
+            "default_workflow": "feature",
+            "workflows": {"feature": {"gates": []}},
+        }
+    ).save(paths.agos_yaml)
+    monkeypatch.setattr(
+        "agos.web.api.shutil.which",
+        lambda command: "/opt/agos-safe/codex" if command == "codex" else None,
+    )
+    seen: list[tuple[str, bool]] = []
+
+    def fake_start(self, _task):
+        seen.append((self.command, self.dangerously_bypass_permissions))
+        return ExecutorRun(adapter=self.name, run_id=f"local-run-{len(seen)}", issue_id=None)
+
+    monkeypatch.setattr("agos.adapters.local_cli_executor.CodexCliExecutorAdapter.start", fake_start)
+
+    start_run_payload(
+        tmp_repo,
+        {
+            "title": "Keep local agent safe",
+            "mode": "legacy",
+            "agent": "local:codex_cli:codex",
+        },
+    )
+    resume_current_task_payload(tmp_repo)
+
+    assert seen == [("/opt/agos-safe/codex", False), ("/opt/agos-safe/codex", False)]
+
+
+def test_dashboard_resume_supports_unique_legacy_local_executor(
+    tmp_repo: Path,
+    monkeypatch,
+) -> None:
+    paths = repo_paths(tmp_repo)
+    paths.agos_dir.mkdir(parents=True, exist_ok=True)
+    AGOSConfig.default(executor="multica", agent="Lambda", workers={}).save(paths.agos_yaml)
+    task = Task(
+        id="agos-legacy-local",
+        title="Legacy local binding",
+        workflow="feature",
+        gates=[],
+        executor=ExecutorBinding(adapter="codex_cli", agent="codex"),
+    )
+    save_task(task, paths.task_yaml)
+    ledger = Ledger(paths.ledger)
+    started = ledger.append({"type": "task_started", "task_id": task.id, "title": task.title})
+    save_status(
+        TaskStatus.for_started_task(
+            task=task,
+            run=ExecutorRun(adapter="codex_cli", run_id="legacy-local-run", issue_id=None),
+            ledger_head_hash=started["hash"],
+        ),
+        paths,
+    )
+    monkeypatch.setattr(
+        "agos.web.api.shutil.which",
+        lambda command: "/opt/agos-safe/codex" if command == "codex" else None,
+    )
+    seen: list[tuple[str, bool]] = []
+
+    def fake_start(self, _task):
+        seen.append((self.command, self.dangerously_bypass_permissions))
+        return ExecutorRun(adapter=self.name, run_id="legacy-local-resumed", issue_id=None)
+
+    monkeypatch.setattr("agos.adapters.local_cli_executor.CodexCliExecutorAdapter.start", fake_start)
+
+    payload = resume_current_task_payload(tmp_repo)
+
+    assert payload["run_id"] == "legacy-local-resumed"
+    assert seen == [("/opt/agos-safe/codex", False)]
+
+
+def test_dashboard_resume_rejects_ambiguous_legacy_executor_binding(
+    tmp_repo: Path,
+    monkeypatch,
+) -> None:
+    paths = repo_paths(tmp_repo)
+    paths.agos_dir.mkdir(parents=True, exist_ok=True)
+    AGOSConfig.default(
+        executor="multica",
+        agent="Lambda",
+        workers={
+            "danger": WorkerConfig(
+                type="codex_cli",
+                agent="shared",
+                command="danger-codex",
+                dangerously_bypass_permissions=True,
+            ),
+            "safe": WorkerConfig(
+                type="codex_cli",
+                agent="shared",
+                command="safe-codex",
+                dangerously_bypass_permissions=False,
+            ),
+        },
+    ).save(paths.agos_yaml)
+    task = Task(
+        id="agos-legacy-ambiguous",
+        title="Ambiguous legacy binding",
+        workflow="feature",
+        gates=[],
+        executor=ExecutorBinding(adapter="codex_cli", agent="shared"),
+    )
+    save_task(task, paths.task_yaml)
+    ledger = Ledger(paths.ledger)
+    started = ledger.append({"type": "task_started", "task_id": task.id, "title": task.title})
+    save_status(
+        TaskStatus.for_started_task(
+            task=task,
+            run=ExecutorRun(adapter="codex_cli", run_id="legacy-run", issue_id=None),
+            ledger_head_hash=started["hash"],
+        ),
+        paths,
+    )
+    starts: list[str] = []
+    monkeypatch.setattr(
+        "agos.adapters.local_cli_executor.CodexCliExecutorAdapter.start",
+        lambda self, _task: (
+            starts.append(self.command)
+            or ExecutorRun(adapter=self.name, run_id="unexpected-run", issue_id=None)
+        ),
+    )
+
+    with pytest.raises(DashboardApiError) as err:
+        resume_current_task_payload(tmp_repo)
+
+    assert err.value.code == "executor_selection_ambiguous"
+    assert starts == []
+    status = load_status(paths)
+    assert status is not None
+    assert status.phase == "blocked"
+    records = Ledger(paths.ledger).read_all()
+    assert records[-1]["type"] == "dashboard_executor_dispatch_failed"
+    assert status.ledger_head_hash == records[-1]["hash"]
+
+
+def test_dashboard_resume_rejects_unmatched_legacy_executor_binding(
+    tmp_repo: Path,
+    monkeypatch,
+) -> None:
+    paths = repo_paths(tmp_repo)
+    paths.agos_dir.mkdir(parents=True, exist_ok=True)
+    AGOSConfig.default(executor="multica", agent="Lambda", workers={}).save(paths.agos_yaml)
+    task = Task(
+        id="agos-legacy-unmatched",
+        title="Unmatched legacy binding",
+        workflow="feature",
+        gates=[],
+        executor=ExecutorBinding(adapter="codex_cli", agent="deleted-worker"),
+    )
+    save_task(task, paths.task_yaml)
+    ledger = Ledger(paths.ledger)
+    started = ledger.append({"type": "task_started", "task_id": task.id, "title": task.title})
+    save_status(
+        TaskStatus.for_started_task(
+            task=task,
+            run=ExecutorRun(adapter="codex_cli", run_id="legacy-deleted-run", issue_id=None),
+            ledger_head_hash=started["hash"],
+        ),
+        paths,
+    )
+    starts: list[str] = []
+    monkeypatch.setattr(
+        "agos.adapters.local_cli_executor.CodexCliExecutorAdapter.start",
+        lambda self, _task: (
+            starts.append(self.command)
+            or ExecutorRun(adapter=self.name, run_id="unexpected-fallback-run", issue_id=None)
+        ),
+    )
+
+    with pytest.raises(DashboardApiError) as err:
+        resume_current_task_payload(tmp_repo)
+
+    assert err.value.code == "executor_selection_unavailable"
+    assert starts == []
+    status = load_status(paths)
+    assert status is not None
+    assert status.phase == "blocked"
+    records = Ledger(paths.ledger).read_all()
+    assert records[-1]["type"] == "dashboard_executor_dispatch_failed"
+    assert status.ledger_head_hash == records[-1]["hash"]
+
+
+def test_dashboard_start_passes_candidate_mode_to_service(monkeypatch, tmp_repo: Path) -> None:
+    paths = repo_paths(tmp_repo)
+    paths.agos_dir.mkdir(parents=True, exist_ok=True)
+    AGOSConfig.default(agent="Lambda").save(paths.agos_yaml)
+    captured = {}
+    execution_result = TaskExecutionResult(
+        task_id="agos-candidate-01",
+        mode="candidate",
+        run_id="candidate-run-01",
+        state="completed",
+        candidate_ids=["candidate-01"],
+        applied_candidate_ids=["candidate-01"],
+    )
+
+    class FakeService:
+        def start(self, request):
+            captured["request"] = request
+            return execution_result
+
+    monkeypatch.setattr(
+        "agos.web.api.build_task_execution_service",
+        lambda _root: FakeService(),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        "agos.web.api.current_run_payload",
+        lambda _root: {"run": {"id": execution_result.task_id, "mode": "candidate"}},
+    )
+
+    payload = start_run_payload(
+        tmp_repo,
+        {"title": "Candidate change", "mode": "candidate"},
+    )
+
+    assert captured["request"].mode == "candidate"
+    assert payload["run_id"] == "candidate-run-01"
+    assert payload["execution_result"] == execution_result.model_dump(mode="json")
+
+
+def test_dashboard_rejects_unknown_mode_without_state(tmp_repo: Path) -> None:
+    paths = repo_paths(tmp_repo)
+    paths.agos_dir.mkdir(parents=True, exist_ok=True)
+    AGOSConfig.default(agent="Lambda").save(paths.agos_yaml)
+
+    with pytest.raises(DashboardApiError, match="mode") as err:
+        start_run_payload(tmp_repo, {"title": "Invalid mode", "mode": "unknown"})
+
+    assert err.value.code == "invalid_request"
+    assert not paths.task_yaml.exists()
+
+
+def test_dashboard_preserves_invalid_workflow_error_without_state(tmp_repo: Path) -> None:
+    paths = repo_paths(tmp_repo)
+    paths.agos_dir.mkdir(parents=True, exist_ok=True)
+    AGOSConfig.default(agent="Lambda").save(paths.agos_yaml)
+
+    with pytest.raises(DashboardApiError) as err:
+        start_run_payload(tmp_repo, {"title": "Invalid workflow", "workflow": "missing"})
+
+    assert err.value.code == "invalid_workflow"
+    assert "unknown workflow" in err.value.message
+    assert not paths.task_yaml.exists()
 
 
 def test_archive_current_task_payload_moves_active_task_to_archive(dashboard_repo: Path) -> None:
@@ -284,6 +785,41 @@ def test_completed_executor_without_outputs_is_blocked_not_done(dashboard_repo: 
     assert payload["runs"][0]["phase"] == "blocked"
     assert current["run"]["phase"] == "blocked"
     assert load_status(paths).phase == "blocked"
+
+
+def test_completed_source_code_executor_with_repo_change_is_done(tmp_repo: Path) -> None:
+    paths = repo_paths(tmp_repo)
+    paths.agos_dir.mkdir(parents=True, exist_ok=True)
+    AGOSConfig.default(agent="Lambda").save(paths.agos_yaml)
+    task = Task(
+        id="agos-source-code",
+        title="Edit source",
+        workflow="feature",
+        gates=[],
+        executor=ExecutorBinding(adapter="codex_cli", agent="codex"),
+        execution_mode="legacy",
+        output_contract="source_code",
+    )
+    save_task(task, paths.task_yaml)
+    ledger = Ledger(paths.ledger)
+    started = ledger.append({"type": "task_started", "task_id": task.id, "title": task.title})
+    run = ExecutorRun(adapter="codex_cli", run_id="source-run", issue_id=None)
+    save_status(
+        TaskStatus.for_started_task(task=task, run=run, ledger_head_hash=started["hash"]),
+        paths,
+    )
+    run_state = paths.evidence / "executor_runs" / "source-run.json"
+    run_state.parent.mkdir(parents=True, exist_ok=True)
+    run_state.write_text(
+        json.dumps({"run_id": "source-run", "adapter": "codex_cli", "state": "completed"}),
+        encoding="utf-8",
+    )
+    (tmp_repo / "README.md").write_text("# changed source\n", encoding="utf-8")
+
+    payload = current_run_payload(tmp_repo)
+
+    assert payload["run"]["phase"] == "done"
+    assert not (tmp_repo / "outputs" / task.id).exists()
 
 
 def test_completed_executor_without_outputs_lifecycle_actions_dispatch_new_executor(
@@ -428,6 +964,144 @@ def test_current_task_lifecycle_payloads_dispatch_executor_runs(
     ]
 
 
+@pytest.mark.parametrize(
+    ("execution_state", "expected_phase"),
+    [("completed", "done"), ("running", "executing")],
+)
+def test_candidate_resume_never_dispatches_legacy_executor(
+    dashboard_repo: Path,
+    monkeypatch,
+    execution_state: str,
+    expected_phase: str,
+) -> None:
+    paths = repo_paths(dashboard_repo)
+    task = load_task(paths.task_yaml).model_copy(
+        update={"execution_mode": "candidate", "output_contract": "source_code"}
+    )
+    save_task(task, paths.task_yaml)
+    result = TaskExecutionResult(
+        task_id=task.id,
+        mode="candidate",
+        run_id="candidate-run-resumed",
+        state=execution_state,
+        candidate_ids=["candidate-01"],
+        applied_candidate_ids=["candidate-01"],
+    )
+    calls = []
+
+    class FakeService:
+        def resume_candidate(self):
+            calls.append("resume")
+            return result
+
+    monkeypatch.setattr(
+        "agos.web.api.build_task_execution_service",
+        lambda _root: FakeService(),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        "agos.cli.executor_registry.CodexCliExecutorAdapter.start",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("legacy executor must not be dispatched")
+        ),
+    )
+
+    payload = resume_current_task_payload(dashboard_repo)
+
+    assert calls == ["resume"]
+    assert payload["execution_result"]["mode"] == "candidate"
+    assert payload["run_id"] == "candidate-run-resumed"
+    assert payload["run"]["phase"] == expected_phase
+
+
+def test_completed_candidate_restart_returns_structured_error(
+    dashboard_repo: Path,
+    monkeypatch,
+) -> None:
+    paths = repo_paths(dashboard_repo)
+    task = load_task(paths.task_yaml).model_copy(
+        update={"execution_mode": "candidate", "output_contract": "source_code"}
+    )
+    save_task(task, paths.task_yaml)
+    completed = TaskExecutionResult(
+        task_id=task.id,
+        mode="candidate",
+        run_id="candidate-run-complete",
+        state="completed",
+    )
+
+    class FakeService:
+        def load_result(self):
+            return completed
+
+        def resume_candidate(self):
+            raise AssertionError("completed candidate must not restart")
+
+    monkeypatch.setattr(
+        "agos.web.api.build_task_execution_service",
+        lambda _root: FakeService(),
+        raising=False,
+    )
+
+    with pytest.raises(DashboardApiError) as err:
+        restart_current_task_payload(dashboard_repo)
+
+    assert err.value.code == "candidate_restart_unsupported"
+    assert "completed" in err.value.message
+
+
+def test_candidate_restart_reports_missing_persisted_execution_state(
+    dashboard_repo: Path,
+    monkeypatch,
+) -> None:
+    paths = repo_paths(dashboard_repo)
+    task = load_task(paths.task_yaml).model_copy(
+        update={"execution_mode": "candidate", "output_contract": "source_code"}
+    )
+    save_task(task, paths.task_yaml)
+
+    class FakeService:
+        def load_result(self):
+            raise TaskExecutionError("active task execution result is missing")
+
+    monkeypatch.setattr(
+        "agos.web.api.build_task_execution_service",
+        lambda _root: FakeService(),
+    )
+
+    with pytest.raises(DashboardApiError) as err:
+        restart_current_task_payload(dashboard_repo)
+
+    assert err.value.code == "candidate_state_missing"
+    assert "execution result is missing" in err.value.message
+
+
+def test_candidate_resume_reports_pipeline_failure(
+    dashboard_repo: Path,
+    monkeypatch,
+) -> None:
+    paths = repo_paths(dashboard_repo)
+    task = load_task(paths.task_yaml).model_copy(
+        update={"execution_mode": "candidate", "output_contract": "source_code"}
+    )
+    save_task(task, paths.task_yaml)
+
+    class FakeService:
+        def resume_candidate(self):
+            raise TaskExecutionError("candidate pipeline unavailable")
+
+    monkeypatch.setattr(
+        "agos.web.api.build_task_execution_service",
+        lambda _root: FakeService(),
+    )
+
+    with pytest.raises(DashboardApiError) as err:
+        resume_current_task_payload(dashboard_repo)
+
+    assert err.value.code == "candidate_resume_failed"
+    assert "pipeline unavailable" in err.value.message
+
+
 def test_start_run_payload_can_replace_active_task(dashboard_repo: Path, monkeypatch) -> None:
     paths = repo_paths(dashboard_repo)
     captured = {}
@@ -465,6 +1139,10 @@ def test_review_run_payload_uses_selected_review_agent(dashboard_repo: Path) -> 
 
 def test_review_run_payload_accepts_local_review_agent(dashboard_repo: Path, monkeypatch) -> None:
     captured = {}
+    monkeypatch.setattr(
+        "agos.web.api.shutil.which",
+        lambda command: "/test/bin/codex" if command == "codex" else None,
+    )
 
     def fake_run(self, *, run_id, packet, reviewers, max_parallel=4):
         captured["adapter_names"] = sorted(self._reviewers)
@@ -494,11 +1172,13 @@ def test_runs_and_current_run_payloads_include_pipeline_state(dashboard_repo: Pa
             "title": "构建可视化控制台",
             "workflow": "feature",
             "phase": "executing",
+            "mode": "legacy",
             "scope": "current",
         }
     ]
     assert current["run"]["id"] == "agos-dashboard-01"
     assert current["run"]["title"] == "构建可视化控制台"
+    assert current["run"]["mode"] == "legacy"
     assert current["run"]["workflow"] == "feature"
     assert current["run"]["phase"] == "executing"
     assert Path(current["run"]["output_dir"]).parts[-2:] == ("outputs", "agos-dashboard-01")

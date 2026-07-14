@@ -26,6 +26,7 @@ from agos.core.execution import (
     CandidateBundleDecision,
     CandidateMergePreview,
     CandidatePatch,
+    CandidateProvenance,
     CandidateTestRun,
     DecisionValue,
     ExecutionPlan,
@@ -240,6 +241,21 @@ class ExecutionService:
         self.workspace_manager.validate_patch_scope(patch_bytes, subtask.write_scope)
         candidate_id = _new_id("candidate")
         patch_ref, patch_sha = self.store.write_candidate_patch(candidate_id, patch_bytes)
+        created = self._append_event(
+            {
+                "type": "candidate_patch_created",
+                "task_id": task.id,
+                "subtask_id": subtask.id,
+                "candidate_id": candidate_id,
+                "patch_ref": patch_ref,
+                "patch_sha256": patch_sha,
+                "provenance_source": "worker_export",
+                "source_agent": subtask.worker.adapter,
+                "workspace_ref": workspace.ref,
+                "base_commit": workspace.base_commit,
+                "attestation_ref": None,
+            }
+        )
         candidate = CandidatePatch(
             id=candidate_id,
             task_id=task.id,
@@ -250,18 +266,12 @@ class ExecutionService:
             patch_sha256=patch_sha,
             base_commit=workspace.base_commit,
             summary=summary,
+            provenance=CandidateProvenance(
+                source="worker_export",
+                ledger_head_hash=str(created["hash"]),
+            ),
         )
         self.store.write_candidate(candidate)
-        self._append_event(
-            {
-                "type": "candidate_patch_created",
-                "task_id": task.id,
-                "subtask_id": subtask.id,
-                "candidate_id": candidate.id,
-                "patch_ref": patch_ref,
-                "patch_sha256": patch_sha,
-            }
-        )
         return candidate
 
     def test_candidate(self, candidate_id: str, *, gate_id: str | None = None) -> list[CandidateTestRun]:
@@ -1411,7 +1421,5 @@ def _process_log_lines(label: str, proc: subprocess.CompletedProcess) -> list[st
         f"--- stdout ---\n{_decode(proc.stdout)}",
         f"--- stderr ---\n{_decode(proc.stderr)}",
     ]
-
-
 
 

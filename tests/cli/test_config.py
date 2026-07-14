@@ -37,6 +37,43 @@ def test_config_show_prints_yaml(monkeypatch, tmp_repo):
     assert payload["default_workflow"] == "feature"
 
 
+def test_config_show_preserves_explicit_permission_fields_only(monkeypatch, tmp_repo):
+    agos_dir = tmp_repo / ".agos"
+    agos_dir.mkdir()
+    (agos_dir / "agos.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "executor": {"name": "codex_cli", "agent": "codex", "command": "codex"},
+                "workers": {
+                    "implicit": {"type": "codex_cli", "command": "codex"},
+                    "explicit_safe": {
+                        "type": "codex_cli",
+                        "command": "codex",
+                        "dangerously_bypass_permissions": False,
+                    },
+                    "explicit_dangerous": {
+                        "type": "claude_code",
+                        "command": "claude",
+                        "dangerously_bypass_permissions": True,
+                    },
+                },
+            },
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(tmp_repo)
+
+    result = runner.invoke(app, ["config", "show", "--json"])
+
+    assert result.exit_code == 0, result.stderr
+    payload = json.loads(result.stdout)["config"]
+    assert "dangerously_bypass_permissions" not in payload["executor"]
+    assert "dangerously_bypass_permissions" not in payload["workers"]["implicit"]
+    assert payload["workers"]["explicit_safe"]["dangerously_bypass_permissions"] is False
+    assert payload["workers"]["explicit_dangerous"]["dangerously_bypass_permissions"] is True
+
+
 def test_config_validate_reports_success(monkeypatch, tmp_repo):
     _write_config(tmp_repo)
     monkeypatch.chdir(tmp_repo)

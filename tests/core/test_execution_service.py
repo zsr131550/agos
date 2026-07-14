@@ -232,6 +232,18 @@ def test_execute_plan_creates_workspaces_and_ledger_events(tmp_repo):
     assert _ledger_types(paths)[-2:] == ["execution_plan_created", "subtask_workspace_created"]
 
 
+def test_submit_candidate_rejects_empty_worker_patch_before_persisting_metadata(tmp_repo):
+    paths = _active_task(tmp_repo)
+    service = _service(tmp_repo)
+    service.execute_plan(_plan_file(tmp_repo))
+
+    with pytest.raises(ValueError, match="candidate patch is empty"):
+        service.submit_candidate("subtask-readme", summary="No repository changes.")
+
+    assert ExecutionStore(paths).read_candidates() == []
+    assert "candidate_patch_created" not in _ledger_types(paths)
+
+
 def test_start_execution_run_preflights_native_worker_readiness(tmp_repo):
     _active_task(tmp_repo)
     service = _service(tmp_repo)
@@ -347,6 +359,11 @@ def test_submit_candidate_captures_scoped_patch_and_hash(tmp_repo):
     assert b"# changed" in patch_bytes
     assert candidate.status == "proposed"
     assert _ledger_types(paths)[-1] == "candidate_patch_created"
+    created = _ledger_records(paths)[-1]
+    assert candidate.provenance is not None
+    assert candidate.provenance.source == "worker_export"
+    assert candidate.provenance.ledger_head_hash == created["hash"]
+    assert ExecutionStore(paths).read_candidate(candidate.id).provenance == candidate.provenance
 
 
 def test_submit_candidate_routes_patch_export_through_worker_adapter(tmp_repo, monkeypatch):

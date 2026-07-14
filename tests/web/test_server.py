@@ -9,20 +9,33 @@ import urllib.error
 import urllib.request
 from collections.abc import Iterator
 from types import SimpleNamespace
+from urllib.parse import urlsplit
 
 import agos.web.server as dashboard_server
 from agos.web.server import DashboardHTTPServer, create_dashboard_server
+import pytest
 import yaml
 
 
+_DEFAULT_HEADER = object()
+_SERVER_TOKENS: dict[int, str] = {}
+
+
 @contextmanager
-def running_dashboard_server(tmp_repo) -> Iterator[DashboardHTTPServer]:
-    server = create_dashboard_server(tmp_repo, host="127.0.0.1", port=0)
+def running_dashboard_server(
+    tmp_repo,
+    *,
+    host: str = "127.0.0.1",
+    token: str | None = None,
+) -> Iterator[DashboardHTTPServer]:
+    server = create_dashboard_server(tmp_repo, host=host, port=0, token=token)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
+    _SERVER_TOKENS[server.server_port] = server.auth_token
     try:
         yield server
     finally:
+        _SERVER_TOKENS.pop(server.server_port, None)
         server.shutdown()
         server.server_close()
         thread.join(timeout=5)
@@ -38,11 +51,29 @@ def read_json_error(url: str) -> tuple[int, dict[str, object]]:
     raise AssertionError("expected HTTPError")
 
 
+def _security_headers(
+    url: str,
+    *,
+    token: object = _DEFAULT_HEADER,
+    origin: object = _DEFAULT_HEADER,
+) -> dict[str, str]:
+    parsed = urlsplit(url)
+    port = parsed.port or 80
+    resolved_token = _SERVER_TOKENS.get(port) if token is _DEFAULT_HEADER else token
+    resolved_origin = f"{parsed.scheme}://{parsed.netloc}" if origin is _DEFAULT_HEADER else origin
+    headers: dict[str, str] = {}
+    if isinstance(resolved_token, str):
+        headers["Authorization"] = f"Bearer {resolved_token}"
+    if isinstance(resolved_origin, str):
+        headers["Origin"] = resolved_origin
+    return headers
+
+
 def post_json(url: str, payload: dict[str, object]) -> tuple[int, dict[str, object]]:
     request = urllib.request.Request(
         url,
         data=json.dumps(payload).encode("utf-8"),
-        headers={"Content-Type": "application/json"},
+        headers={"Content-Type": "application/json", **_security_headers(url)},
         method="POST",
     )
     with urllib.request.urlopen(request, timeout=5) as response:
@@ -56,11 +87,16 @@ def post_raw(
     body: bytes = b"",
     *,
     content_length: str | None = None,
+    token: object = _DEFAULT_HEADER,
+    origin: object = _DEFAULT_HEADER,
 ) -> tuple[int, dict[str, object] | str]:
     connection = http.client.HTTPConnection("127.0.0.1", server.server_port, timeout=5)
     try:
         connection.putrequest("POST", path)
         connection.putheader("Content-Type", "application/json")
+        url = f"http://127.0.0.1:{server.server_port}{path}"
+        for name, value in _security_headers(url, token=token, origin=origin).items():
+            connection.putheader(name, value)
         connection.putheader(
             "Content-Length",
             content_length if content_length is not None else str(len(body)),
@@ -80,6 +116,9 @@ def post_raw(
 
 
 def read_json_request_error(request: urllib.request.Request) -> tuple[int, dict[str, object]]:
+    for name, value in _security_headers(request.full_url).items():
+        if not request.has_header(name):
+            request.add_header(name, value)
     try:
         urllib.request.urlopen(request, timeout=5)
     except urllib.error.HTTPError as exc:
@@ -146,7 +185,113 @@ def test_dashboard_server_serves_health_json(tmp_repo) -> None:
         assert payload["service"] == "agos-dashboard"
 
 
-def test_dashboard_server_serves_agents_json(tmp_repo) -> None:
+def test_non_loopback_bind_requires_explicit_token(tmp_repo) -> None:
+    with pytest.raises(ValueError, match="token"):
+        create_dashboard_server(tmp_repo, host="0.0.0.0", port=0)
+
+
+def test_dashboard_mutation_rejects_missing_and_wrong_token(tmp_repo) -> None:
+    with running_dashboard_server(tmp_repo) as server:
+        missing_status, missing = post_raw(
+            server,
+            "/api/not-a-route",
+            b"{}",
+            token=None,
+        )
+        wrong_status, wrong = post_raw(
+            server,
+            "/api/not-a-route",
+            b"{}",
+            token="wrong-token",
+        )
+
+    assert missing_status == 401
+    assert wrong_status == 401
+    assert missing["error"]["code"] == "unauthorized"
+    assert wrong["error"]["code"] == "unauthorized"
+    assert server.auth_token not in json.dumps([missing, wrong])
+
+
+def test_dashboard_mutation_rejects_missing_and_cross_origin(tmp_repo) -> None:
+    with running_dashboard_server(tmp_repo) as server:
+        missing_status, missing = post_raw(
+            server,
+            "/api/not-a-route",
+            b"{}",
+            origin=None,
+        )
+        cross_status, cross = post_raw(
+            server,
+            "/api/not-a-route",
+            b"{}",
+            origin="https://attacker.invalid",
+        )
+
+    assert missing_status == 403
+    assert cross_status == 403
+    assert missing["error"]["code"] == "origin_forbidden"
+    assert cross["error"]["code"] == "origin_forbidden"
+
+
+def test_dashboard_mutation_accepts_valid_token_and_same_origin(tmp_repo) -> None:
+    with running_dashboard_server(tmp_repo) as server:
+        status, payload = post_raw(server, "/api/not-a-route", b"{}")
+
+    assert status == 404
+    assert payload == {
+        "ok": False,
+        "error": {"code": "not_found", "message": "/api/not-a-route"},
+    }
+
+
+def test_remote_dashboard_get_api_requires_token(tmp_repo) -> None:
+    with running_dashboard_server(
+        tmp_repo,
+        host="0.0.0.0",
+        token="remote-dashboard-token",
+    ) as server:
+        url = f"http://127.0.0.1:{server.server_port}/api/health"
+        status, payload = read_json_error(url)
+        request = urllib.request.Request(
+            url,
+            headers={"Authorization": "Bearer remote-dashboard-token"},
+        )
+        with urllib.request.urlopen(request, timeout=5) as response:
+            authorized = json.loads(response.read().decode("utf-8"))
+
+    assert status == 401
+    assert payload["error"]["code"] == "unauthorized"
+    assert authorized["ok"] is True
+
+
+def test_loopback_index_bootstraps_generated_token_but_remote_index_does_not(tmp_repo) -> None:
+    with running_dashboard_server(tmp_repo) as local_server:
+        with urllib.request.urlopen(
+            f"http://127.0.0.1:{local_server.server_port}/",
+            timeout=5,
+        ) as response:
+            local_body = response.read().decode("utf-8")
+        assert local_server.auth_token in local_body
+        assert "__AGOS_DASHBOARD_TOKEN__" not in local_body
+
+    with running_dashboard_server(
+        tmp_repo,
+        host="0.0.0.0",
+        token="remote-dashboard-token",
+    ) as remote_server:
+        with urllib.request.urlopen(
+            f"http://127.0.0.1:{remote_server.server_port}/",
+            timeout=5,
+        ) as response:
+            remote_body = response.read().decode("utf-8")
+        assert "remote-dashboard-token" not in remote_body
+
+
+def test_dashboard_server_serves_agents_json(tmp_repo, monkeypatch) -> None:
+    monkeypatch.setattr(
+        "agos.web.api.shutil.which",
+        lambda command: "/test/bin/codex" if command == "codex" else None,
+    )
     write_dashboard_config(tmp_repo)
     with running_dashboard_server(tmp_repo) as server:
         url = f"http://127.0.0.1:{server.server_port}/api/agents"
@@ -299,6 +444,7 @@ def test_dashboard_server_post_runs_starts_task(tmp_repo, monkeypatch) -> None:
     assert payload["run"]["workflow"] == "feature"
     assert payload["run"]["executor_run"]["run_id"] == "task-web-1"
     assert payload["issue_id"] == "AGO-WEB-1"
+    assert payload["execution_result"]["mode"] == "legacy"
 
     task_data = yaml.safe_load(
         (tmp_repo / ".agos" / "tasks" / "current" / "task.yaml").read_text(encoding="utf-8")
@@ -306,6 +452,24 @@ def test_dashboard_server_post_runs_starts_task(tmp_repo, monkeypatch) -> None:
     assert task_data["title"] == "Ship dashboard input"
     assert task_data["intent"] == "Create tasks from the local dashboard"
     assert task_data["gates"] == ["tests_pass"]
+
+
+def test_dashboard_server_rejects_unknown_execution_mode_without_task(tmp_repo) -> None:
+    write_dashboard_config(tmp_repo)
+
+    with running_dashboard_server(tmp_repo) as server:
+        request = urllib.request.Request(
+            f"http://127.0.0.1:{server.server_port}/api/runs",
+            data=json.dumps({"title": "Invalid mode", "mode": "unknown"}).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        status, payload = read_json_request_error(request)
+
+    assert status == 400
+    assert payload["error"]["code"] == "invalid_request"
+    assert "mode" in payload["error"]["message"]
+    assert not (tmp_repo / ".agos" / "tasks" / "current" / "task.yaml").exists()
 
 
 def test_dashboard_server_post_runs_can_replace_active_task(tmp_repo, monkeypatch) -> None:
@@ -906,6 +1070,8 @@ def test_serve_dashboard_forever_opens_browser_and_closes_server(
 
     class FakeServer:
         server_port = 43210
+        auth_token = "remote-dashboard-token"
+        expose_token_in_index = False
 
         def serve_forever(self):
             calls["served"] = True
@@ -914,10 +1080,11 @@ def test_serve_dashboard_forever_opens_browser_and_closes_server(
         def server_close(self):
             calls["closed"] = True
 
-    def fake_create(repo_root, *, host: str, port: int):
+    def fake_create(repo_root, *, host: str, port: int, token: str | None):
         calls["repo_root"] = repo_root
         calls["host"] = host
         calls["port"] = port
+        calls["token"] = token
         return FakeServer()
 
     monkeypatch.setattr(dashboard_server, "create_dashboard_server", fake_create)
@@ -929,6 +1096,7 @@ def test_serve_dashboard_forever_opens_browser_and_closes_server(
             host="0.0.0.0",
             port=8788,
             open_browser=True,
+            token="remote-dashboard-token",
         )
     except KeyboardInterrupt:
         pass
@@ -937,11 +1105,14 @@ def test_serve_dashboard_forever_opens_browser_and_closes_server(
         "repo_root": tmp_repo,
         "host": "0.0.0.0",
         "port": 8788,
-        "url": "http://127.0.0.1:43210",
+        "token": "remote-dashboard-token",
+        "url": "http://127.0.0.1:43210/#token=remote-dashboard-token",
         "served": True,
         "closed": True,
     }
-    assert "AGOS dashboard: http://127.0.0.1:43210" in capsys.readouterr().out
+    output = capsys.readouterr().out
+    assert "AGOS dashboard: http://127.0.0.1:43210" in output
+    assert "remote-dashboard-token" not in output
 
 
 def test_serve_dashboard_forever_returns_url_when_server_stops(
@@ -950,6 +1121,8 @@ def test_serve_dashboard_forever_returns_url_when_server_stops(
 ) -> None:
     class FakeServer:
         server_port = 43211
+        auth_token = "generated-dashboard-token"
+        expose_token_in_index = True
 
         def serve_forever(self):
             return None
@@ -960,7 +1133,7 @@ def test_serve_dashboard_forever_returns_url_when_server_stops(
     monkeypatch.setattr(
         dashboard_server,
         "create_dashboard_server",
-        lambda repo_root, *, host, port: FakeServer(),
+        lambda repo_root, *, host, port, token: FakeServer(),
     )
 
     url = dashboard_server.serve_dashboard_forever(
@@ -968,6 +1141,7 @@ def test_serve_dashboard_forever_returns_url_when_server_stops(
         host="localhost",
         port=8788,
         open_browser=False,
+        token=None,
     )
 
     assert url == "http://localhost:43211"

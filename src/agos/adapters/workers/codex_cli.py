@@ -16,6 +16,7 @@ from agos.adapters.workers.transport import (
     output_refs_from_payload,
     run_worker_command,
 )
+from agos.adapters.agent_permissions import codex_permission_args
 from agos.adapters.noninteractive import noninteractive_prompt
 from agos.core.command import run_command
 from agos.core.execution_worker import (
@@ -62,6 +63,7 @@ class CodexWorkerAdapter:
         health_probe: bool = False,
         ignore_user_config: bool = False,
         ignore_rules: bool = False,
+        dangerously_bypass_permissions: bool = False,
     ) -> None:
         self.command = command
         self.name = name
@@ -74,6 +76,7 @@ class CodexWorkerAdapter:
         self.health_probe = health_probe
         self.ignore_user_config = ignore_user_config
         self.ignore_rules = ignore_rules
+        self.dangerously_bypass_permissions = dangerously_bypass_permissions
         self._subtasks_by_run_id: dict[str, str] = {}
         self._workspaces_by_run_id: dict[str, str] = {}
         self._statuses_by_run_id: dict[str, WorkerRunStatus] = {}
@@ -121,22 +124,25 @@ class CodexWorkerAdapter:
                 "artifact_globs": ",".join(self.artifact_globs),
                 "env_keys": ",".join(sorted(self.env)),
                 "health_probe": str(self.health_probe),
+                "dangerously_bypass_permissions": str(
+                    self.dangerously_bypass_permissions
+                ),
             },
         )
 
     def start(self, request: WorkerStartRequest) -> WorkerRun:
         prompt = noninteractive_prompt(request.prompt)
-        args = [
-            self.command,
-            "exec",
-            "--dangerously-bypass-approvals-and-sandbox",
-            "--json",
-            "-",
-        ]
-        if self.ignore_rules:
-            args.insert(2, "--ignore-rules")
+        args = [self.command, "exec"]
         if self.ignore_user_config:
-            args.insert(2, "--ignore-user-config")
+            args.append("--ignore-user-config")
+        if self.ignore_rules:
+            args.append("--ignore-rules")
+        args.extend(
+            codex_permission_args(
+                dangerously_bypass_permissions=self.dangerously_bypass_permissions
+            )
+        )
+        args.extend(["--json", "-"])
         proc = run_worker_command(
             args,
             action="codex exec",
@@ -365,4 +371,3 @@ def _status(
         detail=str(payload["detail"]) if payload.get("detail") is not None else None,
         output_refs=merge_output_refs(output_refs_from_payload(payload), artifact_refs or []),
     )
-

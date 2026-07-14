@@ -18,10 +18,9 @@ from pydantic import BaseModel
 
 from agos.adapters.local_cli_executor import LocalCliExecutorAdapter
 from agos.adapters.reviewers import LlmCliReviewerAdapter
-from agos.cli.executor_registry import executor_adapter_for
 from agos.cli.cmd_review import run_review
-from agos.cli.cmd_start import StartTaskError, start_task
-from agos.cli.cmd_start import ExecutorSelection
+from agos.cli.executor_registry import executor_adapter_for
+from agos.cli.task_execution_registry import build_task_execution_service
 from agos.core.adapter import ExecutorRun, RunStatus
 from agos.core.config import load_config
 from agos.core.evidence import EvidenceStore
@@ -32,9 +31,17 @@ from agos.core.merge_gate import verify_merge_gate
 from agos.core.review_orchestrator import ParallelReviewOrchestrator, ReviewerSpec
 from agos.core.review_service import ReviewService
 from agos.core.review_store import ReviewStore
-from agos.core.repo import AgosPaths, git_head, repo_paths, task_paths
+from agos.core.repo import AgosPaths, git_head, git_status_porcelain, repo_paths, task_paths
 from agos.core.status import TaskStatus, load_status, save_status
 from agos.core.task import Task, load_task, task_output_ref
+from agos.core.task_execution import (
+    ExecutorSelection,
+    TaskExecutionRequest,
+    effective_output_contract,
+    effective_task_mode,
+    executor_selection_id,
+)
+from agos.core.task_execution_service import TaskExecutionError
 from agos.web.evidence import EvidenceResolutionError, read_evidence_text, resolve_evidence_ref
 
 
@@ -151,6 +158,7 @@ def runs_payload(repo_root: Path) -> dict[str, object]:
                 "title": task.title,
                 "workflow": task.workflow,
                 "phase": phase,
+                "mode": effective_task_mode(task),
                 "scope": "current",
             }
         )
@@ -191,6 +199,7 @@ def current_run_payload(repo_root: Path) -> dict[str, object]:
         "title": task.title,
         "workflow": task.workflow,
         "phase": status_phase,
+        "mode": effective_task_mode(task),
         "executor_run": _dump_model(status.executor_run),
         "output_ref": task_output_ref(task),
         "output_dir": str(paths.root / task_output_ref(task)),
@@ -259,30 +268,41 @@ def start_run_payload(repo_root: Path, request_payload: dict[str, Any]) -> dict[
         if not isinstance(workflow, str):
             raise DashboardApiError("invalid_request", "workflow must be a string")
         workflow = workflow.strip() or None
+    mode = _parse_execution_mode(request_payload.get("mode"))
+    gate_overrides = _parse_gate_request(request_payload.get("gates"))
     agent_selection = _resolve_task_agent(paths.root, request_payload.get("agent"))
+    config = load_config(paths.root)
+    try:
+        config.resolve_gates(
+            workflow or config.default_workflow,
+            gate_overrides or None,
+        )
+    except KeyError as exc:
+        raise DashboardApiError("invalid_workflow", str(exc)) from exc
     replace_active = bool(request_payload.get("replace_active"))
     if replace_active:
         archive_current_task_payload(paths.root)
 
     try:
-        _task, run = start_task(
-            repo_root=paths.root,
-            title=title.strip(),
-            intent=intent.strip() if isinstance(intent, str) else None,
-            workflow=workflow,
-            gate_overrides=_parse_gate_request(request_payload.get("gates")),
-            executor_selection=agent_selection,
+        execution_result = build_task_execution_service(paths.root).start(
+            TaskExecutionRequest(
+                title=title.strip(),
+                intent=intent.strip() if isinstance(intent, str) else "",
+                workflow=workflow,
+                gate_overrides=gate_overrides,
+                mode=mode,
+                executor_selection=agent_selection,
+            )
         )
-    except StartTaskError as exc:
+    except TaskExecutionError as exc:
         raise DashboardApiError("start_failed", str(exc)) from exc
-    except KeyError as exc:
-        raise DashboardApiError("invalid_workflow", str(exc)) from exc
 
     current = current_run_payload(paths.root)
     return {
         "ok": True,
-        "run_id": run.run_id,
-        "issue_id": run.issue_id,
+        "run_id": execution_result.run_id,
+        "issue_id": execution_result.issue_id,
+        "execution_result": execution_result.model_dump(mode="json"),
         "run": current["run"],
         "current": current,
     }
@@ -335,11 +355,19 @@ def pause_current_task_payload(repo_root: Path) -> dict[str, object]:
 
 
 def resume_current_task_payload(repo_root: Path) -> dict[str, object]:
-    return _redispatch_current_task_payload(repo_root, "dashboard_resumed")
+    return _resume_or_redispatch_current_task_payload(
+        repo_root,
+        "dashboard_resumed",
+        restart=False,
+    )
 
 
 def restart_current_task_payload(repo_root: Path) -> dict[str, object]:
-    return _redispatch_current_task_payload(repo_root, "dashboard_restarted")
+    return _resume_or_redispatch_current_task_payload(
+        repo_root,
+        "dashboard_restarted",
+        restart=True,
+    )
 
 
 def select_agent_option_payload(repo_root: Path, request_payload: dict[str, Any]) -> dict[str, object]:
@@ -625,23 +653,50 @@ def _agent_option_followup_intent(task: Task, option: dict[str, object]) -> str:
 
 
 def _executor_adapter_for_task(paths: AgosPaths, task: Task):
+    selection = _executor_selection_for_task(paths, task)
     return executor_adapter_for(
         paths,
-        task.executor.adapter,
-        command=_command_for_task_executor(paths, task),
+        selection.adapter,
+        command=selection.command,
+        dangerously_bypass_permissions=selection.dangerously_bypass_permissions,
     )
 
 
-def _command_for_task_executor(paths: AgosPaths, task: Task) -> str | None:
+def _executor_selection_for_task(paths: AgosPaths, task: Task) -> ExecutorSelection:
     config = load_config(paths.root)
-    if config.executor.name == task.executor.adapter and config.executor.agent == task.executor.agent:
-        return config.executor.command
-    for name, worker in config.workers.items():
-        if worker.type != task.executor.adapter:
-            continue
-        if worker.agent == task.executor.agent or name == task.executor.agent:
-            return worker.command
-    return None
+    if task.executor.selection_id is not None:
+        selection = _task_agent_selections(config).get(task.executor.selection_id)
+        if selection is None:
+            raise DashboardApiError(
+                "executor_selection_unavailable",
+                f"Task executor selection is no longer available: {task.executor.selection_id}",
+            )
+        if selection.adapter != task.executor.adapter:
+            raise DashboardApiError(
+                "executor_selection_changed",
+                "Task executor selection changed adapter from "
+                f"{task.executor.adapter!r} to {selection.adapter!r}",
+            )
+        return selection
+
+    matches = [
+        selection
+        for selection in _task_agent_selections(config).values()
+        if selection.adapter == task.executor.adapter and selection.agent == task.executor.agent
+    ]
+    if len(matches) > 1:
+        raise DashboardApiError(
+            "executor_selection_ambiguous",
+            "Legacy task executor binding matches multiple configured executors; "
+            "archive it and start a new task with an explicit agent selection.",
+        )
+    if matches:
+        return matches[0]
+    raise DashboardApiError(
+        "executor_selection_unavailable",
+        "Legacy task executor binding no longer matches a configured or local executor: "
+        f"{task.executor.adapter}:{task.executor.agent}",
+    )
 
 
 def _safe_dashboard_initial_run_status(adapter: object, run: ExecutorRun) -> RunStatus | None:
@@ -763,6 +818,7 @@ def _archived_task_rows(paths: AgosPaths) -> list[dict[str, object]]:
                 "title": task.title,
                 "workflow": task.workflow,
                 "phase": phase,
+                "mode": effective_task_mode(task),
                 "scope": "archived",
                 "archive_id": archive_dir.name,
                 "path": str(archive_dir),
@@ -848,6 +904,83 @@ def _redispatch_current_task_payload(repo_root: Path, event_type: str) -> dict[s
         }
 
 
+def _resume_or_redispatch_current_task_payload(
+    repo_root: Path,
+    event_type: str,
+    *,
+    restart: bool,
+) -> dict[str, object]:
+    paths = _require_initialized(repo_root)
+    with _locked_task_state(paths):
+        task = _load_current_task(paths)
+        if effective_task_mode(task) == "legacy":
+            return _redispatch_current_task_payload(paths.root, event_type)
+        return _resume_candidate_task_payload(paths, task, event_type, restart=restart)
+
+
+def _resume_candidate_task_payload(
+    paths: AgosPaths,
+    task: Task,
+    event_type: str,
+    *,
+    restart: bool,
+) -> dict[str, object]:
+    with _locked_task_state(paths):
+        service = build_task_execution_service(paths.root)
+        if restart:
+            try:
+                previous = service.load_result()
+            except TaskExecutionError as exc:
+                raise DashboardApiError(
+                    "candidate_state_missing",
+                    str(exc),
+                    hint="Inspect the persisted candidate execution state before retrying.",
+                ) from exc
+            if previous.state in {"completed", "failed"}:
+                raise DashboardApiError(
+                    "candidate_restart_unsupported",
+                    f"Candidate execution is already {previous.state} and cannot be restarted safely.",
+                    hint="Archive this task and create a new candidate-mode task.",
+                )
+
+        try:
+            result = service.resume_candidate()
+        except (TaskExecutionError, ValueError) as exc:
+            raise DashboardApiError("candidate_resume_failed", str(exc)) from exc
+
+        phase = (
+            "done"
+            if result.state == "completed"
+            else "executing"
+            if result.state == "running"
+            else "blocked"
+        )
+        record = Ledger(paths.ledger).append(
+            {
+                "type": event_type,
+                "task_id": task.id,
+                "phase": phase,
+                "mode": "candidate",
+                "run_id": result.run_id,
+                "state": result.state,
+            }
+        )
+        status = load_status(paths)
+        if status is not None:
+            status.phase = phase
+            status.ledger_head_hash = str(record["hash"])
+            save_status(status, paths)
+        current = current_run_payload(paths.root)
+        return {
+            "ok": True,
+            "run_id": result.run_id,
+            "issue_id": result.issue_id,
+            "execution_result": result.model_dump(mode="json"),
+            "run": current["run"],
+            "current": current,
+        }
+
+
 def _dispatch_dashboard_executor(
     paths: AgosPaths,
     task: Task,
@@ -862,9 +995,9 @@ def _dispatch_dashboard_executor(
     terminal_extra: dict[str, object] | None = None,
 ) -> ExecutorRun:
     ledger = Ledger(paths.ledger)
-    adapter = _executor_adapter_for_task(paths, task)
     dispatch_extra = dict(extra or {})
     try:
+        adapter = _executor_adapter_for_task(paths, task)
         run = adapter.start(task_for_executor or task)
     except Exception as exc:
         failed_record = ledger.append(
@@ -880,6 +1013,8 @@ def _dispatch_dashboard_executor(
         status.ledger_head_hash = failed_record["hash"]
         status.last_event_seq = None
         save_status(status, paths)
+        if isinstance(exc, DashboardApiError):
+            raise
         raise DashboardApiError(failure_code, str(exc)) from exc
 
     EvidenceStore(paths.evidence).write_run(
@@ -1043,6 +1178,11 @@ def _task_has_business_output(paths: AgosPaths) -> bool:
         output_dir = paths.root / task_output_ref(task)
         if _directory_has_files(output_dir):
             return True
+        if (
+            effective_output_contract(task) == "source_code"
+            and _governed_repo_has_changes(paths.root)
+        ):
+            return True
     execution_dir = paths.current_task / "execution"
     candidate_dir = execution_dir / "candidates"
     if any(candidate_dir.glob("*.json")):
@@ -1058,6 +1198,21 @@ def _directory_has_files(path: Path) -> bool:
         return any(item.is_file() for item in path.rglob("*"))
     except OSError:
         return False
+
+
+def _governed_repo_has_changes(repo_root: Path) -> bool:
+    try:
+        status = git_status_porcelain(repo_root)
+    except Exception:
+        return False
+    for line in status.splitlines():
+        path = line[3:]
+        if " -> " in path:
+            _old, path = path.split(" -> ", 1)
+        normalized = path.strip('"').replace("\\", "/")
+        if normalized and not normalized.startswith((".agos/", "outputs/")):
+            return True
+    return False
 
 
 def _terminate_task_processes(paths: AgosPaths) -> dict[str, object]:
@@ -1188,6 +1343,17 @@ def _parse_gate_request(value: Any) -> list[str]:
     raise DashboardApiError("invalid_request", "gates must be a list of strings or comma-separated string")
 
 
+def _parse_execution_mode(value: Any) -> str | None:
+    if value is None or value == "":
+        return None
+    if not isinstance(value, str) or value not in {"legacy", "candidate"}:
+        raise DashboardApiError(
+            "invalid_request",
+            "mode must be one of: legacy, candidate",
+        )
+    return value
+
+
 def _parse_reviewer_request(value: Any) -> list[str]:
     if value is None or value == "":
         return []
@@ -1235,7 +1401,7 @@ def _resolve_task_agent(repo_root: Path, value: Any) -> ExecutorSelection | None
 def _task_agent_rows(config) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     seen_ids: set[str] = set()
-    default_id = _executor_agent_id(config.executor.name, config.executor.agent)
+    default_id = executor_selection_id(config.executor.name, config.executor.agent)
     seen_ids.add(default_id)
     rows.append(
         {
@@ -1270,11 +1436,14 @@ def _task_agent_rows(config) -> list[dict[str, Any]]:
 
 
 def _task_agent_selections(config) -> dict[str, ExecutorSelection]:
+    default_id = executor_selection_id(config.executor.name, config.executor.agent)
     selections = {
-        _executor_agent_id(config.executor.name, config.executor.agent): ExecutorSelection(
+        default_id: ExecutorSelection(
             adapter=config.executor.name,
             agent=config.executor.agent,
+            selection_id=default_id,
             command=config.executor.command,
+            dangerously_bypass_permissions=config.executor.dangerously_bypass_permissions,
         )
     }
     supported = {"multica", "codex_cli", "claude_code"}
@@ -1284,7 +1453,10 @@ def _task_agent_selections(config) -> dict[str, ExecutorSelection]:
         selections[f"worker:{name}"] = ExecutorSelection(
             adapter=worker.type,
             agent=worker.agent or name,
+            selection_id=f"worker:{name}",
             command=worker.command,
+            worker_adapter=name,
+            dangerously_bypass_permissions=worker.dangerously_bypass_permissions,
         )
     for row in _local_task_agent_rows(config, set(selections)):
         row_id = str(row["id"])
@@ -1293,6 +1465,7 @@ def _task_agent_selections(config) -> dict[str, ExecutorSelection]:
         selections[row_id] = ExecutorSelection(
             adapter=adapter,
             agent=str(row["agent"]),
+            selection_id=row_id,
             command=str(command) if command else None,
         )
     return selections
@@ -1430,10 +1603,6 @@ def _run_local_review_agent(paths: AgosPaths, reviewer_id: str) -> dict[str, obj
         "state": result.state,
         "finding_count": len(report.findings),
     }
-
-
-def _executor_agent_id(adapter: str, agent: str) -> str:
-    return f"executor:{adapter}:{agent}"
 
 
 def _command_for_adapter(adapter: str, command: str | None) -> str | None:

@@ -107,3 +107,99 @@ def test_default_config_has_feature_workflow():
     assert tests_gate.timeout_seconds == 300
     assert cfg.trust_anchor.backend == "git-ref"
     assert cfg.trust_anchor.auto_publish_on_checkpoint is False
+    assert cfg.merge_gate.provenance_policy == "optional"
+    assert cfg.executor.dangerously_bypass_permissions is False
+
+
+def test_agent_permission_bypass_is_explicit_and_legacy_config_defaults_safe():
+    legacy = AGOSConfig.model_validate(
+        {
+            "executor": {"name": "codex_cli", "agent": "codex"},
+            "workers": {
+                "codex": {"type": "codex_cli"},
+                "claude": {"type": "claude_code"},
+            },
+        }
+    )
+    explicit = AGOSConfig.model_validate(
+        {
+            "executor": {
+                "name": "codex_cli",
+                "agent": "codex",
+                "dangerously_bypass_permissions": True,
+            },
+            "workers": {
+                "claude": {
+                    "type": "claude_code",
+                    "dangerously_bypass_permissions": True,
+                }
+            },
+        }
+    )
+
+    assert legacy.executor.dangerously_bypass_permissions is False
+    assert all(not worker.dangerously_bypass_permissions for worker in legacy.workers.values())
+    assert explicit.executor.dangerously_bypass_permissions is True
+    assert explicit.workers["claude"].dangerously_bypass_permissions is True
+
+
+def test_merge_gate_config_loads_required_policy_and_relative_trusted_signer():
+    cfg = AGOSConfig.model_validate(
+        {
+            "executor": {"name": "multica", "agent": "Lambda"},
+            "merge_gate": {
+                "provenance_policy": "required",
+                "trusted_signers": [
+                    {
+                        "issuer": "protected-ci",
+                        "key_id": "ci-2026",
+                        "public_key_path": "keys/ci-2026.pub.pem",
+                    }
+                ],
+            },
+        }
+    )
+
+    assert cfg.merge_gate.provenance_policy == "required"
+    assert cfg.merge_gate.trusted_signers[0].public_key_path == "keys/ci-2026.pub.pem"
+
+
+def test_merge_gate_config_rejects_duplicate_signer_identity():
+    with pytest.raises(Exception, match="duplicate trusted signer"):
+        AGOSConfig.model_validate(
+            {
+                "executor": {"name": "multica", "agent": "Lambda"},
+                "merge_gate": {
+                    "trusted_signers": [
+                        {
+                            "issuer": "protected-ci",
+                            "key_id": "ci-2026",
+                            "public_key_path": "keys/first.pem",
+                        },
+                        {
+                            "issuer": "protected-ci",
+                            "key_id": "ci-2026",
+                            "public_key_path": "keys/second.pem",
+                        },
+                    ]
+                },
+            }
+        )
+
+
+def test_merge_gate_config_rejects_empty_signer_fields():
+    with pytest.raises(Exception, match="trusted signer fields must be non-empty"):
+        AGOSConfig.model_validate(
+            {
+                "executor": {"name": "multica", "agent": "Lambda"},
+                "merge_gate": {
+                    "trusted_signers": [
+                        {
+                            "issuer": " ",
+                            "key_id": "ci-2026",
+                            "public_key_path": "keys/ci-2026.pub.pem",
+                        }
+                    ]
+                },
+            }
+        )

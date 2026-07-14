@@ -9,7 +9,7 @@ from pathlib import Path
 
 from agos.core.adapter import ExecutorRun
 from agos.core.config import AGOSConfig, WorkflowConfig
-from agos.core.execution import CandidatePatch, CandidateTestRun, ReviewBinding
+from agos.core.execution import ArbiterDecision, CandidatePatch, CandidateTestRun, ReviewBinding
 from agos.core.execution_store import ExecutionStore
 from agos.core.ledger import Ledger
 from agos.core.repo import repo_paths
@@ -177,6 +177,26 @@ def _write_candidate_diff(repo: Path, base: str) -> None:
             "open_blocking_count": 0,
         }
     )
+    decision_ref = store.write_decision(
+        ArbiterDecision(
+            id="decision-candidate-01",
+            candidate_id="candidate-01",
+            decision="accepted",
+            reason="Strict merge-gate smoke accepted complete candidate evidence.",
+            evidence_refs=[patch_ref, test_ref, report_ref],
+            decided_by="ci",
+        )
+    )
+    ledger.append(
+        {
+            "type": "candidate_decision_recorded",
+            "task_id": "agos-smoke",
+            "candidate_id": "candidate-01",
+            "decision": "accepted",
+            "decision_ref": decision_ref,
+            "evidence_refs": [patch_ref, test_ref, report_ref],
+        }
+    )
     candidate = CandidatePatch(
         id="candidate-01",
         task_id="agos-smoke",
@@ -189,6 +209,7 @@ def _write_candidate_diff(repo: Path, base: str) -> None:
         summary="CI merge-gate smoke candidate",
         status="applied",
         test_refs=[test_ref],
+        decision_ref=decision_ref,
         review_refs=[
             ReviewBinding(
                 review_id=review_id,

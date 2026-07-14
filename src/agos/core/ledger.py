@@ -3,9 +3,12 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+
+from agos.core.file_lock import exclusive_file_lock
 
 
 def utc_now() -> str:
@@ -32,8 +35,11 @@ def append_repo_record(path: Path, record_type: str, **payload: Any) -> dict[str
 
     path.parent.mkdir(parents=True, exist_ok=True)
     record = {"ts": utc_now(), "type": record_type, **payload}
-    with path.open("a", encoding="utf-8") as handle:
-        handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+    with exclusive_file_lock(path):
+        with path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+            handle.flush()
+            os.fsync(handle.fileno())
     return record
 
 
@@ -46,16 +52,13 @@ class Ledger:
 
     def __init__(self, path: Path) -> None:
         self.path = path
-        self._tail_loaded = False
-        self._tail_record: dict | None = None
 
     def _last_record(self) -> dict | None:
-        if self._tail_loaded:
-            return self._tail_record
+        with exclusive_file_lock(self.path):
+            return self._last_record_unlocked()
 
+    def _last_record_unlocked(self) -> dict | None:
         if not self.path.exists():
-            self._tail_loaded = True
-            self._tail_record = None
             return None
 
         with self.path.open("rb") as handle:
@@ -88,31 +91,33 @@ class Ledger:
             handle.seek(position)
             line = handle.read(end - position).decode("utf-8").strip()
             if not line:
-                self._tail_loaded = True
-                self._tail_record = None
                 return None
-            self._tail_loaded = True
-            self._tail_record = json.loads(line)
-            return self._tail_record
+            return json.loads(line)
 
     def _records(self) -> list[dict]:
+        with exclusive_file_lock(self.path):
+            return self._records_unlocked()
+
+    def _records_unlocked(self) -> list[dict]:
         if not self.path.exists():
-            self._tail_loaded = True
-            self._tail_record = None
             return []
-        records = [
+        return [
             json.loads(line)
             for line in self.path.read_text(encoding="utf-8").splitlines()
             if line.strip()
         ]
-        self._tail_loaded = True
-        self._tail_record = records[-1] if records else None
-        return records
 
     def read_all(self) -> list[dict]:
         """Return all ledger records in order."""
 
         return self._records()
+
+    def read_verified(self) -> list[dict]:
+        """Return one complete ledger snapshot after verifying its hash chain."""
+
+        records = self._records()
+        self._verify_records(records)
+        return records
 
     def head_hash(self) -> str:
         """Return the last record hash, or an empty string when empty."""
@@ -129,28 +134,33 @@ class Ledger:
     def append(self, record: dict) -> dict:
         """Append a record with assigned `seq`, `prev_hash`, and `hash`."""
 
-        tail = self._last_record()
-        prev_hash = tail["hash"] if tail else ""
-        full = dict(record)
-        full.setdefault("seq", tail["seq"] + 1 if tail else 1)
-        full.setdefault("ts", utc_now())
-        full["prev_hash"] = prev_hash
-        body = {key: value for key, value in full.items() if key != "hash"}
-        full["hash"] = compute_hash(prev_hash, body)
-
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        with self.path.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(full, ensure_ascii=False) + "\n")
-        self._tail_loaded = True
-        self._tail_record = full
-        return full
+        with exclusive_file_lock(self.path):
+            tail = self._last_record_unlocked()
+            prev_hash = tail["hash"] if tail else ""
+            full = dict(record)
+            full.setdefault("seq", tail["seq"] + 1 if tail else 1)
+            full.setdefault("ts", utc_now())
+            full["prev_hash"] = prev_hash
+            body = {key: value for key, value in full.items() if key != "hash"}
+            full["hash"] = compute_hash(prev_hash, body)
+
+            with self.path.open("a", encoding="utf-8") as handle:
+                handle.write(json.dumps(full, ensure_ascii=False) + "\n")
+                handle.flush()
+                os.fsync(handle.fileno())
+            return full
 
     def verify_chain(self) -> None:
         """Recompute every hash from line 1 and raise on any mismatch."""
 
+        self._verify_records(self._records())
+
+    @staticmethod
+    def _verify_records(records: list[dict]) -> None:
         prev_hash = ""
         expected_seq = 1
-        for line_no, record in enumerate(self._records(), start=1):
+        for line_no, record in enumerate(records, start=1):
             if record.get("prev_hash") != prev_hash:
                 raise LedgerTamperError(
                     f"record {line_no}: prev_hash mismatch "

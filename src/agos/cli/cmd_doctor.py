@@ -75,6 +75,7 @@ def _run_checks() -> list[DoctorCheck]:
                 DoctorCheck("config", "skipped", "repository is not initialized"),
                 DoctorCheck("git_hooks", "skipped", "repository is not initialized"),
                 DoctorCheck("workers", "skipped", "repository is not initialized"),
+                DoctorCheck("agent_permissions", "skipped", "repository is not initialized"),
                 DoctorCheck("reviewers", "skipped", "repository is not initialized"),
                 DoctorCheck("orchestration", "skipped", "repository is not initialized"),
                 DoctorCheck("autonomous_loop", "skipped", "repository is not initialized"),
@@ -91,6 +92,7 @@ def _run_checks() -> list[DoctorCheck]:
         checks.extend(
             [
                 DoctorCheck("workers", "skipped", "config is invalid"),
+                DoctorCheck("agent_permissions", "skipped", "config is invalid"),
                 DoctorCheck("reviewers", "skipped", "config is invalid"),
                 DoctorCheck("orchestration", "skipped", "config is invalid"),
                 DoctorCheck("autonomous_loop", "skipped", "config is invalid"),
@@ -98,6 +100,8 @@ def _run_checks() -> list[DoctorCheck]:
             ]
         )
         return checks
+
+    checks.append(_agent_permissions_check(config))
 
     service = ExecutionService(paths)
     worker_count = 0
@@ -245,6 +249,32 @@ def _worker_health_check(service: ExecutionService) -> DoctorCheck:
     if warnings:
         return DoctorCheck("workers", "warning", "; ".join(warnings))
     return DoctorCheck("workers", "passed", f"{len(adapters)} worker(s) healthy")
+
+
+def _agent_permissions_check(config: AGOSConfig) -> DoctorCheck:
+    dangerous: list[str] = []
+    if (
+        config.executor.name in {"codex_cli", "claude_code"}
+        and config.executor.dangerously_bypass_permissions
+    ):
+        dangerous.append(f"executor:{config.executor.name}")
+    dangerous.extend(
+        f"worker:{name}"
+        for name, worker in sorted(config.workers.items())
+        if worker.type in {"codex_cli", "claude_code"}
+        and worker.dangerously_bypass_permissions
+    )
+    if dangerous:
+        return DoctorCheck(
+            "agent_permissions",
+            "warning",
+            "dangerous permission bypass active: " + ", ".join(dangerous),
+        )
+    return DoctorCheck(
+        "agent_permissions",
+        "passed",
+        "Codex and Claude adapters use non-interactive safe defaults",
+    )
 
 
 def _autonomous_loop_readiness_check(

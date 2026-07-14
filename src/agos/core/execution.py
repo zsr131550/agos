@@ -23,6 +23,12 @@ CandidateStatus = Literal[
 CandidateTestState = Literal["running", "passed", "failed"]
 ReviewBindingState = Literal["started", "completed", "failed"]
 DecisionValue = Literal["accepted", "rejected", "superseded", "needs_changes"]
+CandidateProvenanceSource = Literal[
+    "worker_export",
+    "external_attested",
+    "ci_reconstructed",
+    "legacy_unattested",
+]
 ApplyStrategy = Literal["direct_patch"]
 MergeStrategy = Literal[
     "single_candidate",
@@ -173,6 +179,14 @@ class ReviewBinding(BaseModel):
         return self
 
 
+class CandidateProvenance(BaseModel):
+    """Descriptive source metadata; cryptographic proof is verified separately."""
+
+    source: CandidateProvenanceSource
+    ledger_head_hash: str | None = None
+    attestation_ref: str | None = None
+
+
 class CandidatePatch(BaseModel):
     id: str
     task_id: str
@@ -187,6 +201,7 @@ class CandidatePatch(BaseModel):
     test_refs: list[str] = Field(default_factory=list)
     review_refs: list[ReviewBinding] = Field(default_factory=list)
     decision_ref: str | None = None
+    provenance: CandidateProvenance | None = None
     created_at: str = Field(default_factory=utc_now_iso)
 
 
@@ -257,4 +272,3 @@ class CandidateMergePreview(BaseModel):
     evidence_refs: list[str] = Field(default_factory=list)
     conflict_evidence_refs: list[str] = Field(default_factory=list)
     created_at: str = Field(default_factory=utc_now_iso)
-

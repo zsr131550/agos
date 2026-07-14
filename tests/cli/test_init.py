@@ -7,6 +7,8 @@ import yaml
 from typer.testing import CliRunner
 
 from agos.cli.main import app
+from agos.core.execution_pipeline import AutoExecutionResult
+from agos.core.task import load_task
 
 runner = CliRunner()
 
@@ -16,6 +18,28 @@ class _Proc:
         self.returncode = returncode
         self.stdout = stdout
         self.stderr = stderr
+
+
+def _stub_candidate_auto_execution(monkeypatch, *, run_id: str = "codex-run-1") -> None:
+    monkeypatch.setattr(
+        "agos.cli.task_execution_registry.candidate_readiness_issues",
+        lambda _config, _root: [],
+    )
+
+    def fake_run_auto_execution(service, **_kwargs):
+        task = load_task(service.paths.task_yaml)
+        return AutoExecutionResult(
+            plan_id=f"auto-plan-{task.id}",
+            task_id=task.id,
+            run_id=run_id,
+            run_state="completed",
+            dry_run=False,
+        )
+
+    monkeypatch.setattr(
+        "agos.cli.task_execution_registry.run_auto_execution",
+        fake_run_auto_execution,
+    )
 
 
 def test_init_creates_layout_config_and_hooks(monkeypatch, tmp_repo):
@@ -35,6 +59,41 @@ def test_init_creates_layout_config_and_hooks(monkeypatch, tmp_repo):
     assert config["executor"]["name"] == "multica"
     assert config["executor"]["agent"] == "Lambda"
     assert config["default_workflow"] == "feature"
+    assert config["task_execution"] == {"mode": "legacy", "output_contract": "legacy"}
+    assert "automatic local reviewer" in result.stderr
+
+
+def test_init_codex_configures_candidate_source_execution_and_reviewer(monkeypatch, tmp_repo):
+    monkeypatch.chdir(tmp_repo)
+    monkeypatch.setattr("agos.cli.cmd_init.validate_executor_environment", lambda _executor: [])
+    monkeypatch.setattr("agos.cli.cmd_init.discover_multica_agents", lambda: [])
+    monkeypatch.setattr(
+        "agos.cli.cmd_init._resolve_cli_command",
+        lambda command: {"codex": "codex.cmd"}.get(command),
+    )
+
+    result = runner.invoke(
+        app,
+        ["init", "--executor", "codex_cli", "--agent", "codex:codex"],
+    )
+
+    assert result.exit_code == 0, result.stderr
+    config = yaml.safe_load((tmp_repo / ".agos" / "agos.yaml").read_text(encoding="utf-8"))
+    assert config["task_execution"] == {
+        "mode": "candidate",
+        "output_contract": "source_code",
+    }
+    assert "dangerously_bypass_permissions" not in config["executor"]
+    assert "dangerously_bypass_permissions" not in config["workers"]["codex"]
+    assert config["reviewers"] == {
+        "codex_reviewer": {
+            "type": "codex_cli",
+            "role": "code_review",
+            "required": True,
+            "command": "codex.cmd",
+            "executor": "codex_cli",
+        }
+    }
 
 
 def test_discover_multica_agents_filters_named_items(monkeypatch):
@@ -201,6 +260,7 @@ def test_init_interactively_prompts_title_plans_workers_and_auto_starts(monkeypa
         lambda self, task: type("Run", (), {"adapter": "codex_cli", "run_id": "codex-run-1", "issue_id": None})(),
     )
     monkeypatch.setattr("agos.cli.cmd_init.run_init_health_checks", lambda _config, _repo_root: [], raising=False)
+    _stub_candidate_auto_execution(monkeypatch)
 
     def planner(
         selected_agent: cmd_init.LocalAgentCandidate,
@@ -230,7 +290,11 @@ def test_init_interactively_prompts_title_plans_workers_and_auto_starts(monkeypa
     task = yaml.safe_load((tmp_repo / ".agos" / "tasks" / "current" / "task.yaml").read_text(encoding="utf-8"))
     assert task["title"] == "Build interactive init"
     assert task["intent"] == "Ship init/start intent"
-    assert task["executor"] == {"adapter": "codex_cli", "agent": "codex"}
+    assert task["executor"] == {
+        "adapter": "codex_cli",
+        "agent": "codex",
+        "selection_id": "executor:codex_cli:codex",
+    }
     status = json.loads((tmp_repo / ".agos" / "tasks" / "current" / "status.json").read_text(encoding="utf-8"))
     assert status["executor_run"]["run_id"] == "codex-run-1"
 
@@ -248,6 +312,7 @@ def test_init_interactively_preserves_empty_task_intent(monkeypatch, tmp_repo):
         lambda self, task: type("Run", (), {"adapter": "codex_cli", "run_id": "codex-run-1", "issue_id": None})(),
     )
     monkeypatch.setattr("agos.cli.cmd_init.run_init_health_checks", lambda _config, _repo_root: [], raising=False)
+    _stub_candidate_auto_execution(monkeypatch)
     monkeypatch.setattr(
         "agos.cli.cmd_init.plan_workers_for_goal",
         lambda _selected, _title, candidates: [candidate for candidate in candidates if candidate.key == "codex:codex"],
@@ -275,6 +340,7 @@ def test_init_interactively_uses_task_intent_when_provided(monkeypatch, tmp_repo
         lambda command: {"codex": "codex.cmd", "claude": "claude.cmd"}.get(command),
     )
     monkeypatch.setattr("agos.cli.cmd_init.run_init_health_checks", lambda _config, _repo_root: [], raising=False)
+    _stub_candidate_auto_execution(monkeypatch)
     monkeypatch.setattr(
         "agos.cli.executor_registry.CodexCliExecutorAdapter.start",
         lambda self, task: type("Run", (), {"adapter": "codex_cli", "run_id": "codex-run-1", "issue_id": None})(),

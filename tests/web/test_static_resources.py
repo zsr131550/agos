@@ -28,6 +28,12 @@ def test_dashboard_static_index_is_packaged() -> None:
     assert "data?.error?.message" in text
     assert "errorMessage(data" in text
     assert "error.hint" in text
+    assert "__AGOS_DASHBOARD_TOKEN__" in text
+    assert "Authorization" in text
+    assert "Bearer ${dashboardToken}" in text
+    assert "sessionStorage" in text
+    assert "location.hash" in text
+    assert "history.replaceState" in text
     assert "agos init" in text
     assert "agos start --title" in text
     assert "fetchJson('/api/health')" in text
@@ -38,6 +44,7 @@ def test_dashboard_static_index_is_packaged() -> None:
     assert 'id="new-run-workflow"' in text
     assert 'id="new-run-gates"' in text
     assert 'id="new-run-agent"' in text
+    assert 'id="new-run-mode"' in text
     assert 'id="replace-active-submit"' in text
     assert 'id="continue-active-task"' in text
     assert 'id="archive-active-task"' in text
@@ -72,6 +79,7 @@ def test_dashboard_static_index_is_packaged() -> None:
     assert "\u8fd4\u56de\u7ed9 Agent" in text
     assert "fetchJson('/api/runs', {" in text
     assert "replace_active" in text
+    assert "payload.mode = mode" in text
     assert "fetchJson('/api/runs/current/archive', {" in text
     assert "fetchJson('/api/agents')" in text
     assert "fetchJson('/api/reviews/run', {" in text
