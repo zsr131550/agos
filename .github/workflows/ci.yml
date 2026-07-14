@@ -16,7 +16,7 @@ jobs:
         python-version: ["3.11", "3.12"]
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: ${{ matrix.python-version }}
       - run: python -m pip install --upgrade pip
@@ -39,7 +39,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
       - uses: actions/setup-node@v4
@@ -73,7 +73,7 @@ jobs:
           ref: ${{ github.event.pull_request.head.sha }}
           path: subject
           fetch-depth: 0
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
       - run: python -m pip install --upgrade pip
@@ -120,7 +120,7 @@ jobs:
           ref: ${{ github.event.pull_request.head.sha }}
           path: subject
           fetch-depth: 0
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
       - run: python -m pip install --upgrade pip
