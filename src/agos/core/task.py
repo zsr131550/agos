@@ -15,6 +15,7 @@ class ExecutorBinding(BaseModel):
 
     adapter: str
     agent: str
+    selection_id: str | None = None
 
 
 class Task(BaseModel):

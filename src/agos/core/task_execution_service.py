@@ -181,6 +181,7 @@ class TaskExecutionService:
             executor=ExecutorBinding(
                 adapter=selection.adapter if selection else prepared.config.executor.name,
                 agent=selection.agent if selection else prepared.config.executor.agent,
+                selection_id=selection.selection_id if selection else None,
             ),
             execution_mode=prepared.mode,
             output_contract=prepared.config.task_execution.output_contract,

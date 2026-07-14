@@ -161,11 +161,19 @@ def test_start_run_payload_uses_selected_task_agent(tmp_repo: Path, monkeypatch)
     assert payload["ok"] is True
     assert captured == {
         "adapter": "codex_cli",
-        "task_executor": {"adapter": "codex_cli", "agent": "codex_local"},
+        "task_executor": {
+            "adapter": "codex_cli",
+            "agent": "codex_local",
+            "selection_id": "worker:codex_local",
+        },
         "dangerously_bypass_permissions": True,
     }
     task = yaml.safe_load(paths.task_yaml.read_text(encoding="utf-8"))
-    assert task["executor"] == {"adapter": "codex_cli", "agent": "codex_local"}
+    assert task["executor"] == {
+        "adapter": "codex_cli",
+        "agent": "codex_local",
+        "selection_id": "worker:codex_local",
+    }
 
 
 def test_start_run_payload_preserves_default_executor_permission_mode(
@@ -204,6 +212,189 @@ def test_start_run_payload_preserves_default_executor_permission_mode(
 
     assert payload["ok"] is True
     assert captured["dangerously_bypass_permissions"] is True
+
+
+def test_dashboard_resume_keeps_selected_worker_permission_identity(
+    tmp_repo: Path,
+    monkeypatch,
+) -> None:
+    paths = repo_paths(tmp_repo)
+    paths.agos_dir.mkdir(parents=True, exist_ok=True)
+    AGOSConfig.default(
+        executor="multica",
+        agent="Lambda",
+        workers={
+            "danger": WorkerConfig(
+                type="codex_cli",
+                agent="shared",
+                command="danger-codex",
+                dangerously_bypass_permissions=True,
+            ),
+            "safe": WorkerConfig(
+                type="codex_cli",
+                agent="shared",
+                command="safe-codex",
+                dangerously_bypass_permissions=False,
+            ),
+        },
+    ).save(paths.agos_yaml)
+    seen: list[tuple[str, bool]] = []
+
+    def fake_start(self, _task):
+        seen.append((self.command, self.dangerously_bypass_permissions))
+        return ExecutorRun(adapter=self.name, run_id=f"worker-run-{len(seen)}", issue_id=None)
+
+    monkeypatch.setattr("agos.adapters.local_cli_executor.CodexCliExecutorAdapter.start", fake_start)
+
+    start_run_payload(
+        tmp_repo,
+        {"title": "Keep safe worker", "mode": "legacy", "agent": "worker:safe"},
+    )
+    resume_current_task_payload(tmp_repo)
+
+    assert seen == [("safe-codex", False), ("safe-codex", False)]
+
+
+def test_dashboard_resume_blocks_when_selected_worker_was_removed(
+    tmp_repo: Path,
+    monkeypatch,
+) -> None:
+    paths = repo_paths(tmp_repo)
+    paths.agos_dir.mkdir(parents=True, exist_ok=True)
+    config = AGOSConfig.default(
+        executor="multica",
+        agent="Lambda",
+        workers={
+            "safe": WorkerConfig(
+                type="codex_cli",
+                agent="shared",
+                command="safe-codex",
+            ),
+        },
+    )
+    config.save(paths.agos_yaml)
+    starts: list[str] = []
+
+    def fake_start(self, _task):
+        starts.append(self.command)
+        return ExecutorRun(adapter=self.name, run_id=f"removed-run-{len(starts)}", issue_id=None)
+
+    monkeypatch.setattr("agos.adapters.local_cli_executor.CodexCliExecutorAdapter.start", fake_start)
+    start_run_payload(
+        tmp_repo,
+        {"title": "Removed worker", "mode": "legacy", "agent": "worker:safe"},
+    )
+    config.model_copy(update={"workers": {}}).save(paths.agos_yaml)
+
+    with pytest.raises(DashboardApiError) as err:
+        resume_current_task_payload(tmp_repo)
+
+    assert err.value.code == "executor_selection_unavailable"
+    assert starts == ["safe-codex"]
+    status = load_status(paths)
+    assert status is not None
+    assert status.phase == "blocked"
+
+
+def test_dashboard_resume_keeps_selected_local_agent_safe(
+    tmp_repo: Path,
+    monkeypatch,
+) -> None:
+    paths = repo_paths(tmp_repo)
+    paths.agos_dir.mkdir(parents=True, exist_ok=True)
+    AGOSConfig.model_validate(
+        {
+            "executor": {
+                "name": "codex_cli",
+                "agent": "codex",
+                "command": "danger-codex",
+                "dangerously_bypass_permissions": True,
+            },
+            "default_workflow": "feature",
+            "workflows": {"feature": {"gates": []}},
+        }
+    ).save(paths.agos_yaml)
+    monkeypatch.setattr(
+        "agos.web.api.shutil.which",
+        lambda command: "/opt/agos-safe/codex" if command == "codex" else None,
+    )
+    seen: list[tuple[str, bool]] = []
+
+    def fake_start(self, _task):
+        seen.append((self.command, self.dangerously_bypass_permissions))
+        return ExecutorRun(adapter=self.name, run_id=f"local-run-{len(seen)}", issue_id=None)
+
+    monkeypatch.setattr("agos.adapters.local_cli_executor.CodexCliExecutorAdapter.start", fake_start)
+
+    start_run_payload(
+        tmp_repo,
+        {
+            "title": "Keep local agent safe",
+            "mode": "legacy",
+            "agent": "local:codex_cli:codex",
+        },
+    )
+    resume_current_task_payload(tmp_repo)
+
+    assert seen == [("/opt/agos-safe/codex", False), ("/opt/agos-safe/codex", False)]
+
+
+def test_dashboard_resume_rejects_ambiguous_legacy_executor_binding(
+    tmp_repo: Path,
+    monkeypatch,
+) -> None:
+    paths = repo_paths(tmp_repo)
+    paths.agos_dir.mkdir(parents=True, exist_ok=True)
+    AGOSConfig.default(
+        executor="multica",
+        agent="Lambda",
+        workers={
+            "danger": WorkerConfig(
+                type="codex_cli",
+                agent="shared",
+                command="danger-codex",
+                dangerously_bypass_permissions=True,
+            ),
+            "safe": WorkerConfig(
+                type="codex_cli",
+                agent="shared",
+                command="safe-codex",
+                dangerously_bypass_permissions=False,
+            ),
+        },
+    ).save(paths.agos_yaml)
+    task = Task(
+        id="agos-legacy-ambiguous",
+        title="Ambiguous legacy binding",
+        workflow="feature",
+        gates=[],
+        executor=ExecutorBinding(adapter="codex_cli", agent="shared"),
+    )
+    save_task(task, paths.task_yaml)
+    ledger = Ledger(paths.ledger)
+    started = ledger.append({"type": "task_started", "task_id": task.id, "title": task.title})
+    save_status(
+        TaskStatus.for_started_task(
+            task=task,
+            run=ExecutorRun(adapter="codex_cli", run_id="legacy-run", issue_id=None),
+            ledger_head_hash=started["hash"],
+        ),
+        paths,
+    )
+    starts: list[str] = []
+    monkeypatch.setattr(
+        "agos.adapters.local_cli_executor.CodexCliExecutorAdapter.start",
+        lambda self, _task: (
+            starts.append(self.command)
+            or ExecutorRun(adapter=self.name, run_id="unexpected-run", issue_id=None)
+        ),
+    )
+
+    with pytest.raises(DashboardApiError) as err:
+        resume_current_task_payload(tmp_repo)
+
+    assert err.value.code == "executor_selection_ambiguous"
+    assert starts == []
 
 
 def test_dashboard_start_passes_candidate_mode_to_service(monkeypatch, tmp_repo: Path) -> None:

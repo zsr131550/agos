@@ -652,36 +652,64 @@ def _agent_option_followup_intent(task: Task, option: dict[str, object]) -> str:
 
 
 def _executor_adapter_for_task(paths: AgosPaths, task: Task):
+    selection = _executor_selection_for_task(paths, task)
     return executor_adapter_for(
         paths,
-        task.executor.adapter,
-        command=_command_for_task_executor(paths, task),
-        dangerously_bypass_permissions=_dangerous_permissions_for_task_executor(paths, task),
+        selection.adapter,
+        command=selection.command,
+        dangerously_bypass_permissions=selection.dangerously_bypass_permissions,
     )
 
 
-def _command_for_task_executor(paths: AgosPaths, task: Task) -> str | None:
+def _executor_selection_for_task(paths: AgosPaths, task: Task) -> ExecutorSelection:
     config = load_config(paths.root)
+    if task.executor.selection_id is not None:
+        selection = _task_agent_selections(config).get(task.executor.selection_id)
+        if selection is None:
+            raise DashboardApiError(
+                "executor_selection_unavailable",
+                f"Task executor selection is no longer available: {task.executor.selection_id}",
+            )
+        if selection.adapter != task.executor.adapter:
+            raise DashboardApiError(
+                "executor_selection_changed",
+                "Task executor selection changed adapter from "
+                f"{task.executor.adapter!r} to {selection.adapter!r}",
+            )
+        return selection
+
+    matches: list[ExecutorSelection] = []
     if config.executor.name == task.executor.adapter and config.executor.agent == task.executor.agent:
-        return config.executor.command
+        matches.append(
+            ExecutorSelection(
+                adapter=config.executor.name,
+                agent=config.executor.agent,
+                command=config.executor.command,
+                dangerously_bypass_permissions=config.executor.dangerously_bypass_permissions,
+            )
+        )
     for name, worker in config.workers.items():
         if worker.type != task.executor.adapter:
             continue
         if worker.agent == task.executor.agent or name == task.executor.agent:
-            return worker.command
-    return None
-
-
-def _dangerous_permissions_for_task_executor(paths: AgosPaths, task: Task) -> bool:
-    config = load_config(paths.root)
-    if config.executor.name == task.executor.adapter and config.executor.agent == task.executor.agent:
-        return config.executor.dangerously_bypass_permissions
-    for name, worker in config.workers.items():
-        if worker.type != task.executor.adapter:
-            continue
-        if worker.agent == task.executor.agent or name == task.executor.agent:
-            return worker.dangerously_bypass_permissions
-    return False
+            matches.append(
+                ExecutorSelection(
+                    adapter=worker.type,
+                    agent=worker.agent or name,
+                    command=worker.command,
+                    worker_adapter=name,
+                    dangerously_bypass_permissions=worker.dangerously_bypass_permissions,
+                )
+            )
+    if len(matches) > 1:
+        raise DashboardApiError(
+            "executor_selection_ambiguous",
+            "Legacy task executor binding matches multiple configured executors; "
+            "archive it and start a new task with an explicit agent selection.",
+        )
+    if matches:
+        return matches[0]
+    return ExecutorSelection(adapter=task.executor.adapter, agent=task.executor.agent)
 
 
 def _safe_dashboard_initial_run_status(adapter: object, run: ExecutorRun) -> RunStatus | None:
@@ -980,9 +1008,9 @@ def _dispatch_dashboard_executor(
     terminal_extra: dict[str, object] | None = None,
 ) -> ExecutorRun:
     ledger = Ledger(paths.ledger)
-    adapter = _executor_adapter_for_task(paths, task)
     dispatch_extra = dict(extra or {})
     try:
+        adapter = _executor_adapter_for_task(paths, task)
         run = adapter.start(task_for_executor or task)
     except Exception as exc:
         failed_record = ledger.append(
@@ -998,6 +1026,8 @@ def _dispatch_dashboard_executor(
         status.ledger_head_hash = failed_record["hash"]
         status.last_event_seq = None
         save_status(status, paths)
+        if isinstance(exc, DashboardApiError):
+            raise
         raise DashboardApiError(failure_code, str(exc)) from exc
 
     EvidenceStore(paths.evidence).write_run(
@@ -1419,10 +1449,12 @@ def _task_agent_rows(config) -> list[dict[str, Any]]:
 
 
 def _task_agent_selections(config) -> dict[str, ExecutorSelection]:
+    default_id = _executor_agent_id(config.executor.name, config.executor.agent)
     selections = {
-        _executor_agent_id(config.executor.name, config.executor.agent): ExecutorSelection(
+        default_id: ExecutorSelection(
             adapter=config.executor.name,
             agent=config.executor.agent,
+            selection_id=default_id,
             command=config.executor.command,
             dangerously_bypass_permissions=config.executor.dangerously_bypass_permissions,
         )
@@ -1434,7 +1466,9 @@ def _task_agent_selections(config) -> dict[str, ExecutorSelection]:
         selections[f"worker:{name}"] = ExecutorSelection(
             adapter=worker.type,
             agent=worker.agent or name,
+            selection_id=f"worker:{name}",
             command=worker.command,
+            worker_adapter=name,
             dangerously_bypass_permissions=worker.dangerously_bypass_permissions,
         )
     for row in _local_task_agent_rows(config, set(selections)):
@@ -1444,6 +1478,7 @@ def _task_agent_selections(config) -> dict[str, ExecutorSelection]:
         selections[row_id] = ExecutorSelection(
             adapter=adapter,
             agent=str(row["agent"]),
+            selection_id=row_id,
             command=str(command) if command else None,
         )
     return selections

@@ -26,6 +26,7 @@ class ExecutorSelection(BaseModel):
 
     adapter: str
     agent: str
+    selection_id: str | None = None
     command: str | None = None
     worker_adapter: str | None = None
     dangerously_bypass_permissions: bool = False
