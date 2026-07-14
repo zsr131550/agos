@@ -140,9 +140,16 @@ agos start --title "Your task"
 
 ## 安装
 
-### 从发布 wheel 安装
+### 从 PyPI 或发布 wheel 安装
 
-从 GitHub Actions `release` workflow 下载 `agos-dist` artifact，然后安装：
+配置 PyPI trusted publishing 后，正式版本可直接安装：
+
+```bash
+python -m pip install agos
+agos version
+```
+
+也可从 GitHub Release 下载 `agos-dist` 中构建的 wheel：
 
 ```bash
 pip install agos-0.1.0-py3-none-any.whl
@@ -150,7 +157,7 @@ agos version
 agos --help
 ```
 
-> 当前仓库尚未配置 PyPI 发布；发布产物以 GitHub Actions artifact 为准。
+`release` workflow 对 `v*` tag 运行 provider-free 验证，从同一个 artifact 创建 GitHub Release assets 并通过 OIDC 发布 PyPI；首次发布前需按 [`docs/release-install.md`](docs/release-install.md) 配置 `pypi` environment 和 trusted publisher。
 
 ### 从源码开发安装
 
@@ -870,8 +877,8 @@ To block non-compliant PRs without provider dependencies, require `merge-gate`, 
 Regular verification:
 
 ```bash
-python -m ruff check src tests
-python -m compileall -q src tests
+python -m ruff check src tests scripts
+python -m compileall -q src tests scripts
 python -m pytest -q
 python -m pytest --cov=agos --cov-report=term-missing -q
 python -m build
@@ -928,7 +935,8 @@ Remove-Item Env:AGOS_CLAUDE_WORKER_SMOKE,Env:AGOS_CLAUDE_BIN -ErrorAction Silent
 构建 release artifacts：
 
 ```bash
-python -m build
+python -m build --no-isolation
+python scripts/verify_release.py --tag v0.1.0 --dist dist
 ```
 
 安装并 smoke-test wheel：
@@ -1014,4 +1022,4 @@ agos run auto --dry-run --allow-missing-review --json
 
 ## License
 
-MIT. See [`pyproject.toml`](pyproject.toml).
+MIT. See [`LICENSE`](LICENSE).

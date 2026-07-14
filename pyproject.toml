@@ -9,6 +9,7 @@ description = "Executor-agnostic governance layer for AI coding agents"
 readme = "README.md"
 requires-python = ">=3.11"
 license = "MIT"
+license-files = ["LICENSE"]
 authors = [
     {name = "AGOS project"},
 ]

@@ -21,8 +21,8 @@ jobs:
           python-version: ${{ matrix.python-version }}
       - run: python -m pip install --upgrade pip
       - run: python -m pip install -e ".[dev]"
-      - run: python -m ruff check src tests
-      - run: python -m compileall -q src tests
+      - run: python -m ruff check src tests scripts
+      - run: python -m compileall -q src tests scripts
       - run: python -m pytest --cov=agos --cov-report=term-missing -q
       - run: python -m build
       - run: python -c "import glob, subprocess, sys; wheels=glob.glob('dist/*.whl'); assert wheels; subprocess.check_call([sys.executable, '-m', 'pip', 'install', '--force-reinstall', wheels[0]])"

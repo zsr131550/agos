@@ -381,7 +381,7 @@ git commit -m "fix: protect dashboard mutations with local auth"
 - Tag releases upload `dist/*` to a GitHub Release and expose a PyPI trusted-publishing job with `id-token: write` and the `pypi` environment.
 - `scripts/verify_release.py` performs read-only tag/version and wheel/sdist content checks with no network access.
 
-- [ ] **Step 1: Add failing policy and packaging tests**
+- [x] **Step 1: Add failing policy and packaging tests**
 
 Assert exact workflow properties rather than running GitHub Actions:
 
@@ -405,28 +405,28 @@ def test_built_wheel_contains_dashboard_hooks_and_license(tmp_path):
 
 Also parse Dependabot and CodeQL YAML, require complete MIT phrases in `LICENSE`, and verify release jobs contain the same offline checks as CI.
 
-- [ ] **Step 2: Verify RED**
+- [x] **Step 2: Verify RED**
 
 ```bash
 .venv/bin/python -m pytest tests/ci/test_release_policy.py \
   tests/packaging/test_wheel_contents.py -q
 ```
 
-- [ ] **Step 3: Add license, metadata, update automation, and security scan**
+- [x] **Step 3: Add license, metadata, update automation, and security scan**
 
 Add the standard MIT text with `Copyright (c) 2026 AGOS project`. Declare `license-files = ["LICENSE"]` in project metadata. Configure monthly Dependabot updates for Python packages and GitHub Actions. Configure CodeQL with `contents: read`, `packages: read`, and `security-events: write`, using `github/codeql-action/init@v3` and `analyze@v3` for Python.
 
-- [ ] **Step 4: Implement reproducible release verification and publishing**
+- [x] **Step 4: Implement reproducible release verification and publishing**
 
 The build job runs the provider-free verification suite, builds with `python -m build`, calls `scripts/verify_release.py`, installs the wheel, and runs CLI smoke commands. A tag-only `github-release` job downloads the exact build artifact and uses `gh release create` with `contents: write`. A tag-only `publish-pypi` job downloads the same artifact, uses environment `pypi`, grants only `id-token: write`, and invokes the official PyPA trusted-publishing action.
 
 `verify_release.py --tag v0.1.0 --dist dist` must validate that the tag equals the `pyproject.toml` version, that exactly one wheel and one sdist exist, and that both contain the Dashboard asset and license where applicable. It only reads files.
 
-- [ ] **Step 5: Document release and branch-protection verification**
+- [x] **Step 5: Document release and branch-protection verification**
 
 Replace statements that PyPI is unconfigured with trusted-publishing prerequisites, GitHub environment setup, tag/version checks, and rollback boundaries. Document required checks `verify`, `autonomous-readiness`, `merge-gate`, and CodeQL. Include the read-only command `gh api --method GET repos/zsr131550/agos/branches/main/protection`; do not add any branch-protection mutation.
 
-- [ ] **Step 6: Verify and commit**
+- [x] **Step 6: Verify and commit**
 
 ```bash
 .venv/bin/python -m pytest tests/ci tests/packaging/test_wheel_contents.py -q
