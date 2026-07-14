@@ -65,32 +65,41 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          path: trusted
+          fetch-depth: 0
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          path: subject
           fetch-depth: 0
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
       - run: python -m pip install --upgrade pip
-      - run: python -m pip install -e ".[dev]"
+      - run: python -m pip install -e "./trusted[dev]"
       - name: prepare AGOS merge-gate evidence
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        working-directory: subject
         run: |
-          if [ ! -f .agos/agos.yaml ]; then
+          if [ ! -f "$GITHUB_WORKSPACE/trusted/.agos/agos.yaml" ]; then
             echo "no .agos governance config; skipping AGOS prepare artifact"
-            mkdir -p .agos/tasks/current
             exit 0
           fi
           agos prepare-merge-gate \
             --base "$BASE_SHA" \
             --head "$HEAD_SHA" \
+            --trusted-config "$GITHUB_WORKSPACE/trusted/.agos/agos.yaml" \
             --anchor-path ".agos/tasks/current/evidence/anchors.json" \
             --issuer "github-actions"
       - name: upload AGOS prepared task state
+        if: hashFiles('trusted/.agos/agos.yaml') != ''
         uses: actions/upload-artifact@v4
         with:
           name: agos-current-task
-          path: .agos/tasks/current
+          path: subject/.agos/tasks/current
           if-no-files-found: error
 
   merge-gate:
@@ -102,31 +111,38 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          path: trusted
+          fetch-depth: 0
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          path: subject
           fetch-depth: 0
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
       - run: python -m pip install --upgrade pip
-      - run: python -m pip install -e ".[dev]"
+      - run: python -m pip install -e "./trusted[dev]"
       - name: download AGOS prepared task state
-        if: github.event_name == 'pull_request' && hashFiles('.agos/agos.yaml') != ''
+        if: github.event_name == 'pull_request' && hashFiles('trusted/.agos/agos.yaml') != ''
         uses: actions/download-artifact@v4
         with:
           name: agos-current-task
-          path: .agos/tasks/current
+          path: subject/.agos/tasks/current
       # Real PR-bound merge gate. Only applies when the repository carries AGOS
-      # governance config. The prepare job materializes a fresh active task,
-      # candidate evidence, candidate-bound review evidence, and a file-backend
-      # trust anchor as an artifact; this job downloads that state and verifies
-      # it against the submitted PR diff. Fail-closed: governed PRs without
-      # matching AGOS evidence block here.
+      # governance config on the protected base. The prepare job materializes
+      # deterministic candidate evidence and a compatibility file anchor; this
+      # job verifies that evidence against the submitted PR diff. Fail-closed:
+      # governed PRs without matching AGOS evidence block here.
       - name: verify merge gate (real PR binding)
         if: github.event_name == 'pull_request'
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        working-directory: subject
         run: |
-          if [ ! -f .agos/agos.yaml ]; then
+          if [ ! -f "$GITHUB_WORKSPACE/trusted/.agos/agos.yaml" ]; then
             echo "no .agos governance state; skipping real merge-gate binding"
             exit 0
           fi
@@ -134,6 +150,8 @@ jobs:
             --require-anchor \
             --anchor-backend file \
             --anchor-path ".agos/tasks/current/evidence/anchors.json" \
+            --trusted-config "$GITHUB_WORKSPACE/trusted/.agos/agos.yaml" \
             --base "$BASE_SHA" --head "$HEAD_SHA" --json
       - name: merge-gate smoke
+        working-directory: trusted
         run: python -m pytest tests/ci/test_merge_gate_smoke.py -q
