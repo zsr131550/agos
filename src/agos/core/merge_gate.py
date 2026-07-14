@@ -4,13 +4,13 @@ from __future__ import annotations
 from dataclasses import dataclass
 import hashlib
 import json
-from pathlib import PurePosixPath
+from pathlib import Path, PurePosixPath
 from typing import Literal
 
 from pydantic import BaseModel, Field
 
 from agos.core.command import run_command
-from agos.core.config import GateSpec, load_config, resolve_gates
+from agos.core.config import AGOSConfig, GateSpec, ProvenancePolicy, load_config, resolve_gates
 from agos.core.execution import (
     ArbiterDecision,
     CandidateBundleDecision,
@@ -22,14 +22,20 @@ from agos.core.execution_store import ExecutionStore
 from agos.core.execution_workspace import candidate_patch_paths
 from agos.core.gate import gates_match
 from agos.core.ledger import Ledger
+from agos.core.merge_gate_provenance import (
+    ProvenanceState,
+    evaluate_candidate_provenance,
+)
 from agos.core.repo import AgosPaths
 from agos.core.review import ReviewReport
 from agos.core.status import load_status
 from agos.core.task import Task, load_task
 from agos.core.trust_anchor import (
     TrustAnchorPayload,
+    SignedTrustAnchorStore,
     TrustAnchorStore,
     verify_current_anchor,
+    verify_current_signed_anchor,
 )
 
 
@@ -48,6 +54,7 @@ class MergeGateResult(BaseModel):
     checks: list[MergeGateCheck]
     task_id: str | None = None
     anchor: TrustAnchorPayload | None = None
+    provenance_state: ProvenanceState = "unprovenanced"
 
 
 @dataclass(frozen=True)
@@ -63,6 +70,9 @@ def verify_merge_gate(
     anchor_store: TrustAnchorStore | None = None,
     allow_missing_review: bool = False,
     allow_legacy_decisionless: bool = False,
+    trusted_config_path: Path | None = None,
+    provenance_policy: ProvenancePolicy | None = None,
+    signed_anchor_store: SignedTrustAnchorStore | None = None,
     base_ref: str | None = None,
     head_ref: str | None = None,
 ) -> MergeGateResult:
@@ -71,9 +81,19 @@ def verify_merge_gate(
     resolved_gates: list[GateSpec] = []
     records: list[dict] = []
     anchor: TrustAnchorPayload | None = None
+    provenance_state: ProvenanceState = (
+        "disabled" if provenance_policy == "disabled" else "unprovenanced"
+    )
 
     try:
-        config = load_config(paths.root)
+        config_path = trusted_config_path or paths.agos_yaml
+        config = (
+            AGOSConfig.load(trusted_config_path)
+            if trusted_config_path is not None
+            else load_config(paths.root)
+        )
+        effective_policy = provenance_policy or config.merge_gate.provenance_policy
+        provenance_state = "disabled" if effective_policy == "disabled" else "unprovenanced"
         task = load_task(paths.task_yaml)
         status = load_status(paths)
         if status is None:
@@ -81,7 +101,7 @@ def verify_merge_gate(
         checks.append(MergeGateCheck(name="initialized", state="pass", message="AGOS task is active"))
     except Exception as exc:
         checks.append(MergeGateCheck(name="initialized", state="block", message=str(exc)))
-        return _result(checks, task_id=None)
+        return _result(checks, task_id=None, provenance_state=provenance_state)
 
     ledger = Ledger(paths.ledger)
     try:
@@ -92,7 +112,21 @@ def verify_merge_gate(
         checks.append(MergeGateCheck(name="ledger_chain", state="block", message=str(exc)))
 
     try:
-        resolved_gates = resolve_gates(config, task.workflow, override=task.gates)
+        if trusted_config_path is not None:
+            if task.workflow != config.default_workflow:
+                raise ValueError(
+                    "task workflow does not match trusted default workflow: "
+                    f"{task.workflow!r} != {config.default_workflow!r}"
+                )
+            resolved_gates = resolve_gates(config, config.default_workflow)
+            trusted_gate_ids = [gate.id for gate in resolved_gates]
+            if task.gates != trusted_gate_ids:
+                raise ValueError(
+                    "task gate selection does not match complete trusted workflow: "
+                    f"{task.gates!r} != {trusted_gate_ids!r}"
+                )
+        else:
+            resolved_gates = resolve_gates(config, task.workflow, override=task.gates)
         locked_records = [record for record in records if record.get("type") == "gates_locked"]
         locked = locked_records[-1].get("gates", []) if locked_records else []
         if not locked_records:
@@ -103,15 +137,37 @@ def verify_merge_gate(
     except Exception as exc:
         checks.append(MergeGateCheck(name="gates_locked", state="block", message=str(exc)))
 
+    signed_verification = None
+    if signed_anchor_store is not None:
+        signed_verification = verify_current_signed_anchor(
+            paths,
+            signed_anchor_store,
+            trusted_signers=config.merge_gate.trusted_signers,
+            trusted_config_path=config_path,
+        )
+        anchor = signed_verification.anchor
+
     if require_anchor:
         if anchor_store is None:
-            checks.append(
-                MergeGateCheck(
-                    name="trust_anchor",
-                    state="block",
-                    message="trust anchor is required but no store was provided",
+            if signed_verification is None:
+                checks.append(
+                    MergeGateCheck(
+                        name="trust_anchor",
+                        state="block",
+                        message="trust anchor is required but no store was provided",
+                    )
                 )
-            )
+            else:
+                checks.append(
+                    MergeGateCheck(
+                        name="trust_anchor",
+                        state="pass" if signed_verification.passed else "block",
+                        message="signed trust anchor verified"
+                        if signed_verification.passed
+                        else "signed trust anchor verification failed",
+                        details=list(signed_verification.issues),
+                    )
+                )
         else:
             verification = verify_current_anchor(paths, anchor_store)
             anchor = verification.anchor
@@ -142,7 +198,44 @@ def verify_merge_gate(
                 details=patch_issues,
             )
         )
-        status_issues = _candidate_status_issues(candidates)
+        provenance = evaluate_candidate_provenance(
+            paths,
+            candidates,
+            records,
+            policy=effective_policy,
+            trusted_signers=config.merge_gate.trusted_signers,
+            trusted_config_path=config_path,
+            signed_anchor_verification=signed_verification,
+        )
+        provenance_state = provenance.state
+        checks.append(
+            MergeGateCheck(
+                name="provenance",
+                state="block" if provenance.issues else "pass",
+                message="candidate provenance verification failed"
+                if provenance.issues
+                else f"candidate provenance is {provenance.state}",
+                details=[*provenance.issues, *provenance.warnings],
+            )
+        )
+        reconstructed_ids = set(provenance.reconstructed_candidate_ids)
+        governed_candidates = [
+            candidate
+            for candidate in candidates
+            if candidate.id not in reconstructed_ids and effective_policy != "disabled"
+        ]
+        validation_candidates = (
+            candidates
+            if effective_policy == "disabled"
+            else [candidate for candidate in candidates if candidate.id in reconstructed_ids]
+        )
+        status_issues = _candidate_status_issues(governed_candidates)
+        status_issues.extend(
+            _validation_candidate_status_issues(
+                validation_candidates,
+                reconstructed_only=effective_policy != "disabled",
+            )
+        )
         checks.append(
             MergeGateCheck(
                 name="candidate_status",
@@ -155,7 +248,7 @@ def verify_merge_gate(
         )
         evidence_issues, evidence_warnings = _candidate_evidence_issues(
             store,
-            candidates,
+            governed_candidates,
             required_gate_ids=[gate.id for gate in resolved_gates],
             allow_missing_review=allow_missing_review,
             paths=paths,
@@ -163,6 +256,15 @@ def verify_merge_gate(
                 str(record["hash"]): record for record in records if record.get("hash")
             },
             allow_fake_reviewer=config.allow_fake_reviewer,
+        )
+        evidence_issues.extend(
+            _validation_candidate_evidence_issues(
+                store,
+                validation_candidates,
+                records=records,
+                required_gate_ids=[gate.id for gate in resolved_gates],
+                reconstructed_only=effective_policy != "disabled",
+            )
         )
         checks.append(
             MergeGateCheck(
@@ -175,7 +277,7 @@ def verify_merge_gate(
             )
         )
         decision_issues, decision_warnings = _candidate_decision_issues(
-            candidates,
+            governed_candidates,
             records=records,
             paths=paths,
             allow_legacy_decisionless=allow_legacy_decisionless,
@@ -201,13 +303,24 @@ def verify_merge_gate(
                 details=arbitration_issues,
             )
         )
-        submitted_diff_issues = _submitted_diff_issues(
-            paths,
-            store,
-            records,
-            candidates,
-            base_ref=base_ref,
-            head_ref=head_ref,
+        submitted_diff_issues = (
+            _validation_submitted_diff_issues(
+                paths,
+                store,
+                validation_candidates,
+                base_ref=base_ref,
+                head_ref=head_ref,
+            )
+            if validation_candidates
+            else _submitted_diff_issues(
+                paths,
+                store,
+                records,
+                candidates,
+                base_ref=base_ref,
+                head_ref=head_ref,
+                allow_accepted=provenance_state == "proven",
+            )
         )
         checks.append(
             MergeGateCheck(
@@ -227,8 +340,15 @@ def verify_merge_gate(
         checks.append(MergeGateCheck(name="candidate_patch_hashes", state="block", message=str(exc)))
         checks.append(MergeGateCheck(name="candidate_evidence", state="block", message=str(exc)))
         checks.append(MergeGateCheck(name="candidate_decisions", state="block", message=str(exc)))
+        if not any(check.name == "provenance" for check in checks):
+            checks.append(MergeGateCheck(name="provenance", state="block", message=str(exc)))
 
-    return _result(checks, task_id=task.id, anchor=anchor)
+    return _result(
+        checks,
+        task_id=task.id,
+        anchor=anchor,
+        provenance_state=provenance_state,
+    )
 
 
 def _candidate_decision_issues(
@@ -408,6 +528,78 @@ def _candidate_status_issues(candidates: list[CandidatePatch]) -> list[str]:
     return issues
 
 
+def _validation_candidate_status_issues(
+    candidates: list[CandidatePatch],
+    *,
+    reconstructed_only: bool,
+) -> list[str]:
+    issues: list[str] = []
+    for candidate in candidates:
+        if reconstructed_only and candidate.status != "tested":
+            issues.append(
+                f"{candidate.id}: ci_reconstructed candidate status must be tested: "
+                f"{candidate.status}"
+            )
+        elif not reconstructed_only and candidate.status not in {"tested", "accepted", "applied"}:
+            issues.append(
+                f"{candidate.id}: validation-only candidate status is not eligible: "
+                f"{candidate.status}"
+            )
+    return issues
+
+
+def _validation_candidate_evidence_issues(
+    store: ExecutionStore,
+    candidates: list[CandidatePatch],
+    *,
+    records: list[dict],
+    required_gate_ids: list[str],
+    reconstructed_only: bool,
+) -> list[str]:
+    issues: list[str] = []
+    required = {"patch_applies", *required_gate_ids}
+    for candidate in candidates:
+        runs = store.read_test_runs(candidate.id)
+        passed = {run.gate_id for run in runs if run.state == "passed"}
+        missing = sorted(required - passed)
+        if missing:
+            issues.append(
+                f"{candidate.id}: missing passed deterministic tests: {', '.join(missing)}"
+            )
+        run_refs = {f"execution/tests/{run.id}.json" for run in runs if run.gate_id in required}
+        missing_bindings = sorted(run_refs - set(candidate.test_refs))
+        if missing_bindings:
+            issues.append(
+                f"{candidate.id}: candidate is missing deterministic test refs: "
+                f"{', '.join(missing_bindings)}"
+            )
+        if not reconstructed_only:
+            continue
+        if candidate.review_refs:
+            issues.append(f"{candidate.id}: ci_reconstructed candidate must not contain review refs")
+        if candidate.decision_ref is not None:
+            issues.append(f"{candidate.id}: ci_reconstructed candidate must not contain decision_ref")
+        forbidden = {
+            "candidate_review_completed",
+            "candidate_decision_recorded",
+            "candidate_applied",
+        }
+        found = sorted(
+            {
+                str(record.get("type"))
+                for record in records
+                if record.get("candidate_id") == candidate.id
+                and record.get("type") in forbidden
+            }
+        )
+        if found:
+            issues.append(
+                f"{candidate.id}: ci_reconstructed candidate has forbidden ledger events: "
+                f"{', '.join(found)}"
+            )
+    return issues
+
+
 def _clean_review_issue(
     candidate: CandidatePatch,
     *,
@@ -546,6 +738,7 @@ def _submitted_diff_issues(
     *,
     base_ref: str | None,
     head_ref: str | None,
+    allow_accepted: bool = False,
 ) -> list[str]:
     if base_ref is None and head_ref is None:
         return []
@@ -563,6 +756,18 @@ def _submitted_diff_issues(
     if applied_issues:
         return [*issues, *applied_issues]
     if not applied:
+        if allow_accepted:
+            accepted = [candidate for candidate in candidates if candidate.status == "accepted"]
+            return [
+                *issues,
+                *_validation_submitted_diff_issues(
+                    paths,
+                    store,
+                    accepted,
+                    base_ref=base_ref,
+                    head_ref=head_ref,
+                ),
+            ]
         return [*issues, "submitted diff is non-empty but no applied candidates were recorded"]
 
     try:
@@ -576,6 +781,41 @@ def _submitted_diff_issues(
     if submitted_paths != expected_paths or hashlib.sha256(diff).hexdigest() != hashlib.sha256(expected).hexdigest():
         issues.append("submitted diff does not match applied candidate evidence")
     return issues
+
+
+def _validation_submitted_diff_issues(
+    paths: AgosPaths,
+    store: ExecutionStore,
+    candidates: list[CandidatePatch],
+    *,
+    base_ref: str | None,
+    head_ref: str | None,
+) -> list[str]:
+    if not base_ref or not head_ref:
+        return ["validation-only candidate evidence requires both base_ref and head_ref"]
+    if len(candidates) != 1:
+        return ["validation-only submitted diff requires exactly one candidate"]
+    candidate = candidates[0]
+    resolved_base = _git_rev_parse(paths, base_ref)
+    if resolved_base is None:
+        return [f"submitted diff base ref could not be resolved: {base_ref}"]
+    if candidate.base_commit != resolved_base:
+        return [
+            f"{candidate.id}: validation candidate base_commit does not match submitted base"
+        ]
+    diff = _git_diff(paths, base_ref, head_ref)
+    if diff is None:
+        return [f"submitted diff could not be read for {base_ref}..{head_ref}"]
+    try:
+        expected = store.patch_path(candidate.patch_ref).read_bytes()
+    except Exception as exc:
+        return [f"validation candidate patch evidence could not be read: {exc}"]
+    if (
+        candidate_patch_paths(diff) != candidate_patch_paths(expected)
+        or hashlib.sha256(diff).hexdigest() != hashlib.sha256(expected).hexdigest()
+    ):
+        return ["submitted diff does not match validation-only candidate evidence"]
+    return []
 
 
 def _checkpoint_ancestry_issues(paths: AgosPaths, records: list[dict], head_ref: str) -> list[str]:
@@ -606,6 +846,19 @@ def _git_diff(paths: AgosPaths, base_ref: str, head_ref: str) -> bytes | None:
     if proc.returncode != 0:
         return None
     return proc.stdout if isinstance(proc.stdout, bytes) else proc.stdout.encode()
+
+
+def _git_rev_parse(paths: AgosPaths, ref: str) -> str | None:
+    proc = run_command(
+        ["git", "rev-parse", "--verify", ref],
+        cwd=paths.root,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if proc.returncode != 0:
+        return None
+    return str(proc.stdout).strip()
 
 
 def _applied_candidates_in_ledger_order(
@@ -704,10 +957,12 @@ def _result(
     *,
     task_id: str | None,
     anchor: TrustAnchorPayload | None = None,
+    provenance_state: ProvenanceState = "unprovenanced",
 ) -> MergeGateResult:
     return MergeGateResult(
         passed=all(check.state == "pass" for check in checks),
         checks=checks,
         task_id=task_id,
         anchor=anchor,
+        provenance_state=provenance_state,
     )

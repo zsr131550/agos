@@ -249,6 +249,11 @@ class ExecutionService:
                 "candidate_id": candidate_id,
                 "patch_ref": patch_ref,
                 "patch_sha256": patch_sha,
+                "provenance_source": "worker_export",
+                "source_agent": subtask.worker.adapter,
+                "workspace_ref": workspace.ref,
+                "base_commit": workspace.base_commit,
+                "attestation_ref": None,
             }
         )
         candidate = CandidatePatch(
@@ -1416,6 +1421,5 @@ def _process_log_lines(label: str, proc: subprocess.CompletedProcess) -> list[st
         f"--- stdout ---\n{_decode(proc.stdout)}",
         f"--- stderr ---\n{_decode(proc.stderr)}",
     ]
-
 
 

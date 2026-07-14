@@ -15,6 +15,7 @@ from agos.core.execution import (
     CandidateBundleDecision,
     CandidateMergePreview,
     CandidatePatch,
+    CandidateProvenance,
     CandidateTestRun,
     ReviewBinding,
 )
@@ -22,19 +23,40 @@ from agos.core.execution_store import ExecutionStore
 from agos.core.gate import gates_locked_payload
 from agos.core.ledger import Ledger
 from agos.core.merge_gate import _clean_review_issue, verify_merge_gate
+from agos.core.provenance import CandidateAttestationPayload, sign_candidate_attestation
 from agos.core.repo import repo_paths
 from agos.core.review import Finding, ReviewReport
 from agos.core.review_store import ReviewStore
 from agos.core.status import TaskStatus, save_status
 from agos.core.task import ExecutorBinding, Task, save_task
-from agos.core.trust_anchor import FileTrustAnchorStore, publish_current_anchor
+from agos.core.trust_anchor import (
+    FileTrustAnchorStore,
+    SignedFileTrustAnchorStore,
+    publish_current_anchor,
+    publish_current_signed_anchor,
+)
+
+
+PRIVATE_KEY_PEM = """-----BEGIN PRIVATE KEY-----
+MC4CAQAwBQYDK2VwBCIEIJ1hsZ3v/VpguoRK9JLsLMREScVpezJpGXA7rAMcrn9g
+-----END PRIVATE KEY-----
+"""
+PUBLIC_KEY_PEM = """-----BEGIN PUBLIC KEY-----
+MCowBQYDK2VwAyEA11qYAYKxCrfVS/7TyWQHOg7hcvPapiMlrwIaaPcHURo=
+-----END PUBLIC KEY-----
+"""
 
 
 def _gate() -> GateSpec:
     return GateSpec(id="tests_pass", stage=["candidate"], argv=[sys.executable, "-c", "pass"])
 
 
-def _write_active_task(tmp_repo: Path, *, gate: GateSpec | None = None) -> tuple[Task, object]:
+def _write_active_task(
+    tmp_repo: Path,
+    *,
+    gate: GateSpec | None = None,
+    merge_gate: dict[str, object] | None = None,
+) -> tuple[Task, object]:
     paths = repo_paths(tmp_repo)
     paths.agos_dir.mkdir(parents=True, exist_ok=True)
     gates = [gate or _gate()]
@@ -42,6 +64,7 @@ def _write_active_task(tmp_repo: Path, *, gate: GateSpec | None = None) -> tuple
         executor={"name": "multica", "agent": "Lambda"},
         default_workflow="feature",
         workflows={"feature": WorkflowConfig(gates=gates)},
+        merge_gate=merge_gate or {},
     )
     config.save(paths.agos_yaml)
     task = Task(
@@ -80,12 +103,15 @@ def _write_candidate(
     with_decision: bool = True,
     write_created_record: bool = True,
     created_patch_ref: str | None = None,
+    provenance_source: str | None = None,
+    attestation_ref: str | None = None,
+    base_commit: str = "a" * 40,
 ) -> CandidatePatch:
     store = ExecutionStore(paths)
     patch_ref, patch_sha = store.write_candidate_patch(candidate_id, patch_bytes)
+    created = None
     if write_created_record:
-        Ledger(paths.ledger).append(
-            {
+        created_payload = {
                 "type": "candidate_patch_created",
                 "task_id": "agos-task-01",
                 "subtask_id": (
@@ -95,9 +121,23 @@ def _write_candidate(
                 "patch_ref": created_patch_ref or patch_ref,
                 "patch_sha256": patch_sha,
             }
-        )
+        if provenance_source is not None:
+            created_payload.update(
+                {
+                    "provenance_source": provenance_source,
+                    "source_agent": "local",
+                    "workspace_ref": (
+                        "execution/workspaces/subtask-01.json"
+                        if candidate_id == "candidate-01"
+                        else f"execution/workspaces/subtask-{candidate_id}.json"
+                    ),
+                    "base_commit": base_commit,
+                    "attestation_ref": attestation_ref,
+                }
+            )
+        created = Ledger(paths.ledger).append(created_payload)
     test_refs = (
-        ["execution/tests/patch.json", "execution/tests/tests-pass.json"]
+        ["execution/tests/test-patch.json", "execution/tests/test-gate.json"]
         if candidate_id == "candidate-01"
         else [
             f"execution/tests/{candidate_id}-patch.json",
@@ -132,7 +172,7 @@ def _write_candidate(
                 packet_ref=packet_ref,
                 report_ref=report_ref,
                 patch_sha256=patch_sha,
-                base_commit="a" * 40,
+                base_commit=base_commit,
                 test_refs=test_refs,
                 state="completed",
                 ledger_head_at_completion=completed["hash"],
@@ -166,12 +206,21 @@ def _write_candidate(
         ),
         patch_ref=patch_ref,
         patch_sha256=patch_sha,
-        base_commit="a" * 40,
+        base_commit=base_commit,
         summary="Update README",
         status=status,  # type: ignore[arg-type]
         test_refs=test_refs,
         review_refs=review_refs,
         decision_ref=decision_ref,
+        provenance=(
+            CandidateProvenance(
+                source=provenance_source,  # type: ignore[arg-type]
+                ledger_head_hash=str(created["hash"]) if created is not None else None,
+                attestation_ref=attestation_ref,
+            )
+            if provenance_source is not None
+            else None
+        ),
     )
     store.write_candidate(candidate)
     run_refs = (
@@ -230,6 +279,23 @@ def _rewrite_review_report(paths, candidate: CandidatePatch, **updates: object) 
     payload = json.loads(report_path.read_text(encoding="utf-8"))
     payload.update(updates)
     report_path.write_text(json.dumps(payload), encoding="utf-8")
+
+
+def _publish_signed_test_anchor(paths) -> SignedFileTrustAnchorStore:
+    private_key_path = paths.root.parent / "ci-private.pem"
+    private_key_path.write_text(PRIVATE_KEY_PEM, encoding="ascii")
+    public_key_path = paths.agos_dir / "keys" / "ci-public.pem"
+    public_key_path.parent.mkdir(parents=True, exist_ok=True)
+    public_key_path.write_text(PUBLIC_KEY_PEM, encoding="ascii")
+    store = SignedFileTrustAnchorStore(paths.evidence / "signed-anchor.json")
+    publish_current_signed_anchor(
+        paths,
+        store,
+        issuer="protected-ci",
+        key_id="ci-2026",
+        private_key_path=private_key_path,
+    )
+    return store
 
 
 def _git(repo: Path, *args: str) -> str:
@@ -1173,6 +1239,405 @@ def test_merge_gate_blocks_failed_merge_preview(tmp_repo: Path):
     assert result.passed is False
     assert _check(result, "merge_arbitration").state == "block"
     assert "failed merge preview" in "; ".join(_check(result, "merge_arbitration").details)
+
+
+def test_required_provenance_passes_worker_export_with_allowed_signed_anchor(tmp_repo: Path):
+    _task, paths = _write_active_task(
+        tmp_repo,
+        merge_gate={
+            "provenance_policy": "required",
+            "trusted_signers": [
+                {
+                    "issuer": "protected-ci",
+                    "key_id": "ci-2026",
+                    "public_key_path": "keys/ci-public.pem",
+                }
+            ],
+        },
+    )
+    candidate = _write_candidate(
+        paths,
+        status="applied",
+        clean_review=True,
+        provenance_source="worker_export",
+    )
+    _append_candidate_applied(paths, candidate)
+    signed_store = _publish_signed_test_anchor(paths)
+
+    result = verify_merge_gate(
+        paths,
+        signed_anchor_store=signed_store,
+        trusted_config_path=paths.agos_yaml,
+    )
+
+    assert result.passed is True
+    assert result.provenance_state == "proven"
+    assert _check(result, "provenance").state == "pass"
+
+
+@pytest.mark.parametrize("policy", ["required", "optional"])
+def test_proven_provenance_binds_submitted_diff_to_accepted_candidate(
+    tmp_repo: Path,
+    policy: str,
+):
+    _task, paths = _write_active_task(
+        tmp_repo,
+        merge_gate={
+            "provenance_policy": policy,
+            "trusted_signers": [
+                {
+                    "issuer": "protected-ci",
+                    "key_id": "ci-2026",
+                    "public_key_path": "keys/ci-public.pem",
+                }
+            ],
+        },
+    )
+    base = _git(tmp_repo, "rev-parse", "HEAD")
+    (tmp_repo / "README.md").write_text("# accepted candidate\n", encoding="utf-8")
+    patch_bytes = _git_diff_bytes(tmp_repo, "HEAD")
+    _write_candidate(
+        paths,
+        status="accepted",
+        clean_review=True,
+        patch_bytes=patch_bytes,
+        provenance_source="worker_export",
+        base_commit=base,
+    )
+    _commit(tmp_repo, "accepted candidate subject")
+    head = _git(tmp_repo, "rev-parse", "HEAD")
+    signed_store = _publish_signed_test_anchor(paths)
+
+    result = verify_merge_gate(
+        paths,
+        signed_anchor_store=signed_store,
+        trusted_config_path=paths.agos_yaml,
+        base_ref=base,
+        head_ref=head,
+    )
+
+    assert result.passed is True
+    assert result.provenance_state == "proven"
+    assert _check(result, "submitted_diff").state == "pass"
+
+
+def test_required_provenance_blocks_reconstructed_candidate(tmp_repo: Path):
+    _task, paths = _write_active_task(
+        tmp_repo,
+        merge_gate={"provenance_policy": "required"},
+    )
+    _write_candidate(
+        paths,
+        status="tested",
+        clean_review=False,
+        with_decision=False,
+        provenance_source="ci_reconstructed",
+    )
+
+    result = verify_merge_gate(paths)
+
+    assert result.passed is False
+    assert result.provenance_state == "unprovenanced"
+    assert "ci_reconstructed" in "; ".join(_check(result, "provenance").details)
+
+
+def test_required_provenance_blocks_legacy_candidate_and_missing_signed_anchor(tmp_repo: Path):
+    _task, paths = _write_active_task(
+        tmp_repo,
+        merge_gate={"provenance_policy": "required"},
+    )
+    _write_candidate(paths, status="accepted", clean_review=True)
+
+    result = verify_merge_gate(paths)
+
+    assert result.passed is False
+    details = "; ".join(_check(result, "provenance").details)
+    assert "legacy_unattested" in details
+    assert "signed anchor" in details
+
+
+def test_optional_provenance_keeps_strict_unsigned_candidate_compatible(tmp_repo: Path):
+    _task, paths = _write_active_task(tmp_repo)
+    _write_candidate(
+        paths,
+        status="accepted",
+        clean_review=True,
+        provenance_source="worker_export",
+    )
+
+    result = verify_merge_gate(paths)
+
+    assert result.passed is True
+    assert result.provenance_state == "unprovenanced"
+    assert _check(result, "provenance").state == "pass"
+
+
+def test_optional_provenance_accepts_exact_reconstructed_diff_without_governance_claim(
+    tmp_repo: Path,
+):
+    _task, paths = _write_active_task(tmp_repo)
+    base = _git(tmp_repo, "rev-parse", "HEAD")
+    (tmp_repo / "README.md").write_text("# reconstructed\n", encoding="utf-8")
+    patch_bytes = _git_diff_bytes(tmp_repo, "HEAD")
+    _write_candidate(
+        paths,
+        status="tested",
+        clean_review=False,
+        patch_bytes=patch_bytes,
+        with_decision=False,
+        provenance_source="ci_reconstructed",
+        base_commit=base,
+    )
+    _commit(tmp_repo, "reconstructed subject")
+    head = _git(tmp_repo, "rev-parse", "HEAD")
+
+    result = verify_merge_gate(paths, base_ref=base, head_ref=head)
+
+    assert result.passed is True
+    assert result.provenance_state == "unprovenanced"
+    assert _check(result, "candidate_evidence").state == "pass"
+    assert _check(result, "submitted_diff").state == "pass"
+
+
+def test_disabled_provenance_validates_reconstructed_diff_without_claim(tmp_repo: Path):
+    _task, paths = _write_active_task(
+        tmp_repo,
+        merge_gate={"provenance_policy": "disabled"},
+    )
+    base = _git(tmp_repo, "rev-parse", "HEAD")
+    (tmp_repo / "README.md").write_text("# disabled provenance\n", encoding="utf-8")
+    patch_bytes = _git_diff_bytes(tmp_repo, "HEAD")
+    _write_candidate(
+        paths,
+        status="tested",
+        clean_review=False,
+        patch_bytes=patch_bytes,
+        with_decision=False,
+        provenance_source="ci_reconstructed",
+        base_commit=base,
+    )
+    _commit(tmp_repo, "disabled provenance subject")
+    head = _git(tmp_repo, "rev-parse", "HEAD")
+
+    result = verify_merge_gate(paths, base_ref=base, head_ref=head)
+
+    assert result.passed is True
+    assert result.provenance_state == "disabled"
+
+
+def test_provenance_blocks_stale_candidate_creation_hash(tmp_repo: Path):
+    _task, paths = _write_active_task(tmp_repo)
+    candidate = _write_candidate(
+        paths,
+        status="accepted",
+        clean_review=True,
+        provenance_source="worker_export",
+    )
+    assert candidate.provenance is not None
+    ExecutionStore(paths).write_candidate(
+        candidate.model_copy(
+            update={
+                "provenance": candidate.provenance.model_copy(
+                    update={"ledger_head_hash": "f" * 64}
+                )
+            }
+        )
+    )
+
+    result = verify_merge_gate(paths)
+
+    assert result.passed is False
+    assert "creation ledger hash" in "; ".join(_check(result, "provenance").details)
+
+
+def test_provenance_blocks_candidate_source_rewritten_after_creation(tmp_repo: Path):
+    _task, paths = _write_active_task(tmp_repo)
+    candidate = _write_candidate(
+        paths,
+        status="accepted",
+        clean_review=True,
+        provenance_source="worker_export",
+    )
+    assert candidate.provenance is not None
+    ExecutionStore(paths).write_candidate(
+        candidate.model_copy(
+            update={
+                "provenance": candidate.provenance.model_copy(
+                    update={"source": "legacy_unattested"}
+                )
+            }
+        )
+    )
+
+    result = verify_merge_gate(paths)
+
+    assert result.passed is False
+    assert "source does not match" in "; ".join(_check(result, "provenance").details)
+
+
+def test_provenance_blocks_candidate_metadata_removed_after_creation(tmp_repo: Path):
+    _task, paths = _write_active_task(tmp_repo)
+    candidate = _write_candidate(
+        paths,
+        status="accepted",
+        clean_review=True,
+        provenance_source="worker_export",
+    )
+    ExecutionStore(paths).write_candidate(candidate.model_copy(update={"provenance": None}))
+
+    result = verify_merge_gate(paths)
+
+    assert result.passed is False
+    assert "metadata is missing" in "; ".join(_check(result, "provenance").details)
+
+
+def test_provenance_blocks_invalid_external_attestation_in_optional_mode(tmp_repo: Path):
+    _task, paths = _write_active_task(tmp_repo)
+    _write_candidate(
+        paths,
+        status="accepted",
+        clean_review=True,
+        provenance_source="external_attested",
+        attestation_ref="evidence/missing-attestation.json",
+    )
+
+    result = verify_merge_gate(paths, trusted_config_path=paths.agos_yaml)
+
+    assert result.passed is False
+    assert "attestation" in "; ".join(_check(result, "provenance").details)
+
+
+def test_external_attestation_and_signed_anchor_produce_proven_state(tmp_repo: Path):
+    _task, paths = _write_active_task(
+        tmp_repo,
+        merge_gate={
+            "trusted_signers": [
+                {
+                    "issuer": "protected-ci",
+                    "key_id": "ci-2026",
+                    "public_key_path": "keys/ci-public.pem",
+                }
+            ]
+        },
+    )
+    attestation_ref = "evidence/external-attestation.json"
+    candidate = _write_candidate(
+        paths,
+        status="accepted",
+        clean_review=True,
+        provenance_source="external_attested",
+        attestation_ref=attestation_ref,
+    )
+    signed_store = _publish_signed_test_anchor(paths)
+    envelope = sign_candidate_attestation(
+        CandidateAttestationPayload(
+            candidate_id=candidate.id,
+            patch_sha256=candidate.patch_sha256,
+            base_commit=candidate.base_commit,
+            source_agent=candidate.source_agent,
+            created_at="2026-07-14T00:00:00Z",
+        ),
+        issuer="protected-ci",
+        key_id="ci-2026",
+        private_key_path=paths.root.parent / "ci-private.pem",
+    )
+    attestation_path = paths.current_task / attestation_ref
+    attestation_path.parent.mkdir(parents=True, exist_ok=True)
+    attestation_path.write_text(envelope.canonical_json(), encoding="utf-8")
+
+    result = verify_merge_gate(
+        paths,
+        signed_anchor_store=signed_store,
+        trusted_config_path=paths.agos_yaml,
+    )
+
+    assert result.passed is True
+    assert result.provenance_state == "proven"
+
+
+def test_optional_provenance_blocks_invalid_supplied_signed_anchor(tmp_repo: Path):
+    _task, paths = _write_active_task(
+        tmp_repo,
+        merge_gate={
+            "trusted_signers": [
+                {
+                    "issuer": "protected-ci",
+                    "key_id": "ci-2026",
+                    "public_key_path": "keys/ci-public.pem",
+                }
+            ]
+        },
+    )
+    _write_candidate(
+        paths,
+        status="accepted",
+        clean_review=True,
+        provenance_source="worker_export",
+    )
+    signed_store = _publish_signed_test_anchor(paths)
+    envelope = signed_store.read("agos-task-01")
+    signed_store.write(
+        envelope.model_copy(
+            update={"signature": ("A" if envelope.signature[0] != "A" else "B") + envelope.signature[1:]}
+        )
+    )
+
+    result = verify_merge_gate(
+        paths,
+        signed_anchor_store=signed_store,
+        trusted_config_path=paths.agos_yaml,
+    )
+
+    assert result.passed is False
+    assert "signature" in "; ".join(_check(result, "provenance").details)
+
+
+def test_trusted_config_does_not_fall_back_to_subject_config(tmp_repo: Path):
+    _task, paths = _write_active_task(tmp_repo)
+    trusted_config = tmp_repo.parent / "trusted" / ".agos" / "agos.yaml"
+    trusted_config.parent.mkdir(parents=True)
+    trusted_config.write_text(paths.agos_yaml.read_text(encoding="utf-8"), encoding="utf-8")
+    paths.agos_yaml.write_text("not: [valid", encoding="utf-8")
+
+    result = verify_merge_gate(paths, trusted_config_path=trusted_config)
+
+    assert result.passed is True
+    assert result.provenance_state == "unprovenanced"
+
+
+def test_trusted_config_rejects_subject_selected_weaker_workflow(tmp_repo: Path):
+    task, paths = _write_active_task(tmp_repo)
+    trusted_config = tmp_repo.parent / "trusted" / ".agos" / "agos.yaml"
+    trusted_config.parent.mkdir(parents=True)
+    config = AGOSConfig.load(paths.agos_yaml)
+    config.workflows["docs_only"] = WorkflowConfig(gates=[])
+    config.save(trusted_config)
+    save_task(
+        task.model_copy(update={"workflow": "docs_only", "gates": []}),
+        paths.task_yaml,
+    )
+    paths.ledger.unlink()
+    ledger = Ledger(paths.ledger)
+    ledger.append({"type": "task_started", "task_id": task.id, "title": task.title})
+    ledger.append({"type": "gates_locked", "task_id": task.id, "gates": []})
+
+    result = verify_merge_gate(paths, trusted_config_path=trusted_config)
+
+    assert result.passed is False
+    assert _check(result, "gates_locked").state == "block"
+    assert "trusted default workflow" in _check(result, "gates_locked").message
+
+
+def test_missing_trusted_config_blocks_without_subject_fallback(tmp_repo: Path):
+    _task, paths = _write_active_task(tmp_repo)
+
+    result = verify_merge_gate(
+        paths,
+        trusted_config_path=tmp_repo.parent / "missing" / "agos.yaml",
+    )
+
+    assert result.passed is False
+    assert _check(result, "initialized").state == "block"
 
 
 @pytest.mark.parametrize(

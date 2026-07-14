@@ -16,7 +16,12 @@ from agos.core.merge_gate import MergeGateResult
 from agos.core.repo import repo_paths
 from agos.core.status import TaskStatus, save_status
 from agos.core.task import ExecutorBinding, Task, save_task
-from agos.core.trust_anchor import FileTrustAnchorStore, GitRefTrustAnchorStore, publish_current_anchor
+from agos.core.trust_anchor import (
+    FileTrustAnchorStore,
+    GitRefTrustAnchorStore,
+    SignedFileTrustAnchorStore,
+    publish_current_anchor,
+)
 
 
 runner = CliRunner()
@@ -142,6 +147,8 @@ def test_merge_gate_help_exposes_submitted_diff_refs():
     assert "--base" in opts
     assert "--head" in opts
     assert "--allow-legacy-decisionless" in opts
+    assert "--provenance-policy" in opts
+    assert "--trusted-config" in opts
 
 
 def test_merge_gate_passes_legacy_decisionless_option_to_verifier(monkeypatch, tmp_repo: Path):
@@ -159,6 +166,65 @@ def test_merge_gate_passes_legacy_decisionless_option_to_verifier(monkeypatch, t
 
     assert result.exit_code == 0, result.stderr
     assert captured["allow_legacy_decisionless"] is True
+
+
+def test_merge_gate_passes_provenance_and_trusted_config_options_to_verifier(
+    monkeypatch,
+    tmp_repo: Path,
+):
+    _write_active_task(tmp_repo)
+    monkeypatch.chdir(tmp_repo)
+    captured = {}
+    trusted_config = tmp_repo / "trusted" / "agos.yaml"
+
+    def fake_verify(_paths, **kwargs):
+        captured.update(kwargs)
+        return MergeGateResult(passed=True, checks=[], provenance_state="disabled")
+
+    monkeypatch.setattr(cmd_merge_gate, "verify_merge_gate", fake_verify)
+
+    result = runner.invoke(
+        app,
+        [
+            "merge-gate",
+            "--provenance-policy",
+            "disabled",
+            "--trusted-config",
+            str(trusted_config),
+        ],
+    )
+
+    assert result.exit_code == 0, result.stderr
+    assert captured["provenance_policy"] == "disabled"
+    assert captured["trusted_config_path"] == trusted_config
+
+
+def test_merge_gate_passes_signed_file_store_to_verifier(monkeypatch, tmp_repo: Path):
+    _write_active_task(tmp_repo)
+    monkeypatch.chdir(tmp_repo)
+    captured = {}
+    anchor_path = tmp_repo / "signed-anchor.json"
+
+    def fake_verify(_paths, **kwargs):
+        captured.update(kwargs)
+        return MergeGateResult(passed=True, checks=[])
+
+    monkeypatch.setattr(cmd_merge_gate, "verify_merge_gate", fake_verify)
+
+    result = runner.invoke(
+        app,
+        [
+            "merge-gate",
+            "--anchor-backend",
+            "signed-file",
+            "--anchor-path",
+            str(anchor_path),
+        ],
+    )
+
+    assert result.exit_code == 0, result.stderr
+    assert isinstance(captured["signed_anchor_store"], SignedFileTrustAnchorStore)
+    assert captured["anchor_store"] is None
 
 
 def test_merge_gate_exits_nonzero_on_unexpected_error(monkeypatch, tmp_repo: Path):
@@ -179,6 +245,12 @@ def test_merge_gate_store_accepts_git_ref_backend(tmp_repo: Path):
     store = cmd_merge_gate._store("git-ref", tmp_repo, None)
 
     assert isinstance(store, GitRefTrustAnchorStore)
+
+
+def test_merge_gate_store_accepts_signed_file_backend(tmp_repo: Path):
+    store = cmd_merge_gate._store("signed-file", tmp_repo, tmp_repo / "anchor.json")
+
+    assert isinstance(store, SignedFileTrustAnchorStore)
 
 
 def test_merge_gate_store_rejects_unknown_backend(tmp_repo: Path):
