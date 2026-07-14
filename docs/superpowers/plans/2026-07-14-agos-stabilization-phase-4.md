@@ -35,7 +35,7 @@
 - `Ledger.read_all()`, `head_hash()`, and `verify_chain()` never observe a partially appended line.
 - `append_repo_record()` uses the same durable append boundary while retaining plain JSONL format.
 
-- [ ] **Step 1: Add a failing multi-process append test**
+- [x] **Step 1: Add a failing multi-process append test**
 
 Add a module-level multiprocessing worker that waits on a shared start event and appends numbered payloads through independent `Ledger` instances. Start at least four spawned processes, assert every process exits zero, assert every payload is present exactly once, assert sequences are exactly `1..N`, and call `verify_chain()`.
 
@@ -61,7 +61,7 @@ def test_concurrent_process_appends_preserve_one_chain(tmp_path: Path):
     Ledger(path).verify_chain()
 ```
 
-- [ ] **Step 2: Verify RED**
+- [x] **Step 2: Verify RED**
 
 Run:
 
@@ -71,11 +71,11 @@ Run:
 
 Expected: FAIL against the unlocked read-tail/append race with duplicate sequence/hash ancestry or a broken chain.
 
-- [ ] **Step 3: Implement the lock and durable append**
+- [x] **Step 3: Implement the lock and durable append**
 
 `exclusive_file_lock()` creates a sibling lock file, takes an exclusive blocking lock, yields, and always unlocks in `finally`. Keep platform imports inside private POSIX/Windows helpers so importing AGOS works on both operating systems. In `Ledger`, bypass any cached tail while inside the append lock, append exactly one JSON line, call `flush()` and `os.fsync()`, and only then release the lock. Remove process-stale tail caching or refresh it after every locked read.
 
-- [ ] **Step 4: Verify and commit**
+- [x] **Step 4: Verify and commit**
 
 ```bash
 .venv/bin/python -m pytest tests/core/test_ledger.py tests/core/test_executor_seam.py -q
