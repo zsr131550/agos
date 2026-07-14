@@ -374,6 +374,20 @@
   </main>
 
   <script>
+    const embeddedDashboardToken = __AGOS_DASHBOARD_TOKEN__;
+    const dashboardToken = (() => {
+      let token = embeddedDashboardToken;
+      const fragment = new URLSearchParams(window.location.hash.slice(1)).get('token');
+      if (fragment) {
+        token = fragment;
+        try { window.sessionStorage.setItem('agos-dashboard-token', fragment); } catch (error) {}
+        window.history.replaceState(null, '', `${window.location.pathname}${window.location.search}`);
+      } else if (!token) {
+        try { token = window.sessionStorage.getItem('agos-dashboard-token') || ''; } catch (error) {}
+      }
+      return token;
+    })();
+
     const state = {
       health: null,
       agents: { task_agents: [], review_agents: [] },
@@ -403,7 +417,11 @@
     async function fetchJson(path, options = {}) {
       const response = await fetch(path, {
         ...options,
-        headers: { "Accept": "application/json", ...(options.headers || {}) },
+        headers: {
+          "Accept": "application/json",
+          ...(dashboardToken ? { "Authorization": `Bearer ${dashboardToken}` } : {}),
+          ...(options.headers || {}),
+        },
       });
       const text = await response.text();
       let data = null;

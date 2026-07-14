@@ -15,12 +15,24 @@ def dashboard_command(
         "--open/--no-open",
         help="Open the dashboard URL in a browser.",
     ),
+    token: str | None = typer.Option(
+        None,
+        "--token",
+        envvar="AGOS_DASHBOARD_TOKEN",
+        help="Authentication token required for mutations and remote API access.",
+    ),
 ) -> None:
     """Start the local read-only AGOS dashboard."""
 
     try:
         repo_root = find_repo_root()
-        serve_dashboard_forever(repo_root, host=host, port=port, open_browser=open_browser)
+        serve_dashboard_forever(
+            repo_root,
+            host=host,
+            port=port,
+            open_browser=open_browser,
+            token=token,
+        )
     except KeyboardInterrupt:
         raise typer.Exit(code=0) from None
     except Exception as exc:

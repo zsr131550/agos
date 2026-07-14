@@ -284,7 +284,7 @@ git commit -m "fix: default agent CLIs to safe permissions"
 - The loopback index receives its generated token through a no-store bootstrap value; an explicit remote token is accepted from the URL fragment and kept only in session storage.
 - `agos dashboard` adds `--token` with `AGOS_DASHBOARD_TOKEN` environment support.
 
-- [ ] **Step 1: Add failing server security tests**
+- [x] **Step 1: Add failing server security tests**
 
 ```python
 def test_non_loopback_bind_requires_explicit_token(tmp_repo):
@@ -334,20 +334,20 @@ def test_mutation_accepts_valid_token_and_same_origin(tmp_repo):
 
 Also test remote GET authentication, loopback GET compatibility, the existing 64 KiB body limit, token redaction from error bodies and printed base URL, static bootstrap behavior, and CLI token forwarding.
 
-- [ ] **Step 2: Verify RED**
+- [x] **Step 2: Verify RED**
 
 ```bash
 .venv/bin/python -m pytest tests/web/test_server.py tests/web/test_static_resources.py \
   tests/cli/test_dashboard.py -q
 ```
 
-- [ ] **Step 3: Implement authentication and same-origin validation**
+- [x] **Step 3: Implement authentication and same-origin validation**
 
 Use `secrets.token_urlsafe(32)` for an omitted loopback token and `hmac.compare_digest()` for verification. Validate `Origin` as `http`/`https` with the same normalized host and port as the request `Host`; reject missing, null, malformed, or cross-origin values for mutations. Perform access checks before reading a request body. Keep default request logging suppressed and ensure no payload includes the token.
 
 The static `fetchJson()` adds the Bearer header when a bootstrap/fragment token exists. Remove the token fragment with `history.replaceState()` after moving it to session storage. Do not display the token in page text.
 
-- [ ] **Step 4: Verify and commit**
+- [x] **Step 4: Verify and commit**
 
 ```bash
 .venv/bin/python -m pytest tests/web tests/cli/test_dashboard.py -q

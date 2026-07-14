@@ -28,6 +28,12 @@ def test_dashboard_static_index_is_packaged() -> None:
     assert "data?.error?.message" in text
     assert "errorMessage(data" in text
     assert "error.hint" in text
+    assert "__AGOS_DASHBOARD_TOKEN__" in text
+    assert "Authorization" in text
+    assert "Bearer ${dashboardToken}" in text
+    assert "sessionStorage" in text
+    assert "location.hash" in text
+    assert "history.replaceState" in text
     assert "agos init" in text
     assert "agos start --title" in text
     assert "fetchJson('/api/health')" in text
