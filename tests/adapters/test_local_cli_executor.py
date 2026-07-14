@@ -148,7 +148,10 @@ def test_codex_and_claude_executor_args(tmp_repo):
         "exec",
         "--ignore-user-config",
         "--ignore-rules",
-        "--dangerously-bypass-approvals-and-sandbox",
+        "--sandbox",
+        "workspace-write",
+        "-c",
+        'approval_policy="never"',
         "--json",
         "Do work",
     ]
@@ -156,12 +159,34 @@ def test_codex_and_claude_executor_args(tmp_repo):
         "claude",
         "--safe-mode",
         "--permission-mode",
-        "bypassPermissions",
+        "dontAsk",
         "-p",
         "--output-format",
         "json",
         "Do work",
     ]
+
+
+def test_codex_and_claude_executor_args_preserve_explicit_dangerous_compatibility(tmp_repo):
+    codex = CodexCliExecutorAdapter(
+        command="codex",
+        evidence_dir=tmp_repo / "e",
+        cwd=tmp_repo,
+        dangerously_bypass_permissions=True,
+    )
+    claude = ClaudeCodeExecutorAdapter(
+        command="claude",
+        evidence_dir=tmp_repo / "e",
+        cwd=tmp_repo,
+        dangerously_bypass_permissions=True,
+    )
+
+    codex_args = codex._start_args("Do work")
+    claude_args = claude._start_args("Do work")
+
+    assert "--dangerously-bypass-approvals-and-sandbox" in codex_args
+    assert "--sandbox" not in codex_args
+    assert claude_args[claude_args.index("--permission-mode") + 1] == "bypassPermissions"
 
 
 def test_task_prompt_includes_intent_and_acceptance():

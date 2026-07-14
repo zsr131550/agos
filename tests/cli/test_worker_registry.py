@@ -131,6 +131,38 @@ def test_worker_registry_passes_runtime_fields(tmp_repo):
     assert adapter.poll_interval_seconds == 2
     assert adapter.artifact_globs == (".agos-worker/*.json",)
     assert adapter.env == {"AGOS_WORKER_MODE": "production"}
+    assert adapter.dangerously_bypass_permissions is False
+
+
+def test_worker_registry_passes_explicit_dangerous_permission_compatibility(tmp_repo):
+    paths = repo_paths(tmp_repo)
+    paths.agos_dir.mkdir(parents=True, exist_ok=True)
+    paths.agos_yaml.write_text(
+        yaml.safe_dump(
+            {
+                "executor": {"name": "multica", "agent": "Lambda"},
+                "workers": {
+                    "codex-compat": {
+                        "type": "codex_cli",
+                        "dangerously_bypass_permissions": True,
+                    },
+                    "claude-compat": {
+                        "type": "claude_code",
+                        "dangerously_bypass_permissions": True,
+                    },
+                },
+                "workflows": {},
+            },
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+    service = ExecutionService(paths)
+
+    register_configured_worker_adapters(service)
+
+    assert service._worker_adapters["codex-compat"].dangerously_bypass_permissions is True
+    assert service._worker_adapters["claude-compat"].dangerously_bypass_permissions is True
 
 
 def test_worker_registry_passes_codex_hermetic_flags(tmp_repo):

@@ -23,6 +23,7 @@ def test_configured_executor_adapter_supports_codex_and_claude(tmp_repo):
     codex = configured_executor_adapter(paths)
     assert codex.name == "codex_cli"
     assert codex.command == "codex.cmd"
+    assert codex.dangerously_bypass_permissions is False
 
     paths.agos_yaml.write_text(
         yaml.safe_dump(
@@ -37,3 +38,27 @@ def test_configured_executor_adapter_supports_codex_and_claude(tmp_repo):
     claude = configured_executor_adapter(paths)
     assert claude.name == "claude_code"
     assert claude.command == "claude.cmd"
+    assert claude.dangerously_bypass_permissions is False
+
+
+def test_configured_executor_adapter_passes_explicit_dangerous_compatibility(tmp_repo):
+    paths = repo_paths(tmp_repo)
+    paths.agos_dir.mkdir(parents=True, exist_ok=True)
+    paths.agos_yaml.write_text(
+        yaml.safe_dump(
+            {
+                "executor": {
+                    "name": "codex_cli",
+                    "agent": "codex",
+                    "dangerously_bypass_permissions": True,
+                },
+                "workflows": {},
+            },
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+
+    adapter = configured_executor_adapter(paths)
+
+    assert adapter.dangerously_bypass_permissions is True

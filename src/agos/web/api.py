@@ -656,6 +656,7 @@ def _executor_adapter_for_task(paths: AgosPaths, task: Task):
         paths,
         task.executor.adapter,
         command=_command_for_task_executor(paths, task),
+        dangerously_bypass_permissions=_dangerous_permissions_for_task_executor(paths, task),
     )
 
 
@@ -669,6 +670,18 @@ def _command_for_task_executor(paths: AgosPaths, task: Task) -> str | None:
         if worker.agent == task.executor.agent or name == task.executor.agent:
             return worker.command
     return None
+
+
+def _dangerous_permissions_for_task_executor(paths: AgosPaths, task: Task) -> bool:
+    config = load_config(paths.root)
+    if config.executor.name == task.executor.adapter and config.executor.agent == task.executor.agent:
+        return config.executor.dangerously_bypass_permissions
+    for name, worker in config.workers.items():
+        if worker.type != task.executor.adapter:
+            continue
+        if worker.agent == task.executor.agent or name == task.executor.agent:
+            return worker.dangerously_bypass_permissions
+    return False
 
 
 def _safe_dashboard_initial_run_status(adapter: object, run: ExecutorRun) -> RunStatus | None:

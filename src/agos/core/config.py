@@ -48,6 +48,7 @@ class ExecutorConfig(BaseModel):
     name: str = "multica"
     agent: str
     command: str | None = None
+    dangerously_bypass_permissions: bool = False
 
 
 class WorkerConfig(BaseModel):
@@ -64,6 +65,7 @@ class WorkerConfig(BaseModel):
     artifact_globs: list[str] = Field(default_factory=list)
     env: dict[str, str] = Field(default_factory=dict)
     health_probe: bool = Field(default=False)
+    dangerously_bypass_permissions: bool = False
     # codex_cli-only: opt into hermetic execution that ignores local Codex
     # user config/rules. Default off so real local Codex smoke uses the user's
     # configured CLI authentication and preferences.

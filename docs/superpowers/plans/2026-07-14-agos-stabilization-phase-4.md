@@ -203,12 +203,12 @@ git commit -m "fix: recover stale status from ledger"
 **Interfaces:**
 - Adds `dangerously_bypass_permissions: bool = False` to `ExecutorConfig` and `WorkerConfig`.
 - Produces `codex_permission_args(dangerous: bool) -> list[str]` and `claude_permission_args(dangerous: bool) -> list[str]`.
-- Safe Codex argv uses `--sandbox workspace-write --ask-for-approval never`.
+- Safe Codex argv uses `--sandbox workspace-write -c 'approval_policy="never"'`; the supported `codex exec` parser accepts this form after the subcommand.
 - Safe Claude argv uses `--safe-mode --permission-mode dontAsk`.
 - Explicit dangerous mode preserves Codex `--dangerously-bypass-approvals-and-sandbox` and Claude `--permission-mode bypassPermissions`.
 - Adds a doctor check named `agent_permissions`; dangerous config is a warning, not an exit-code change.
 
-- [ ] **Step 1: Add failing default and compatibility tests**
+- [x] **Step 1: Add failing default and compatibility tests**
 
 ```python
 def test_codex_worker_defaults_to_workspace_write_without_bypass(monkeypatch, tmp_path):
@@ -217,9 +217,9 @@ def test_codex_worker_defaults_to_workspace_write_without_bypass(monkeypatch, tm
     adapter.start(_worker_request(tmp_path))
     assert "--dangerously-bypass-approvals-and-sandbox" not in argv
     sandbox_index = argv.index("--sandbox")
-    approval_index = argv.index("--ask-for-approval")
+    approval_index = argv.index("-c")
     assert argv[sandbox_index:sandbox_index + 2] == ["--sandbox", "workspace-write"]
-    assert argv[approval_index:approval_index + 2] == ["--ask-for-approval", "never"]
+    assert argv[approval_index:approval_index + 2] == ["-c", 'approval_policy="never"']
 
 
 def test_explicit_dangerous_codex_worker_preserves_legacy_flag(monkeypatch, tmp_path):
@@ -231,7 +231,7 @@ def test_explicit_dangerous_codex_worker_preserves_legacy_flag(monkeypatch, tmp_
 
 Add equivalent Claude, legacy executor, registry, config-default, init-output, and doctor JSON assertions. Doctor detail must name each dangerous executor/worker without echoing environment values or tokens.
 
-- [ ] **Step 2: Verify RED**
+- [x] **Step 2: Verify RED**
 
 ```bash
 .venv/bin/python -m pytest tests/adapters/test_worker_adapters.py \
@@ -240,15 +240,15 @@ Add equivalent Claude, legacy executor, registry, config-default, init-output, a
   tests/cli/test_doctor.py tests/cli/test_init.py tests/core/test_config.py -q
 ```
 
-- [ ] **Step 3: Centralize permission argv and pass config through registries**
+- [x] **Step 3: Centralize permission argv and pass config through registries**
 
 Construct provider argv only through `agent_permissions.py`. Keep prompt handling, ignore-user-config/rules, polling, and output parsing unchanged. Include the effective dangerous boolean in worker health metadata. Pass the config field through worker and executor factories. `agos init` may omit the field in YAML because omission now means safe; no provider health call is added.
 
-- [ ] **Step 4: Add doctor permission reporting**
+- [x] **Step 4: Add doctor permission reporting**
 
 Append `agent_permissions` in initialized, invalid-config, and uninitialized doctor flows. Return `passed` when every Codex/Claude executor and worker uses safe defaults. Return `warning` with stable sorted identifiers when an explicit bypass is active. Warnings continue to leave overall doctor exit code zero.
 
-- [ ] **Step 5: Verify and commit**
+- [x] **Step 5: Verify and commit**
 
 ```bash
 .venv/bin/python -m pytest tests/adapters tests/cli/test_worker_registry.py \

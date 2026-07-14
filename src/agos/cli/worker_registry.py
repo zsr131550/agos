@@ -46,6 +46,7 @@ def register_configured_worker_adapters(service: ExecutionService) -> None:
                     health_probe=worker.health_probe,
                     ignore_user_config=worker.ignore_user_config,
                     ignore_rules=worker.ignore_rules,
+                    dangerously_bypass_permissions=worker.dangerously_bypass_permissions,
                 )
             )
         elif worker.type == "claude_code":
@@ -61,6 +62,7 @@ def register_configured_worker_adapters(service: ExecutionService) -> None:
                     health_probe=worker.health_probe,
                     claude_async_poll=worker.claude_async_poll,
                     claude_resume_on_complete=worker.claude_resume_on_complete,
+                    dangerously_bypass_permissions=worker.dangerously_bypass_permissions,
                 )
             )
         elif worker.type == "multica":

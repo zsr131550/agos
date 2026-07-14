@@ -108,6 +108,39 @@ def test_default_config_has_feature_workflow():
     assert cfg.trust_anchor.backend == "git-ref"
     assert cfg.trust_anchor.auto_publish_on_checkpoint is False
     assert cfg.merge_gate.provenance_policy == "optional"
+    assert cfg.executor.dangerously_bypass_permissions is False
+
+
+def test_agent_permission_bypass_is_explicit_and_legacy_config_defaults_safe():
+    legacy = AGOSConfig.model_validate(
+        {
+            "executor": {"name": "codex_cli", "agent": "codex"},
+            "workers": {
+                "codex": {"type": "codex_cli"},
+                "claude": {"type": "claude_code"},
+            },
+        }
+    )
+    explicit = AGOSConfig.model_validate(
+        {
+            "executor": {
+                "name": "codex_cli",
+                "agent": "codex",
+                "dangerously_bypass_permissions": True,
+            },
+            "workers": {
+                "claude": {
+                    "type": "claude_code",
+                    "dangerously_bypass_permissions": True,
+                }
+            },
+        }
+    )
+
+    assert legacy.executor.dangerously_bypass_permissions is False
+    assert all(not worker.dangerously_bypass_permissions for worker in legacy.workers.values())
+    assert explicit.executor.dangerously_bypass_permissions is True
+    assert explicit.workers["claude"].dangerously_bypass_permissions is True
 
 
 def test_merge_gate_config_loads_required_policy_and_relative_trusted_signer():

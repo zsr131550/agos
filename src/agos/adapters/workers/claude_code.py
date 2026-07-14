@@ -17,6 +17,7 @@ from agos.adapters.workers.transport import (
     output_refs_from_payload,
     run_worker_command,
 )
+from agos.adapters.agent_permissions import claude_permission_args
 from agos.adapters.noninteractive import noninteractive_prompt
 from agos.core.command import run_command
 from agos.core.execution_worker import (
@@ -48,6 +49,7 @@ class ClaudeWorkerAdapter:
         health_probe: bool = False,
         claude_async_poll: bool = False,
         claude_resume_on_complete: bool = False,
+        dangerously_bypass_permissions: bool = False,
     ) -> None:
         self.command = command
         self.name = name
@@ -60,6 +62,7 @@ class ClaudeWorkerAdapter:
         self.health_probe = health_probe
         self.claude_async_poll = claude_async_poll
         self.claude_resume_on_complete = claude_resume_on_complete
+        self.dangerously_bypass_permissions = dangerously_bypass_permissions
         self._subtasks_by_run_id: dict[str, str] = {}
         self._workspaces_by_run_id: dict[str, str] = {}
         self._statuses_by_run_id: dict[str, WorkerRunStatus] = {}
@@ -109,6 +112,9 @@ class ClaudeWorkerAdapter:
                 "health_probe": str(self.health_probe),
                 "claude_async_poll": str(self.claude_async_poll),
                 "claude_resume_on_complete": str(self.claude_resume_on_complete),
+                "dangerously_bypass_permissions": str(
+                    self.dangerously_bypass_permissions
+                ),
             },
         )
 
@@ -118,17 +124,18 @@ class ClaudeWorkerAdapter:
         return self._start_sync(request)
 
     def _start_sync(self, request: WorkerStartRequest) -> WorkerRun:
+        args = [
+            self.command,
+            *claude_permission_args(
+                dangerously_bypass_permissions=self.dangerously_bypass_permissions
+            ),
+            "-p",
+            "--output-format",
+            "json",
+            noninteractive_prompt(request.prompt),
+        ]
         proc = run_worker_command(
-            [
-                self.command,
-                "--safe-mode",
-                "--permission-mode",
-                "bypassPermissions",
-                "-p",
-                "--output-format",
-                "json",
-                noninteractive_prompt(request.prompt),
-            ],
+            args,
             action="claude -p",
             cwd=Path(request.workspace_path),
             timeout_seconds=self.timeout_seconds,
@@ -158,16 +165,17 @@ class ClaudeWorkerAdapter:
         )
 
     def _start_async(self, request: WorkerStartRequest) -> WorkerRun:
+        args = [
+            self.command,
+            *claude_permission_args(
+                dangerously_bypass_permissions=self.dangerously_bypass_permissions
+            ),
+            "-p",
+            "--bg",
+            noninteractive_prompt(request.prompt),
+        ]
         proc = run_worker_command(
-            [
-                self.command,
-                "--safe-mode",
-                "--permission-mode",
-                "bypassPermissions",
-                "-p",
-                "--bg",
-                noninteractive_prompt(request.prompt),
-            ],
+            args,
             action="claude -p --bg",
             cwd=Path(request.workspace_path),
             timeout_seconds=self.timeout_seconds,

@@ -83,6 +83,8 @@ def test_init_codex_configures_candidate_source_execution_and_reviewer(monkeypat
         "mode": "candidate",
         "output_contract": "source_code",
     }
+    assert "dangerously_bypass_permissions" not in config["executor"]
+    assert "dangerously_bypass_permissions" not in config["workers"]["codex"]
     assert config["reviewers"] == {
         "codex_reviewer": {
             "type": "codex_cli",

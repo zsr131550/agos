@@ -8,6 +8,7 @@ from collections.abc import Iterator
 from pathlib import Path
 from uuid import uuid4
 
+from agos.adapters.agent_permissions import claude_permission_args, codex_permission_args
 from agos.core.adapter import Event, ExecutorRun, RunStatus
 from agos.core.command import run_command, run_command as _run_git_command
 from agos.core.execution import utc_now_iso
@@ -26,12 +27,14 @@ class LocalCliExecutorAdapter:
         evidence_dir: Path,
         cwd: Path,
         timeout_seconds: int = 900,
+        dangerously_bypass_permissions: bool = False,
     ) -> None:
         self.name = name
         self.command = command
         self.evidence_dir = evidence_dir
         self.cwd = cwd
         self.timeout_seconds = timeout_seconds
+        self.dangerously_bypass_permissions = dangerously_bypass_permissions
 
     def start(self, task: Task) -> ExecutorRun:
         run_id = f"{self.name}-{uuid4().hex[:12]}"
@@ -192,8 +195,21 @@ class LocalCliExecutorAdapter:
 
 
 class CodexCliExecutorAdapter(LocalCliExecutorAdapter):
-    def __init__(self, *, command: str = "codex", evidence_dir: Path, cwd: Path) -> None:
-        super().__init__(name="codex_cli", command=command, evidence_dir=evidence_dir, cwd=cwd)
+    def __init__(
+        self,
+        *,
+        command: str = "codex",
+        evidence_dir: Path,
+        cwd: Path,
+        dangerously_bypass_permissions: bool = False,
+    ) -> None:
+        super().__init__(
+            name="codex_cli",
+            command=command,
+            evidence_dir=evidence_dir,
+            cwd=cwd,
+            dangerously_bypass_permissions=dangerously_bypass_permissions,
+        )
 
     def _start_args(self, prompt: str) -> list[str]:
         return [
@@ -201,22 +217,37 @@ class CodexCliExecutorAdapter(LocalCliExecutorAdapter):
             "exec",
             "--ignore-user-config",
             "--ignore-rules",
-            "--dangerously-bypass-approvals-and-sandbox",
+            *codex_permission_args(
+                dangerously_bypass_permissions=self.dangerously_bypass_permissions
+            ),
             "--json",
             prompt,
         ]
 
 
 class ClaudeCodeExecutorAdapter(LocalCliExecutorAdapter):
-    def __init__(self, *, command: str = "claude", evidence_dir: Path, cwd: Path) -> None:
-        super().__init__(name="claude_code", command=command, evidence_dir=evidence_dir, cwd=cwd)
+    def __init__(
+        self,
+        *,
+        command: str = "claude",
+        evidence_dir: Path,
+        cwd: Path,
+        dangerously_bypass_permissions: bool = False,
+    ) -> None:
+        super().__init__(
+            name="claude_code",
+            command=command,
+            evidence_dir=evidence_dir,
+            cwd=cwd,
+            dangerously_bypass_permissions=dangerously_bypass_permissions,
+        )
 
     def _start_args(self, prompt: str) -> list[str]:
         return [
             self.command,
-            "--safe-mode",
-            "--permission-mode",
-            "bypassPermissions",
+            *claude_permission_args(
+                dangerously_bypass_permissions=self.dangerously_bypass_permissions
+            ),
             "-p",
             "--output-format",
             "json",
