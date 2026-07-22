@@ -33,7 +33,7 @@ jobs:
       AGOS_OPENHANDS_ENDPOINT: ${{ secrets.AGOS_OPENHANDS_ENDPOINT }}
       AGOS_OPENHANDS_TOKEN: ${{ secrets.AGOS_OPENHANDS_TOKEN }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
       - uses: actions/setup-python@v5
