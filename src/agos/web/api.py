@@ -32,8 +32,17 @@ from agos.core.review_orchestrator import ParallelReviewOrchestrator, ReviewerSp
 from agos.core.review_service import ReviewService
 from agos.core.review_store import ReviewStore
 from agos.core.repo import AgosPaths, git_head, git_status_porcelain, repo_paths, task_paths
-from agos.core.status import TaskStatus, load_status, save_status
+from agos.core.status import TaskStatus, load_status
 from agos.core.task import Task, load_task, task_output_ref
+from agos.core.task_state import (
+    TaskEvent,
+    TaskStateCommitIndeterminate,
+    TaskStateError,
+    TaskRevision,
+    TaskSnapshot,
+    TaskState,
+    TaskStateConflict,
+)
 from agos.core.task_execution import (
     ExecutorSelection,
     TaskExecutionRequest,
@@ -41,7 +50,10 @@ from agos.core.task_execution import (
     effective_task_mode,
     executor_selection_id,
 )
-from agos.core.task_execution_service import TaskExecutionError
+from agos.core.task_execution_service import (
+    TaskExecutionDispatchUnreconciled,
+    TaskExecutionError,
+)
 from agos.web.evidence import EvidenceResolutionError, read_evidence_text, resolve_evidence_ref
 
 
@@ -191,9 +203,12 @@ def current_run_payload(repo_root: Path) -> dict[str, object]:
     execution_plan = execution.get("plan") if isinstance(execution.get("plan"), dict) else None
     candidate_rows = candidates.get("candidates", [])
     agent_options = _agent_options_payload(paths, candidate_rows)
+    unreconciled_dispatches = _unreconciled_executor_dispatches(paths)
 
     task_payload = task.model_dump(mode="json")
-    status_payload_value = status.model_dump(mode="json")
+    status_payload_value = status.model_copy(update={"phase": status_phase}).model_dump(
+        mode="json"
+    )
     run = {
         "id": task.id,
         "title": task.title,
@@ -201,6 +216,7 @@ def current_run_payload(repo_root: Path) -> dict[str, object]:
         "phase": status_phase,
         "mode": effective_task_mode(task),
         "executor_run": _dump_model(status.executor_run),
+        "unreconciled_dispatches": unreconciled_dispatches,
         "output_ref": task_output_ref(task),
         "output_dir": str(paths.root / task_output_ref(task)),
     }
@@ -213,6 +229,7 @@ def current_run_payload(repo_root: Path) -> dict[str, object]:
         "candidates_count": candidates.get("count", 0),
         "ledger_verified": ledger.get("verified"),
         "merge_gate_passed": merge_gate.get("passed"),
+        "unreconciled_dispatches_count": len(unreconciled_dispatches),
     }
     distillation = {
         "title": task.title,
@@ -280,74 +297,99 @@ def start_run_payload(repo_root: Path, request_payload: dict[str, Any]) -> dict[
     except KeyError as exc:
         raise DashboardApiError("invalid_workflow", str(exc)) from exc
     replace_active = bool(request_payload.get("replace_active"))
-    if replace_active:
-        archive_current_task_payload(paths.root)
+    with _locked_task_state(paths):
+        if paths.task_yaml.is_file():
+            _raise_if_executor_dispatch_is_unreconciled(paths)
+        if replace_active:
+            archive_current_task_payload(paths.root)
 
-    try:
-        execution_result = build_task_execution_service(paths.root).start(
-            TaskExecutionRequest(
-                title=title.strip(),
-                intent=intent.strip() if isinstance(intent, str) else "",
-                workflow=workflow,
-                gate_overrides=gate_overrides,
-                mode=mode,
-                executor_selection=agent_selection,
+        try:
+            execution_result = build_task_execution_service(paths.root).start(
+                TaskExecutionRequest(
+                    title=title.strip(),
+                    intent=intent.strip() if isinstance(intent, str) else "",
+                    workflow=workflow,
+                    gate_overrides=gate_overrides,
+                    mode=mode,
+                    executor_selection=agent_selection,
+                )
             )
-        )
-    except TaskExecutionError as exc:
-        raise DashboardApiError("start_failed", str(exc)) from exc
+        except TaskExecutionDispatchUnreconciled as exc:
+            raise DashboardApiError(
+                "executor_dispatch_conflict",
+                str(exc),
+                hint="Inspect the unreconciled dispatch in the task ledger before retrying.",
+            ) from exc
+        except TaskExecutionError as exc:
+            raise DashboardApiError("start_failed", str(exc)) from exc
 
-    current = current_run_payload(paths.root)
-    return {
-        "ok": True,
-        "run_id": execution_result.run_id,
-        "issue_id": execution_result.issue_id,
-        "execution_result": execution_result.model_dump(mode="json"),
-        "run": current["run"],
-        "current": current,
-    }
+        current = current_run_payload(paths.root)
+        return {
+            "ok": True,
+            "run_id": execution_result.run_id,
+            "issue_id": execution_result.issue_id,
+            "execution_result": execution_result.model_dump(mode="json"),
+            "run": current["run"],
+            "current": current,
+        }
 
 
 def archive_current_task_payload(repo_root: Path) -> dict[str, object]:
     """Archive the active current task without deleting its evidence."""
 
     paths = _require_initialized(repo_root)
-    if not paths.current_task.exists() or not any(paths.current_task.iterdir()):
-        raise DashboardApiError("active_task_missing", "No active AGOS task is available.")
-    task_id = _archive_task_id(paths)
-    termination = _terminate_task_processes(paths)
-    _mark_task_done(paths, event_type="dashboard_archived")
-    archive_root = paths.tasks / "archive"
-    archive_root.mkdir(parents=True, exist_ok=True)
-    archive_dir = archive_root / f"{_fsafe_name(task_id)}-{_archive_timestamp()}"
-    counter = 1
-    while archive_dir.exists():
-        archive_dir = archive_root / f"{_fsafe_name(task_id)}-{_archive_timestamp()}-{counter}"
-        counter += 1
-    paths.current_task.rename(archive_dir)
-    return {
-        "ok": True,
-        "archived_task_id": task_id,
-        "archive_id": archive_dir.name,
-        "archive_path": str(archive_dir),
-        "terminated_processes": termination["terminated"],
-        "termination_errors": termination["errors"],
-    }
+    with _locked_task_state(paths):
+        if not paths.current_task.exists() or not any(paths.current_task.iterdir()):
+            raise DashboardApiError("active_task_missing", "No active AGOS task is available.")
+        _raise_if_executor_dispatch_is_unreconciled(paths)
+        state = TaskState(paths)
+        snapshot = state.current()
+        if snapshot is None:
+            raise DashboardApiError("active_task_missing", "No active AGOS task is available.")
+        task_id = snapshot.task.id
+        termination = _terminate_task_processes(paths, status=snapshot.status)
+        _mark_task_done(
+            paths,
+            event_type="dashboard_archived",
+            state=state,
+            snapshot=snapshot,
+        )
+        archive_root = paths.tasks / "archive"
+        archive_root.mkdir(parents=True, exist_ok=True)
+        archive_dir = archive_root / f"{_fsafe_name(task_id)}-{_archive_timestamp()}"
+        counter = 1
+        while archive_dir.exists():
+            archive_dir = archive_root / f"{_fsafe_name(task_id)}-{_archive_timestamp()}-{counter}"
+            counter += 1
+        paths.current_task.rename(archive_dir)
+        return {
+            "ok": True,
+            "archived_task_id": task_id,
+            "archive_id": archive_dir.name,
+            "archive_path": str(archive_dir),
+            "terminated_processes": termination["terminated"],
+            "termination_errors": termination["errors"],
+        }
 
 
 def continue_archived_task_payload(repo_root: Path, archive_id: str) -> dict[str, object]:
     """Restore an archived task as the active current task."""
 
     paths = _require_initialized(repo_root)
-    archive_dir = _archive_dir_for_id(paths, archive_id)
-    if not archive_dir.is_dir() or not (archive_dir / "task.yaml").is_file():
-        raise DashboardApiError("archive_missing", f"Archived AGOS task not found: {archive_id}")
-    if paths.current_task.exists() and any(paths.current_task.iterdir()):
-        archive_current_task_payload(paths.root)
-    paths.current_task.parent.mkdir(parents=True, exist_ok=True)
-    archive_dir.rename(paths.current_task)
-    _ensure_restored_task_status(paths)
-    return {"ok": True, "archive_id": archive_id, "run": current_run_payload(paths.root)["run"]}
+    with _locked_task_state(paths):
+        archive_dir = _archive_dir_for_id(paths, archive_id)
+        if not archive_dir.is_dir() or not (archive_dir / "task.yaml").is_file():
+            raise DashboardApiError("archive_missing", f"Archived AGOS task not found: {archive_id}")
+        if paths.current_task.exists() and any(paths.current_task.iterdir()):
+            archive_current_task_payload(paths.root)
+        paths.current_task.parent.mkdir(parents=True, exist_ok=True)
+        archive_dir.rename(paths.current_task)
+        _record_restored_task_state(paths)
+        return {
+            "ok": True,
+            "archive_id": archive_id,
+            "run": current_run_payload(paths.root)["run"],
+        }
 
 
 def pause_current_task_payload(repo_root: Path) -> dict[str, object]:
@@ -374,60 +416,67 @@ def select_agent_option_payload(repo_root: Path, request_payload: dict[str, Any]
     """Send a selected agent-returned option back through the active task executor."""
 
     paths = _require_initialized(repo_root)
-    task = _load_current_task(paths)
-    status = load_status(paths)
-    if status is None:
-        raise DashboardApiError(
-            "status_missing",
-            "Current AGOS task status is missing.",
-            hint="Run AGOS task start/status recovery before selecting an agent option.",
+    with _locked_task_state(paths):
+        task = _load_current_task(paths)
+        state = TaskState(paths)
+        snapshot = state.current()
+        if snapshot is None:
+            raise DashboardApiError(
+                "status_missing",
+                "Current AGOS task status is missing.",
+                hint="Run AGOS task start/status recovery before selecting an agent option.",
+            )
+        option_id = request_payload.get("option_id")
+        if not isinstance(option_id, str) or not option_id.strip():
+            raise DashboardApiError("invalid_request", "option_id is required")
+        _raise_if_executor_dispatch_is_unreconciled(paths)
+        selected = _find_agent_option(paths, option_id.strip())
+        selection = state.record(
+            TaskEvent(
+                "agent_option_selected",
+                {
+                    "task_id": task.id,
+                    "option_id": selected["id"],
+                    "title": selected["title"],
+                    "summary": selected["summary"],
+                    "source_run_id": selected.get("source_run_id"),
+                    "mapped_candidate_id": selected.get("mapped_candidate_id"),
+                },
+            )
         )
-    option_id = request_payload.get("option_id")
-    if not isinstance(option_id, str) or not option_id.strip():
-        raise DashboardApiError("invalid_request", "option_id is required")
-    selected = _find_agent_option(paths, option_id.strip())
-    ledger = Ledger(paths.ledger)
-    selection_record = ledger.append(
-        {
-            "type": "agent_option_selected",
-            "task_id": task.id,
-            "option_id": selected["id"],
-            "title": selected["title"],
-            "summary": selected["summary"],
-            "source_run_id": selected.get("source_run_id"),
-            "mapped_candidate_id": selected.get("mapped_candidate_id"),
-        }
-    )
+        selection_record = selection.records[-1]
 
-    task_for_executor = task.model_copy(update={"intent": _agent_option_followup_intent(task, selected)})
-    run = _dispatch_dashboard_executor(
-        paths,
-        task,
-        status,
-        triggered_by="agent_option_selected",
-        task_for_executor=task_for_executor,
-        failure_code="agent_option_dispatch_failed",
-        failure_event_type="agent_option_dispatch_failed",
-        extra={
-            "selected_option_id": selected["id"],
-            "mapped_candidate_id": selected.get("mapped_candidate_id"),
-            "selected_event_hash": selection_record["hash"],
-        },
-        failure_extra={
-            "option_id": selected["id"],
-            "selected_event_hash": selection_record["hash"],
-        },
-        terminal_extra={"selected_option_id": selected["id"]},
-    )
-    current = current_run_payload(paths.root)
-    return {
-        "ok": True,
-        "selected_option": selected,
-        "run_id": run.run_id,
-        "issue_id": run.issue_id,
-        "run": current["run"],
-        "current": current,
-    }
+        task_for_executor = task.model_copy(
+            update={"intent": _agent_option_followup_intent(task, selected)}
+        )
+        run = _dispatch_dashboard_executor(
+            paths,
+            task,
+            expected=selection.snapshot.revision,
+            triggered_by="agent_option_selected",
+            task_for_executor=task_for_executor,
+            failure_code="agent_option_dispatch_failed",
+            failure_event_type="agent_option_dispatch_failed",
+            extra={
+                "selected_option_id": selected["id"],
+                "mapped_candidate_id": selected.get("mapped_candidate_id"),
+                "selected_event_hash": selection_record["hash"],
+            },
+            failure_extra={
+                "option_id": selected["id"],
+                "selected_event_hash": selection_record["hash"],
+            },
+            terminal_extra={"selected_option_id": selected["id"]},
+        )
+        current = current_run_payload(paths.root)
+        return {
+            "ok": True,
+            "selected_option": selected,
+            "run_id": run.run_id,
+            "issue_id": run.issue_id,
+            "run": current["run"],
+            "current": current,
+        }
 
 
 def review_run_payload(repo_root: Path, request_payload: dict[str, Any]) -> dict[str, object]:
@@ -763,15 +812,6 @@ def _load_current_task(paths: AgosPaths):
     return load_task(paths.task_yaml)
 
 
-def _archive_task_id(paths: AgosPaths) -> str:
-    if paths.task_yaml.is_file():
-        try:
-            return load_task(paths.task_yaml).id
-        except Exception:
-            pass
-    return paths.current_task.name
-
-
 def _archive_timestamp() -> str:
     return time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
 
@@ -831,38 +871,30 @@ def _set_current_phase(
     repo_root: Path,
     phase: str,
     event_type: str,
-    *,
-    mark_manual_event: bool = False,
 ) -> dict[str, object]:
     paths = _require_initialized(repo_root)
     with _locked_task_state(paths):
         task = _load_current_task(paths)
-        status = load_status(paths)
-        if status is None:
+        state = TaskState(paths)
+        snapshot = state.current()
+        if snapshot is None:
             raise DashboardApiError("status_missing", "Current AGOS task status is missing.")
+        status = snapshot.status
         effective_phase = phase
-        supersedes_executor_completion = mark_manual_event
-        record_payload: dict[str, object] = {
-            "type": event_type,
+        event_facts: dict[str, object] = {
             "task_id": task.id,
             "phase": effective_phase,
         }
         if _completed_executor_without_business_output(paths, status):
             effective_phase = "blocked"
-            supersedes_executor_completion = False
-            record_payload["phase"] = effective_phase
+            event_facts["phase"] = effective_phase
             if phase != effective_phase:
-                record_payload["requested_phase"] = phase
-                record_payload["reason"] = "executor completed without business output"
-        ledger = Ledger(paths.ledger)
-        record = ledger.append(record_payload)
-        status.phase = effective_phase  # type: ignore[assignment]
-        status.ledger_head_hash = record["hash"]
-        if supersedes_executor_completion:
-            status.last_event_seq = int(record["seq"])
-        elif _completed_executor_without_business_output(paths, status):
-            status.last_event_seq = None
-        save_status(status, paths)
+                event_facts["requested_phase"] = phase
+                event_facts["reason"] = "executor completed without business output"
+        state.record(
+            TaskEvent(event_type, event_facts),
+            expected=snapshot.revision,
+        )
         return {"ok": True, "run": current_run_payload(paths.root)["run"]}
 
 
@@ -870,24 +902,26 @@ def _redispatch_current_task_payload(repo_root: Path, event_type: str) -> dict[s
     paths = _require_initialized(repo_root)
     with _locked_task_state(paths):
         task = _load_current_task(paths)
-        status = load_status(paths)
-        if status is None:
+        state = TaskState(paths)
+        snapshot = state.current()
+        if snapshot is None:
             raise DashboardApiError("status_missing", "Current AGOS task status is missing.")
-        ledger = Ledger(paths.ledger)
-        lifecycle_record = ledger.append(
-            {
-                "type": event_type,
-                "task_id": task.id,
-                "phase": "executing",
-            }
+        _raise_if_executor_dispatch_is_unreconciled(paths)
+        lifecycle = state.record(
+            TaskEvent(
+                event_type,
+                {
+                    "task_id": task.id,
+                    "phase": "executing",
+                },
+            ),
+            expected=snapshot.revision,
         )
-        status.phase = "executing"
-        status.ledger_head_hash = lifecycle_record["hash"]
-        status.last_event_seq = None
+        lifecycle_record = lifecycle.records[-1]
         run = _dispatch_dashboard_executor(
             paths,
             task,
-            status,
+            expected=lifecycle.snapshot.revision,
             triggered_by=event_type,
             failure_code="executor_dispatch_failed",
             failure_event_type="dashboard_executor_dispatch_failed",
@@ -955,21 +989,23 @@ def _resume_candidate_task_payload(
             if result.state == "running"
             else "blocked"
         )
-        record = Ledger(paths.ledger).append(
-            {
-                "type": event_type,
-                "task_id": task.id,
-                "phase": phase,
-                "mode": "candidate",
-                "run_id": result.run_id,
-                "state": result.state,
-            }
+        state = TaskState(paths)
+        snapshot = state.current()
+        if snapshot is None:
+            raise DashboardApiError("status_missing", "Current AGOS task status is missing.")
+        state.record(
+            TaskEvent(
+                event_type,
+                {
+                    "task_id": task.id,
+                    "phase": phase,
+                    "mode": "candidate",
+                    "run_id": result.run_id,
+                    "state": result.state,
+                },
+            ),
+            expected=snapshot.revision,
         )
-        status = load_status(paths)
-        if status is not None:
-            status.phase = phase
-            status.ledger_head_hash = str(record["hash"])
-            save_status(status, paths)
         current = current_run_payload(paths.root)
         return {
             "ok": True,
@@ -981,11 +1017,81 @@ def _resume_candidate_task_payload(
         }
 
 
+def _unreconciled_executor_dispatches(paths: AgosPaths) -> list[dict[str, object]]:
+    try:
+        records = Ledger(paths.ledger).read_verified()
+    except Exception:
+        return []
+    fields = (
+        "seq",
+        "task_id",
+        "adapter",
+        "run_id",
+        "issue_id",
+        "triggered_by",
+        "stage",
+        "error",
+        "evidence_ref",
+    )
+    return [
+        {field: record[field] for field in fields if field in record}
+        for record in records
+        if record.get("type") == "executor_dispatch_unreconciled"
+    ]
+
+
+def _raise_if_executor_dispatch_is_unreconciled(paths: AgosPaths) -> None:
+    pending = _unreconciled_executor_dispatches(paths)
+    if not pending:
+        return
+    run_id = pending[-1].get("run_id", "unknown")
+    raise DashboardApiError(
+        "executor_dispatch_conflict",
+        f"Executor run {run_id} requires reconciliation before another dispatch.",
+        hint="Inspect the unreconciled dispatch in the task ledger before starting another executor run.",
+    )
+
+
+def _record_unreconciled_executor_dispatch(
+    state: TaskState,
+    *,
+    task: Task,
+    run: ExecutorRun,
+    triggered_by: str,
+    expected: TaskRevision,
+    stage: str,
+    evidence_ref: str,
+    error: Exception,
+    actual: TaskRevision | None = None,
+) -> None:
+    facts: dict[str, object] = {
+        "task_id": task.id,
+        "adapter": run.adapter,
+        "run_id": run.run_id,
+        "issue_id": run.issue_id,
+        "triggered_by": triggered_by,
+        "stage": stage,
+        "evidence_ref": evidence_ref,
+        "error": str(error),
+        "expected_revision": {"seq": expected.seq, "head_hash": expected.head_hash},
+    }
+    if actual is not None:
+        facts["actual_revision"] = {"seq": actual.seq, "head_hash": actual.head_hash}
+    try:
+        state.record(TaskEvent("executor_dispatch_unreconciled", facts))
+    except Exception as recovery_error:
+        raise DashboardApiError(
+            "executor_dispatch_recovery_failed",
+            f"Executor run {run.run_id} started, but its recovery record could not be committed: {recovery_error}",
+            hint="Inspect executor evidence and the task ledger before retrying.",
+        ) from recovery_error
+
+
 def _dispatch_dashboard_executor(
     paths: AgosPaths,
     task: Task,
-    status: TaskStatus,
     *,
+    expected: TaskRevision,
     triggered_by: str,
     task_for_executor: Task | None = None,
     failure_code: str,
@@ -994,90 +1100,159 @@ def _dispatch_dashboard_executor(
     failure_extra: dict[str, object] | None = None,
     terminal_extra: dict[str, object] | None = None,
 ) -> ExecutorRun:
-    ledger = Ledger(paths.ledger)
+    state = TaskState(paths)
     dispatch_extra = dict(extra or {})
+    _raise_if_executor_dispatch_is_unreconciled(paths)
     try:
         adapter = _executor_adapter_for_task(paths, task)
         run = adapter.start(task_for_executor or task)
     except Exception as exc:
-        failed_record = ledger.append(
-            {
-                "type": failure_event_type,
-                "task_id": task.id,
-                "triggered_by": triggered_by,
-                "error": str(exc),
-                **dict(failure_extra or {}),
-            }
-        )
-        status.phase = "blocked"
-        status.ledger_head_hash = failed_record["hash"]
-        status.last_event_seq = None
-        save_status(status, paths)
+        try:
+            state.record(
+                TaskEvent(
+                    failure_event_type,
+                    {
+                        "task_id": task.id,
+                        "triggered_by": triggered_by,
+                        "error": str(exc),
+                        **dict(failure_extra or {}),
+                    },
+                ),
+                expected=expected,
+            )
+        except TaskStateConflict:
+            pass
         if isinstance(exc, DashboardApiError):
             raise
         raise DashboardApiError(failure_code, str(exc)) from exc
 
-    EvidenceStore(paths.evidence).write_run(
-        run.run_id,
-        {
-            "task_id": task.id,
-            "adapter": run.adapter,
-            "run_id": run.run_id,
-            "issue_id": run.issue_id,
-            "triggered_by": triggered_by,
-            **dispatch_extra,
-        },
-    )
-    dispatched_record = ledger.append(
-        {
-            "type": "executor_dispatched",
-            "task_id": task.id,
-            "adapter": run.adapter,
-            "run_id": run.run_id,
-            "issue_id": run.issue_id,
-            "triggered_by": triggered_by,
-            **dispatch_extra,
-        }
-    )
-    next_status = TaskStatus.for_started_task(
-        task=task,
-        run=run,
-        ledger_head_hash=dispatched_record["hash"],
-    )
-    next_status.gates = status.gates
-    terminal_status = _safe_dashboard_initial_run_status(adapter, run)
-    if terminal_status is not None and terminal_status.state != "running":
-        terminal_record = ledger.append(
+    evidence_ref = f"runs/{run.run_id}.json"
+    try:
+        EvidenceStore(paths.evidence).write_run(
+            run.run_id,
             {
-                "type": "executor_completed"
-                if terminal_status.state == "completed"
-                else "executor_blocked",
                 "task_id": task.id,
+                "adapter": run.adapter,
                 "run_id": run.run_id,
                 "issue_id": run.issue_id,
-                "state": terminal_status.state,
-                "detail": terminal_status.detail,
                 "triggered_by": triggered_by,
-                **dict(terminal_extra or {}),
-            }
+                **dispatch_extra,
+            },
         )
-        next_status.phase = "done" if terminal_status.state == "completed" else "blocked"
-        next_status.ledger_head_hash = terminal_record["hash"]
-    save_status(next_status, paths)
+    except Exception as exc:
+        _record_unreconciled_executor_dispatch(
+            state,
+            task=task,
+            run=run,
+            triggered_by=triggered_by,
+            expected=expected,
+            stage="evidence_write_failed",
+            evidence_ref=evidence_ref,
+            error=exc,
+        )
+        raise DashboardApiError(
+            "executor_dispatch_conflict",
+            f"Executor run {run.run_id} started but its evidence could not be recorded.",
+            hint="Inspect the task ledger before retrying the dispatch.",
+        ) from exc
+    try:
+        dispatched = state.record(
+            TaskEvent(
+                "executor_dispatched",
+                {
+                    "task_id": task.id,
+                    "adapter": run.adapter,
+                    "run_id": run.run_id,
+                    "issue_id": run.issue_id,
+                    "triggered_by": triggered_by,
+                    **dispatch_extra,
+                },
+            ),
+            expected=expected,
+        )
+    except TaskStateError as exc:
+        if isinstance(exc, TaskStateConflict):
+            stage = "ledger_conflict"
+            actual = exc.actual
+        elif isinstance(exc, TaskStateCommitIndeterminate):
+            stage = "ledger_commit_indeterminate"
+            actual = None
+        else:
+            stage = "ledger_write_failed"
+            actual = None
+        _record_unreconciled_executor_dispatch(
+            state,
+            task=task,
+            run=run,
+            triggered_by=triggered_by,
+            expected=expected,
+            stage=stage,
+            evidence_ref=evidence_ref,
+            error=exc,
+            actual=actual,
+        )
+        raise DashboardApiError(
+            "executor_dispatch_conflict",
+            f"Executor run {run.run_id} started but its dispatch could not be committed.",
+            hint="Inspect the unreconciled dispatch in the task ledger before retrying.",
+        ) from exc
+    terminal_status = _safe_dashboard_initial_run_status(adapter, run)
+    if terminal_status is not None and terminal_status.state != "running":
+        try:
+            state.record(
+                TaskEvent(
+                    (
+                        "executor_completed"
+                        if terminal_status.state == "completed"
+                        else "executor_blocked"
+                    ),
+                    {
+                        "task_id": task.id,
+                        "run_id": run.run_id,
+                        "issue_id": run.issue_id,
+                        "state": terminal_status.state,
+                        "detail": terminal_status.detail,
+                        "triggered_by": triggered_by,
+                        **dict(terminal_extra or {}),
+                    },
+                ),
+                expected=dispatched.snapshot.revision,
+            )
+        except TaskStateConflict:
+            pass
     return run
 
 
-def _mark_task_done(paths: AgosPaths, *, event_type: str) -> None:
+def _mark_task_done(
+    paths: AgosPaths,
+    *,
+    event_type: str,
+    state: TaskState | None = None,
+    snapshot: TaskSnapshot | None = None,
+) -> None:
     with _locked_task_state(paths):
         task = _load_current_task(paths)
-        status = load_status(paths)
-        if status is None:
+        state = state or TaskState(paths)
+        snapshot = snapshot or state.current()
+        if snapshot is None:
             return
-        ledger = Ledger(paths.ledger)
-        record = ledger.append({"type": event_type, "task_id": task.id, "phase": "done"})
-        status.phase = "done"
-        status.ledger_head_hash = record["hash"]
-        save_status(status, paths)
+        if snapshot.revision == TaskRevision.empty():
+            initialized = state.record(
+                TaskEvent(
+                    "task_started",
+                    {
+                        "task_id": task.id,
+                        "title": task.title,
+                        "workflow": task.workflow,
+                    },
+                ),
+                expected=TaskRevision.empty(),
+            )
+            snapshot = initialized.snapshot
+        state.record(
+            TaskEvent(event_type, {"task_id": task.id, "phase": "done"}),
+            expected=snapshot.revision,
+        )
 
 
 def _task_phase_from_status_or_evidence(
@@ -1090,16 +1265,9 @@ def _task_phase_from_status_or_evidence(
         run_state = _executor_run_state(paths, status.executor_run.run_id)
         if run_state == "completed":
             if not _task_has_business_output(paths):
-                if status.phase != "blocked" or status.last_event_seq is not None:
-                    status.phase = "blocked"
-                    status.last_event_seq = None
-                    save_status(status, paths)
                 return "blocked"
             if _has_manual_phase_after_executor_completion(paths, status):
                 return status.phase
-            if status.phase != "done":
-                status.phase = "done"
-                save_status(status, paths)
             return "done"
         if run_state in {"failed", "blocked"}:
             return run_state
@@ -1118,15 +1286,18 @@ def _completed_executor_without_business_output(paths: AgosPaths, status: TaskSt
 
 
 def _has_manual_phase_after_executor_completion(paths: AgosPaths, status: TaskStatus) -> bool:
-    """Return whether a dashboard lifecycle action supersedes completed executor evidence."""
+    """Return whether a later dashboard transition supersedes completed executor evidence."""
 
-    if status.last_event_seq is None or status.executor_run is None:
+    if status.executor_run is None:
         return False
     lifecycle_seq = _latest_dashboard_lifecycle_seq(paths)
-    if lifecycle_seq is None or status.last_event_seq != lifecycle_seq:
+    if lifecycle_seq is None:
         return False
     completed_seq = _executor_completed_seq(paths, status.executor_run.run_id)
-    return completed_seq is None or lifecycle_seq > completed_seq
+    if completed_seq is not None:
+        return lifecycle_seq > completed_seq
+    dispatched_seq = _executor_dispatched_seq(paths, status.executor_run.run_id)
+    return dispatched_seq is None or lifecycle_seq > dispatched_seq
 
 
 def _latest_dashboard_lifecycle_seq(paths: AgosPaths) -> int | None:
@@ -1139,6 +1310,10 @@ def _latest_dashboard_lifecycle_seq(paths: AgosPaths) -> int | None:
             "dashboard_paused",
             "dashboard_resumed",
             "dashboard_restarted",
+            "dashboard_archived",
+            "dashboard_restored",
+            "dashboard_executor_dispatch_failed",
+            "agent_option_dispatch_failed",
         }:
             seq = record.get("seq")
             return int(seq) if isinstance(seq, int) else None
@@ -1152,6 +1327,18 @@ def _executor_completed_seq(paths: AgosPaths, run_id: str) -> int | None:
         return None
     for record in reversed(records):
         if record.get("type") == "executor_completed" and record.get("run_id") == run_id:
+            seq = record.get("seq")
+            return int(seq) if isinstance(seq, int) else None
+    return None
+
+
+def _executor_dispatched_seq(paths: AgosPaths, run_id: str) -> int | None:
+    try:
+        records = Ledger(paths.ledger).read_all()
+    except Exception:
+        return None
+    for record in reversed(records):
+        if record.get("type") == "executor_dispatched" and record.get("run_id") == run_id:
             seq = record.get("seq")
             return int(seq) if isinstance(seq, int) else None
     return None
@@ -1215,8 +1402,12 @@ def _governed_repo_has_changes(repo_root: Path) -> bool:
     return False
 
 
-def _terminate_task_processes(paths: AgosPaths) -> dict[str, object]:
-    status = load_status(paths)
+def _terminate_task_processes(
+    paths: AgosPaths,
+    *,
+    status: TaskStatus | None = None,
+) -> dict[str, object]:
+    status = status or load_status(paths)
     run_id = status.executor_run.run_id if status is not None and status.executor_run is not None else None
     candidate_pids = _task_process_ids(paths)
     if run_id:
@@ -1302,18 +1493,26 @@ def _ps_single_quote(value: str) -> str:
     return value.replace("'", "''")
 
 
-def _ensure_restored_task_status(paths: AgosPaths) -> None:
-    if paths.status_json.is_file():
-        return
+def _record_restored_task_state(paths: AgosPaths) -> None:
     task = _load_current_task(paths)
-    ledger = Ledger(paths.ledger)
-    record = ledger.append({"type": "dashboard_restored", "task_id": task.id, "phase": "executing"})
-    status = TaskStatus.for_started_task(
-        task=task,
-        run=ExecutorRun(adapter=task.executor.adapter, run_id=f"restored-{task.id}", issue_id=None),
-        ledger_head_hash=record["hash"],
-    )
-    save_status(status, paths)
+    state = TaskState(paths)
+    snapshot = state.current()
+    if snapshot is None:
+        raise DashboardApiError("status_missing", "Restored AGOS task status is missing.")
+    try:
+        state.record(
+            TaskEvent(
+                "dashboard_restored",
+                {"task_id": task.id, "phase": "executing"},
+            ),
+            expected=snapshot.revision,
+        )
+    except TaskStateConflict as exc:
+        raise DashboardApiError(
+            "restore_conflict",
+            "The restored task changed before its lifecycle state could be recorded.",
+            hint="Reload the dashboard and verify the active task before retrying.",
+        ) from exc
 
 
 def _merge_gate_payload(paths: AgosPaths) -> dict[str, object]:

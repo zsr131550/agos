@@ -15,6 +15,7 @@ from agos.core.ledger import Ledger
 from agos.core.repo import repo_paths
 from agos.core.status import TaskStatus, save_status
 from agos.core.task import ExecutorBinding, Task, save_task
+from agos.core.task_state import TaskEvent, TaskState
 from agos.core.trust_anchor import (
     FileTrustAnchorStore,
     GitRefTrustAnchorStore,
@@ -398,6 +399,42 @@ def test_publish_current_anchor_repairs_missing_status_cache(tmp_repo: Path):
     assert paths.status_json.is_file()
     assert anchor.ledger_head_hash == started["hash"]
     assert anchor.ledger_seq == 1
+
+
+def test_publish_current_anchor_preserves_baseline_eligible_cache(tmp_repo: Path):
+    paths = repo_paths(tmp_repo)
+    paths.agos_dir.mkdir(parents=True, exist_ok=True)
+    task = Task(
+        id="agos-task-01",
+        title="Trust anchor task",
+        workflow="feature",
+        gates=["tests_pass"],
+        executor=ExecutorBinding(adapter="multica", agent="Lambda"),
+    )
+    save_task(task, paths.task_yaml)
+    started = Ledger(paths.ledger).append({"type": "task_started", "task_id": task.id})
+    save_status(
+        TaskStatus(
+            task_id=task.id,
+            phase="gated",
+            gates={"tests_pass": {"state": "pass"}},
+            ledger_head_hash=started["hash"],
+        ),
+        paths,
+    )
+
+    publish_current_anchor(
+        paths,
+        FileTrustAnchorStore(paths.evidence / "anchor.json"),
+        issuer="CI",
+    )
+    TaskState(paths).record(TaskEvent("checkpoint", {"task_id": task.id, "last_seq": 7}))
+
+    paths.status_json.unlink()
+    recovered = TaskState(paths).current()
+    assert recovered is not None
+    assert recovered.status.phase == "gated"
+    assert recovered.status.gates["tests_pass"].state == "pass"
 
 
 def test_publish_current_anchor_uses_one_verified_ledger_snapshot(

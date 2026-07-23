@@ -12,6 +12,7 @@ from agos.core.review import Finding, FindingResolution
 from agos.core.review_service import ReviewService
 from agos.core.status import TaskStatus, load_status, save_status
 from agos.core.task import ExecutorBinding, Task, save_task
+from agos.core.task_state import TaskStateConflict
 
 
 def _active_task(tmp_repo):
@@ -129,6 +130,7 @@ def test_ingest_findings_writes_report_and_ledger_events(tmp_repo):
     opened = _ledger_records(paths)[-2]
     assert opened["finding_id"] == "finding-01"
     assert opened["evidence_refs"] == ["reviews/source.json"]
+    assert opened["task_id"] == "agos-01"
     assert load_status(paths).ledger_head_hash == _ledger_records(paths)[-1]["hash"]
 
 
@@ -335,3 +337,31 @@ def test_resolve_finding_rejects_absent_finding_id(tmp_repo):
                 rationale="Regression test added and passing.",
             ),
         )
+
+
+def test_closeout_rejects_stale_entry_revision(tmp_repo, monkeypatch):
+    paths = _active_task(tmp_repo)
+    service = ReviewService(paths)
+    _packet_ref, packet = service.create_packet(diff_kind="governed_repo_diff")
+    service.ingest_findings(packet.review_id, [])
+    write_proof = service.store.write_proof
+
+    def write_proof_after_concurrent_fact(proof):
+        refs = write_proof(proof)
+        Ledger(paths.ledger).append(
+            {
+                "type": "review_started",
+                "task_id": "agos-01",
+                "review_id": "review-concurrent",
+                "packet_ref": "reviews/review-concurrent/packet.json",
+            }
+        )
+        return refs
+
+    monkeypatch.setattr(service.store, "write_proof", write_proof_after_concurrent_fact)
+
+    with pytest.raises(TaskStateConflict, match="revision mismatch"):
+        service.closeout()
+
+    assert _ledger_types(paths)[-1] == "review_started"
+    assert "closeout_completed" not in _ledger_types(paths)

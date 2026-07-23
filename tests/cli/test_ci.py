@@ -95,7 +95,7 @@ def test_ci_blocks_on_failing_command_gate(monkeypatch, tmp_repo):
             }
         },
     }
-    paths, _task = _write_active_task(tmp_repo, config_data=config_data)
+    paths, task = _write_active_task(tmp_repo, config_data=config_data)
     monkeypatch.chdir(tmp_repo)
     monkeypatch.setattr("agos.cli.cmd_ci._git_diff_for_stage", lambda *_args, **_kwargs: "")
 
@@ -108,6 +108,7 @@ def test_ci_blocks_on_failing_command_gate(monkeypatch, tmp_repo):
     assert records[-1]["type"] == "gate_evaluated"
     assert records[-1]["gate"] == "tests_pass"
     assert records[-1]["state"] == "block"
+    assert records[-1]["task_id"] == task.id
 
     status = load_status(paths)
     assert status is not None
@@ -155,6 +156,7 @@ def test_ci_blocks_on_repo_history_drift(monkeypatch, tmp_repo):
 
     records = _read_ledger(paths)
     assert records[-1]["type"] == "repo_history_drift"
+    assert records[-1]["task_id"] == task.id
 
 
 def test_ci_blocks_when_locked_gates_do_not_match_current_config(monkeypatch, tmp_repo):
@@ -192,7 +194,7 @@ def test_ci_passes_when_stage_gates_pass(monkeypatch, tmp_repo):
             }
         },
     }
-    paths, _task = _write_active_task(tmp_repo, config_data=config_data)
+    paths, task = _write_active_task(tmp_repo, config_data=config_data)
     monkeypatch.chdir(tmp_repo)
     monkeypatch.setattr("agos.cli.cmd_ci._git_diff_for_stage", lambda *_args, **_kwargs: "")
 
@@ -204,6 +206,7 @@ def test_ci_passes_when_stage_gates_pass(monkeypatch, tmp_repo):
     assert records[-1]["type"] == "gate_evaluated"
     assert records[-1]["gate"] == "tests_pass"
     assert records[-1]["state"] == "pass"
+    assert records[-1]["task_id"] == task.id
 
     status = load_status(paths)
     assert status is not None
@@ -267,14 +270,14 @@ def test_ci_reuses_single_ledger_read_for_policy_checks(monkeypatch, tmp_repo):
     import agos.cli.cmd_ci as cmd_ci
 
     calls = 0
-    real_read_all = cmd_ci.Ledger.read_all
+    real_read_verified = cmd_ci.Ledger.read_verified
 
-    def counted_read_all(self):
+    def counted_read_verified(self):
         nonlocal calls
         calls += 1
-        return real_read_all(self)
+        return real_read_verified(self)
 
-    monkeypatch.setattr(cmd_ci.Ledger, "read_all", counted_read_all)
+    monkeypatch.setattr(cmd_ci.Ledger, "read_verified", counted_read_verified)
 
     result = runner.invoke(app, ["ci", "--local", "--stage", "pre-commit"])
 

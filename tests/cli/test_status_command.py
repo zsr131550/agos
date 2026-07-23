@@ -94,11 +94,20 @@ def _active_task(tmp_repo):
     )
     save_task(task, paths.task_yaml)
     ledger = Ledger(paths.ledger)
-    started = ledger.append({"type": "task_started", "task_id": task.id, "title": task.title})
+    ledger.append({"type": "task_started", "task_id": task.id, "title": task.title})
+    dispatched = ledger.append(
+        {
+            "type": "executor_dispatched",
+            "task_id": task.id,
+            "adapter": "multica",
+            "run_id": "run-01",
+            "issue_id": "AGO-1",
+        }
+    )
     status = TaskStatus.for_started_task(
         task=task,
         run=ExecutorRun(adapter="multica", run_id="run-01", issue_id="AGO-1"),
-        ledger_head_hash=started["hash"],
+        ledger_head_hash=dispatched["hash"],
     )
     save_status(status, paths)
     return paths

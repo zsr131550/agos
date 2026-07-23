@@ -119,6 +119,7 @@ def test_checkpoint_once_writes_messages_anchor_ledger_and_status(monkeypatch, t
     assert checkpoint["type"] == "checkpoint"
     assert checkpoint["repo_head"] == anchor["head"]
     assert checkpoint["last_seq"] == 2
+    assert checkpoint["task_id"] == _task.id
     assert checkpoint["evidence_refs"] == [
         "messages/run-123.jsonl",
         f"repo_anchor/{anchor_files[0].name}",
@@ -128,6 +129,66 @@ def test_checkpoint_once_writes_messages_anchor_ledger_and_status(monkeypatch, t
     assert status is not None
     assert status.last_event_seq == 2
     assert status.ledger_head_hash == checkpoint["hash"]
+
+
+def test_checkpoint_once_does_not_apply_old_run_after_redispatch(monkeypatch, tmp_repo):
+    paths, task = _write_active_task(tmp_repo)
+
+    class FakeAdapter:
+        def stream_events(self, run_id: str, since: int | None = None):
+            assert run_id == "run-123"
+            assert since is None
+            append_task_record(
+                paths.ledger,
+                "executor_dispatched",
+                task_id=task.id,
+                adapter="multica",
+                run_id="run-current",
+                issue_id="AGO-100",
+            )
+            return iter(
+                [
+                    Event(
+                        seq=1,
+                        ts="2026-06-21T00:00:01Z",
+                        kind="run_complete",
+                        content="done",
+                        raw={"seq": 1, "kind": "run_complete", "content": "done"},
+                    )
+                ]
+            )
+
+        def status(self, run_id: str, issue_id: str | None = None):
+            raise AssertionError(f"old run must not be finalized: {run_id}/{issue_id}")
+
+    from agos.cli import cmd_checkpoint
+
+    monkeypatch.setattr(cmd_checkpoint, "git_head", lambda _repo: "head-sha")
+    monkeypatch.setattr(cmd_checkpoint, "git_status_porcelain", lambda _repo: "")
+    status = load_status(paths)
+    assert status is not None
+
+    completed, last_seq = cmd_checkpoint._checkpoint_once(
+        adapter=FakeAdapter(),
+        status=status,
+        paths=paths,
+    )
+
+    assert completed is False
+    assert last_seq is None
+    records = [json.loads(line) for line in paths.ledger.read_text(encoding="utf-8").splitlines()]
+    assert [record["type"] for record in records][-1] == "executor_dispatched"
+    assert not [
+        record
+        for record in records
+        if record.get("run_id") == "run-123"
+        and record["type"] in {"checkpoint", "executor_completed", "executor_blocked"}
+    ]
+    current = load_status(paths)
+    assert current is not None
+    assert current.phase == "executing"
+    assert current.executor_run is not None
+    assert current.executor_run.run_id == "run-current"
 
 
 def test_checkpoint_auto_publishes_file_trust_anchor_when_configured(monkeypatch, tmp_repo):

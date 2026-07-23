@@ -6,6 +6,7 @@ import pytest
 
 from agos.backends.native_async import BackendRunHandle, NativeAsyncBackend
 from agos.core.adapter import ExecutorRun
+from agos.core.ledger import Ledger
 from agos.core.orchestration.registry import OrchestrationRegistry
 from agos.core.repo import repo_paths
 from agos.core.review_orchestration import ReviewOrchestrator
@@ -24,10 +25,21 @@ def _active_task(tmp_repo):
         executor=ExecutorBinding(adapter="multica", agent="Lambda"),
     )
     save_task(task, paths.task_yaml)
+    ledger = Ledger(paths.ledger)
+    ledger.append({"type": "task_started", "task_id": task.id, "title": task.title})
+    dispatched = ledger.append(
+        {
+            "type": "executor_dispatched",
+            "task_id": task.id,
+            "adapter": "multica",
+            "run_id": "run-01",
+            "issue_id": "AGO-1",
+        }
+    )
     status = TaskStatus.for_started_task(
         task=task,
         run=ExecutorRun(adapter="multica", run_id="run-01", issue_id="AGO-1"),
-        ledger_head_hash="ledger-01",
+        ledger_head_hash=dispatched["hash"],
     )
     save_status(status, paths)
     return paths

@@ -1,4 +1,5 @@
 """`agos ci --local` command."""
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -10,8 +11,7 @@ from agos.core.config import load_config, resolve_gates
 from agos.core.gate import GateContext, build_gate, gates_match
 from agos.core.ledger import Ledger, LedgerTamperError
 from agos.core.repo import find_repo_root, repo_paths
-from agos.core.status import GateState, load_status, save_status
-from agos.core.task import load_task
+from agos.core.task_state import TaskEvent, TaskState
 
 
 def _is_ancestor(repo_root: Path, ancestor: str, descendant: str) -> bool:
@@ -36,7 +36,11 @@ def _git_diff_for_stage(repo_root, stage: str) -> str:
             text=True,
             check=False,
         )
-        command = ["git", "diff", "@{u}..HEAD"] if has_upstream.returncode == 0 else ["git", "diff", "HEAD"]
+        command = (
+            ["git", "diff", "@{u}..HEAD"]
+            if has_upstream.returncode == 0
+            else ["git", "diff", "HEAD"]
+        )
     else:
         raise ValueError(f"unsupported stage: {stage}")
 
@@ -72,17 +76,18 @@ def ci_local_command(
 
     repo_root = find_repo_root()
     paths = repo_paths(repo_root)
+    task_state = TaskState(paths)
     ledger = Ledger(paths.ledger)
     try:
-        status = load_status(paths)
-        if status is None:
+        snapshot = task_state.current()
+        if snapshot is None:
             return
-        ledger.verify_chain()
+        records = ledger.read_verified()
     except LedgerTamperError as exc:
         typer.echo(f"Ledger verification failed: {exc}", err=True)
         raise typer.Exit(code=1) from exc
 
-    task = load_task(paths.task_yaml)
+    task = snapshot.task
     config = load_config(repo_root)
     try:
         resolved_gates = resolve_gates(config, task.workflow, override=task.gates)
@@ -90,7 +95,6 @@ def ci_local_command(
         typer.echo(f"Current gate set does not match gates_locked: {exc}", err=True)
         raise typer.Exit(code=1) from exc
 
-    records = ledger.read_all()
     locked_records = [record for record in records if record.get("type") == "gates_locked"]
     locked = locked_records[-1]["gates"] if locked_records else []
     if not gates_match(locked, resolved_gates):
@@ -111,24 +115,28 @@ def ci_local_command(
     ).stdout.strip()
     for repo_head in checkpoint_heads:
         if not _is_ancestor(repo_root, repo_head, current_head):
-            record = ledger.append(
-                {
-                    "type": "repo_history_drift",
-                    "stage": stage,
-                    "checkpoint_repo_head": repo_head,
-                    "current_repo_head": current_head,
-                }
+            task_state.record(
+                TaskEvent(
+                    "repo_history_drift",
+                    {
+                        "task_id": task.id,
+                        "stage": stage,
+                        "checkpoint_repo_head": repo_head,
+                        "current_repo_head": current_head,
+                    },
+                )
             )
-            status.ledger_head_hash = record["hash"]
-            save_status(status, paths)
-            typer.echo("repo_history_drift: checkpoint repo head is not an ancestor of current HEAD", err=True)
+            typer.echo(
+                "repo_history_drift: checkpoint repo head is not an ancestor of current HEAD",
+                err=True,
+            )
             raise typer.Exit(code=1)
 
     diff = _git_diff_for_stage(repo_root, stage)
     applicable = [gate for gate in resolved_gates if stage in gate.stage]
 
     exit_code = 0
-    gate_states = dict(status.gates)
+    gate_events: list[TaskEvent] = []
     for gate_spec in applicable:
         gate = build_gate(gate_spec)
         result = gate.evaluate(
@@ -139,23 +147,24 @@ def ci_local_command(
                 evidence_dir=paths.evidence,
             )
         )
-        record = ledger.append(
-            {
-                "type": "gate_evaluated",
-                "gate": gate_spec.id,
-                "stage": stage,
-                "state": result.state,
-                "reason": result.reason,
-                "evidence_path": result.evidence_path,
-            }
+        gate_events.append(
+            TaskEvent(
+                "gate_evaluated",
+                {
+                    "task_id": task.id,
+                    "gate": gate_spec.id,
+                    "stage": stage,
+                    "state": result.state,
+                    "reason": result.reason,
+                    "evidence_path": result.evidence_path,
+                },
+            )
         )
-        gate_states[gate_spec.id] = GateState(state=result.state, last_evaluated=record["ts"])
-        status.ledger_head_hash = record["hash"]
         if result.state == "block":
             exit_code = 1
             typer.echo(result.reason, err=True)
 
-    status.gates = gate_states
-    save_status(status, paths)
+    if gate_events:
+        task_state.record(gate_events[0], *gate_events[1:])
     if exit_code:
         raise typer.Exit(code=exit_code)

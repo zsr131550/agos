@@ -13,21 +13,20 @@ from agos.core.config import AGOSConfig, GateSpec, load_config, resolve_gates
 from agos.core.evidence import EvidenceStore
 from agos.core.execution_pipeline import AutoExecutionResult
 from agos.core.gate import gates_locked_payload
-from agos.core.ledger import Ledger
 from agos.core.repo import (
     AgosPaths,
     current_task_is_active,
     staging_task_dir,
     task_paths,
 )
-from agos.core.status import (
-    ExecutorRunInfo,
-    TaskStatus,
-    derive_status,
-    load_status,
-    save_status,
-)
 from agos.core.task import ExecutorBinding, Task, load_task, new_task_id
+from agos.core.task_state import (
+    TaskEvent,
+    TaskRevision,
+    TaskState,
+    TaskStateCommitIndeterminate,
+    TaskStateConflict,
+)
 from agos.core.task_execution import (
     ExecutionMode,
     ExecutorSelection,
@@ -40,6 +39,26 @@ from agos.core.task_execution import (
 
 class TaskExecutionError(RuntimeError):
     """Raised when unified task creation or dispatch cannot proceed."""
+
+
+class TaskExecutionDispatchUnreconciled(TaskExecutionError):
+    """Raised after an external legacy run cannot be safely reconciled."""
+
+    def __init__(
+        self,
+        *,
+        task_id: str,
+        run_id: str,
+        stage: str,
+        cause: Exception,
+    ) -> None:
+        super().__init__(
+            f"executor run {run_id} for task {task_id} requires reconciliation "
+            f"after {stage}: {cause}"
+        )
+        self.task_id = task_id
+        self.run_id = run_id
+        self.stage = stage
 
 
 @dataclass(frozen=True)
@@ -199,40 +218,32 @@ class TaskExecutionService:
         staging_paths = task_paths(self.paths.root, staging_dir)
         staging_dir.mkdir(parents=True, exist_ok=True)
         task.save(staging_paths.task_yaml)
-        ledger = Ledger(staging_paths.ledger)
-        ledger.append(
-            {
-                "type": "task_started",
-                "task_id": task.id,
-                "title": task.title,
-                "workflow": task.workflow,
-            }
+        TaskState(staging_paths).record(
+            TaskEvent(
+                "task_started",
+                {
+                    "task_id": task.id,
+                    "title": task.title,
+                    "workflow": task.workflow,
+                },
+            ),
+            TaskEvent(
+                "gates_locked",
+                {
+                    "task_id": task.id,
+                    "gates": gates_locked_payload(prepared.gates),
+                },
+            ),
+            TaskEvent(
+                "task_execution_started",
+                {
+                    "task_id": task.id,
+                    "mode": prepared.mode,
+                    "output_contract": task.output_contract,
+                },
+            ),
+            expected=TaskRevision.empty(),
         )
-        ledger.append(
-            {
-                "type": "gates_locked",
-                "task_id": task.id,
-                "gates": gates_locked_payload(prepared.gates),
-            }
-        )
-        started = ledger.append(
-            {
-                "type": "task_execution_started",
-                "task_id": task.id,
-                "mode": prepared.mode,
-                "output_contract": task.output_contract,
-            }
-        )
-        status = derive_status(
-            staging_paths,
-            task.id,
-            task.gates,
-            ledger,
-            executor_run=None,
-            last_event_seq=int(started["seq"]),
-            gate_states=None,
-        )
-        save_status(status, staging_paths)
         return task, staging_paths
 
     def _start_legacy(
@@ -248,48 +259,86 @@ class TaskExecutionService:
                 request.executor_selection,
             )
             run = resolved.adapter.start(task)
-            EvidenceStore(staging_paths.evidence).write_run(
-                run.run_id,
-                {
-                    "task_id": task.id,
-                    "adapter": run.adapter,
-                    "run_id": run.run_id,
-                    "issue_id": run.issue_id,
-                },
-            )
-            ledger = Ledger(staging_paths.ledger)
-            dispatched = ledger.append(
-                {
-                    "type": "executor_dispatched",
-                    "task_id": task.id,
-                    "adapter": run.adapter,
-                    "run_id": run.run_id,
-                    "issue_id": run.issue_id,
-                }
-            )
-            status = TaskStatus.for_started_task(
-                task=task,
-                run=run,
-                ledger_head_hash=str(dispatched["hash"]),
-            )
+            evidence_ref = f"runs/{run.run_id}.json"
+            try:
+                EvidenceStore(staging_paths.evidence).write_run(
+                    run.run_id,
+                    {
+                        "task_id": task.id,
+                        "adapter": run.adapter,
+                        "run_id": run.run_id,
+                        "issue_id": run.issue_id,
+                    },
+                )
+            except Exception as exc:
+                self._preserve_unreconciled_legacy_dispatch(
+                    staging_paths,
+                    task=task,
+                    run=run,
+                    stage="evidence_write_failed",
+                    evidence_ref=evidence_ref,
+                    cause=exc,
+                )
+                raise TaskExecutionDispatchUnreconciled(
+                    task_id=task.id,
+                    run_id=run.run_id,
+                    stage="evidence_write_failed",
+                    cause=exc,
+                ) from exc
+            task_state = TaskState(staging_paths)
+            snapshot = task_state.current()
+            if snapshot is None:
+                raise TaskExecutionError("staged task state is missing")
+            try:
+                commit = task_state.record(
+                    TaskEvent(
+                        "executor_dispatched",
+                        {
+                            "task_id": task.id,
+                            "adapter": run.adapter,
+                            "run_id": run.run_id,
+                            "issue_id": run.issue_id,
+                        },
+                    ),
+                    expected=snapshot.revision,
+                )
+            except Exception as exc:
+                stage = _unreconciled_dispatch_stage(exc)
+                self._preserve_unreconciled_legacy_dispatch(
+                    staging_paths,
+                    task=task,
+                    run=run,
+                    stage=stage,
+                    evidence_ref=evidence_ref,
+                    cause=exc,
+                )
+                raise TaskExecutionDispatchUnreconciled(
+                    task_id=task.id,
+                    run_id=run.run_id,
+                    stage=stage,
+                    cause=exc,
+                ) from exc
+            self._publish(staging_paths.current_task)
+            task_state = TaskState(self.paths)
             run_status = _initial_status(resolved, run)
             state = "running"
             blocked_stage = None
             blocked_reason = None
             if run_status is not None and run_status.state != "running":
-                state, event_type, phase = _legacy_terminal_state(run_status)
-                terminal = ledger.append(
-                    {
-                        "type": event_type,
-                        "task_id": task.id,
-                        "run_id": run.run_id,
-                        "issue_id": run.issue_id,
-                        "state": run_status.state,
-                        "detail": run_status.detail,
-                    }
+                state, event_type, _phase = _legacy_terminal_state(run_status)
+                commit = task_state.record(
+                    TaskEvent(
+                        event_type,
+                        {
+                            "task_id": task.id,
+                            "run_id": run.run_id,
+                            "issue_id": run.issue_id,
+                            "state": run_status.state,
+                            "detail": run_status.detail,
+                        },
+                    ),
+                    expected=commit.snapshot.revision,
                 )
-                status.phase = phase
-                status.ledger_head_hash = str(terminal["hash"])
                 if state != "completed":
                     blocked_stage = "executor"
                     blocked_reason = run_status.detail or run_status.state
@@ -305,29 +354,74 @@ class TaskExecutionService:
                 compatibility_warnings=warnings,
             )
             if state != "running":
-                final = ledger.append(
-                    {
-                        "type": "task_execution_completed"
+                task_state.record(
+                    TaskEvent(
+                        "task_execution_completed"
                         if state == "completed"
                         else "task_execution_blocked",
-                        "task_id": task.id,
-                        "mode": "legacy",
-                        "run_id": run.run_id,
-                        "state": state,
-                        "blocked_stage": blocked_stage,
-                        "blocked_reason": blocked_reason,
-                    }
+                        {
+                            "task_id": task.id,
+                            "mode": "legacy",
+                            "run_id": run.run_id,
+                            "state": state,
+                            "blocked_stage": blocked_stage,
+                            "blocked_reason": blocked_reason,
+                        },
+                    ),
+                    expected=commit.snapshot.revision,
                 )
-                status.ledger_head_hash = str(final["hash"])
-            save_status(status, staging_paths)
-            _write_result(staging_paths, result)
-            self._publish(staging_paths.current_task)
+            _write_result(self.paths, result)
             return result
+        except TaskExecutionDispatchUnreconciled:
+            raise
         except Exception as exc:
             shutil.rmtree(staging_paths.current_task, ignore_errors=True)
             if isinstance(exc, TaskExecutionError):
                 raise
             raise TaskExecutionError(str(exc)) from exc
+
+    def _preserve_unreconciled_legacy_dispatch(
+        self,
+        staging_paths: AgosPaths,
+        *,
+        task: Task,
+        run: ExecutorRun,
+        stage: str,
+        evidence_ref: str,
+        cause: Exception,
+    ) -> None:
+        try:
+            TaskState(staging_paths).record(
+                TaskEvent(
+                    "executor_dispatch_unreconciled",
+                    {
+                        "task_id": task.id,
+                        "adapter": run.adapter,
+                        "run_id": run.run_id,
+                        "issue_id": run.issue_id,
+                        "triggered_by": "task_execution_start",
+                        "stage": stage,
+                        "evidence_ref": evidence_ref,
+                        "error": str(cause),
+                    },
+                )
+            )
+        except Exception as recovery_error:
+            raise TaskExecutionDispatchUnreconciled(
+                task_id=task.id,
+                run_id=run.run_id,
+                stage=f"{stage}_recovery_failed",
+                cause=recovery_error,
+            ) from recovery_error
+        try:
+            self._publish(staging_paths.current_task)
+        except Exception as publish_error:
+            raise TaskExecutionDispatchUnreconciled(
+                task_id=task.id,
+                run_id=run.run_id,
+                stage="publish_failed",
+                cause=publish_error,
+            ) from publish_error
 
     def _finalize_candidate(
         self,
@@ -336,7 +430,11 @@ class TaskExecutionService:
         warnings: list[str],
         resumed: bool = False,
     ) -> TaskExecutionResult:
-        task = load_task(self.paths.task_yaml)
+        task_state = TaskState(self.paths)
+        snapshot = task_state.current()
+        if snapshot is None:
+            raise TaskExecutionError("candidate task status is missing")
+        task = snapshot.task
         if auto_result.task_id != task.id:
             raise TaskExecutionError(
                 f"candidate pipeline task mismatch: {auto_result.task_id!r} != {task.id!r}"
@@ -353,38 +451,25 @@ class TaskExecutionService:
             blocked_reason=auto_result.blocked_reason,
             compatibility_warnings=warnings,
         )
-        status = load_status(self.paths)
-        if status is None:
-            raise TaskExecutionError("candidate task status is missing")
-        status.executor_run = ExecutorRunInfo(
-            adapter="candidate_pipeline",
-            run_id=auto_result.run_id,
-        )
-        status.phase = (
-            "done"
-            if state == "completed"
-            else "executing"
-            if state == "running"
-            else "blocked"
-        )
-        final = Ledger(self.paths.ledger).append(
-            {
-                "type": "task_execution_completed"
+        task_state.record(
+            TaskEvent(
+                "task_execution_completed"
                 if state == "completed"
                 else "task_execution_blocked",
-                "task_id": task.id,
-                "mode": "candidate",
-                "run_id": auto_result.run_id,
-                "state": state,
-                "candidate_ids": result.candidate_ids,
-                "applied_candidate_ids": result.applied_candidate_ids,
-                "blocked_stage": result.blocked_stage,
-                "blocked_reason": result.blocked_reason,
-                "resumed": resumed,
-            }
+                {
+                    "task_id": task.id,
+                    "mode": "candidate",
+                    "run_id": auto_result.run_id,
+                    "state": state,
+                    "candidate_ids": result.candidate_ids,
+                    "applied_candidate_ids": result.applied_candidate_ids,
+                    "blocked_stage": result.blocked_stage,
+                    "blocked_reason": result.blocked_reason,
+                    "resumed": resumed,
+                },
+            ),
+            expected=snapshot.revision,
         )
-        status.ledger_head_hash = str(final["hash"])
-        save_status(status, self.paths)
         _write_result(self.paths, result)
         return result
 
@@ -406,28 +491,25 @@ class TaskExecutionService:
             blocked_reason=str(exc),
             compatibility_warnings=warnings,
         )
-        status = load_status(self.paths)
-        if status is None:
+        task_state = TaskState(self.paths)
+        snapshot = task_state.current()
+        if snapshot is None:
             raise TaskExecutionError("candidate task status is missing") from exc
-        status.executor_run = ExecutorRunInfo(
-            adapter="candidate_pipeline",
-            run_id=result.run_id,
+        task_state.record(
+            TaskEvent(
+                "task_execution_blocked",
+                {
+                    "task_id": task.id,
+                    "mode": "candidate",
+                    "run_id": result.run_id,
+                    "state": "failed",
+                    "blocked_stage": result.blocked_stage,
+                    "blocked_reason": result.blocked_reason,
+                    "resumed": resumed,
+                },
+            ),
+            expected=snapshot.revision,
         )
-        status.phase = "blocked"
-        final = Ledger(self.paths.ledger).append(
-            {
-                "type": "task_execution_blocked",
-                "task_id": task.id,
-                "mode": "candidate",
-                "run_id": result.run_id,
-                "state": "failed",
-                "blocked_stage": result.blocked_stage,
-                "blocked_reason": result.blocked_reason,
-                "resumed": resumed,
-            }
-        )
-        status.ledger_head_hash = str(final["hash"])
-        save_status(status, self.paths)
         _write_result(self.paths, result)
         return result
 
@@ -472,6 +554,14 @@ def _initial_status(
         return resolved.adapter.status(run.run_id, issue_id=run.issue_id)
     except Exception:
         return None
+
+
+def _unreconciled_dispatch_stage(exc: Exception) -> str:
+    if isinstance(exc, TaskStateConflict):
+        return "ledger_conflict"
+    if isinstance(exc, TaskStateCommitIndeterminate):
+        return "ledger_commit_indeterminate"
+    return "ledger_write_failed"
 
 
 def _legacy_terminal_state(status: RunStatus) -> tuple[str, str, str]:

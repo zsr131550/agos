@@ -8,9 +8,10 @@ from typing import Any, Literal
 from pydantic import BaseModel
 
 from agos.core.adapter import ExecutorRun
+from agos.core.file_lock import exclusive_file_lock
 from agos.core.ledger import Ledger
 from agos.core.repo import AgosPaths
-from agos.core.task import Task, load_task
+from agos.core.task import Task
 
 
 class ExecutorRunInfo(BaseModel):
@@ -64,18 +65,23 @@ TaskStatus = Status
 
 
 def load_status(paths: AgosPaths) -> Status | None:
-    """Load the cache and repair it from verified ledger events when stale."""
+    """Compatibility adapter for the authoritative TaskState snapshot."""
 
     if not paths.task_yaml.is_file() or not paths.ledger.is_file():
         cached, cache_error = _read_cached_status(paths)
         if cache_error is not None:
             raise cache_error
         return cached
+    if paths.ledger.stat().st_size == 0:
+        cached, cache_error = _read_cached_status(paths)
+        if cache_error is not None:
+            raise cache_error
+        return cached
 
-    ledger = Ledger(paths.ledger)
-    records = ledger.read_verified()
-    task = load_task(paths.task_yaml)
-    return load_status_from_verified_records(paths, task, records)
+    from agos.core.task_state import TaskState
+
+    snapshot = TaskState(paths).current()
+    return snapshot.status if snapshot is not None else None
 
 
 def load_status_from_verified_records(
@@ -104,18 +110,45 @@ def repair_status_from_verified_records(
 
     if not records:
         raise ValueError("cannot repair status from an empty ledger")
-    ledger_head = str(records[-1]["hash"])
-    if (
-        cached is not None
-        and cached.task_id == task.id
-        and cached.ledger_head_hash == ledger_head
-    ):
-        return cached
-
-    compatible_cached = cached if cached is not None and cached.task_id == task.id else None
-    recovered = replay_status(task, records, cached=compatible_cached)
-    save_status(recovered, paths)
+    recovered = replay_status(task, records)
+    # The caller's read can be stale by the time this audit path writes the
+    # derived cache, so compare both cache and ledger again under one lock.
+    del cached
+    with exclusive_file_lock(paths.ledger):
+        current_records = Ledger(paths.ledger)._records_unlocked()
+        Ledger._verify_records(current_records)
+        if current_records != records:
+            return recovered
+        current_cached, _cache_error = _read_cached_status(paths)
+        if status_cache_requires_baseline(task, current_records, current_cached, recovered):
+            return recovered
+        if current_cached != recovered:
+            save_status(recovered, paths)
     return recovered
+
+
+def status_cache_requires_baseline(
+    task: Task,
+    records: list[dict[str, Any]],
+    cached: Status | None,
+    recovered: Status,
+) -> bool:
+    """Whether compatible legacy cache facts must survive until a write journals them."""
+
+    if cached is None or cached.task_id != task.id:
+        return False
+    if any(record.get("type") == "task_state_baselined" for record in records):
+        return False
+    head_hash = str(records[-1]["hash"]) if records else ""
+    if cached.ledger_head_hash != head_hash:
+        return False
+    return _status_facts(cached) != _status_facts(recovered)
+
+
+def _status_facts(status: Status) -> dict[str, Any]:
+    payload = status.model_dump(mode="json")
+    payload.pop("ledger_head_hash", None)
+    return payload
 
 
 def _read_cached_status(paths: AgosPaths) -> tuple[Status | None, ValueError | None]:
@@ -196,97 +229,8 @@ def replay_status(
 ) -> Status:
     """Rebuild the current task view from ordered, verified ledger records."""
 
-    phase: Literal["executing", "gated", "done", "blocked"] = (
-        cached.phase if cached is not None else "executing"
-    )
-    executor_run = cached.executor_run if cached is not None else None
-    last_event_seq = cached.last_event_seq if cached is not None else None
-    gate_states = dict(cached.gates) if cached is not None else {}
-    for gate_id in task.gates:
-        gate_states.setdefault(gate_id, GateState())
+    del cached
+    from agos.core.task_state import _project_status
 
-    for record in records:
-        event_type = str(record.get("type", ""))
-        explicit_phase = record.get("phase")
-        if explicit_phase in {"executing", "gated", "done", "blocked"}:
-            phase = explicit_phase
-
-        if event_type in {"task_started", "task_execution_started"}:
-            phase = "executing"
-        elif event_type == "executor_dispatched":
-            run_id = _nonempty_text(record.get("run_id"))
-            if run_id is not None:
-                executor_run = ExecutorRunInfo(
-                    adapter=_nonempty_text(record.get("adapter")) or task.executor.adapter,
-                    run_id=run_id,
-                    issue_id=_nonempty_text(record.get("issue_id")),
-                )
-            phase = "executing"
-            last_event_seq = None
-        elif event_type == "dashboard_restored" and executor_run is None:
-            executor_run = ExecutorRunInfo(
-                adapter=task.executor.adapter,
-                run_id=f"restored-{task.id}",
-            )
-        elif event_type == "checkpoint":
-            checkpoint_seq = record.get("last_seq")
-            if isinstance(checkpoint_seq, int):
-                last_event_seq = checkpoint_seq
-        elif event_type == "gate_evaluated":
-            gate_id = _nonempty_text(record.get("gate"))
-            gate_state = record.get("state")
-            if gate_id is not None and gate_state in {"pass", "block"}:
-                gate_states[gate_id] = GateState(
-                    state=gate_state,
-                    last_evaluated=_nonempty_text(record.get("ts")),
-                )
-
-        if event_type == "executor_completed":
-            phase = "done"
-        elif event_type in {
-            "executor_blocked",
-            "dashboard_executor_dispatch_failed",
-            "agent_option_dispatch_failed",
-        }:
-            phase = "blocked"
-        elif event_type in {"closeout_completed", "dashboard_archived"}:
-            phase = "done"
-        elif event_type in {"task_execution_completed", "task_execution_blocked"}:
-            run_id = _nonempty_text(record.get("run_id"))
-            mode = record.get("mode")
-            if run_id is not None:
-                executor_run = ExecutorRunInfo(
-                    adapter=(
-                        "candidate_pipeline"
-                        if mode == "candidate"
-                        else executor_run.adapter
-                        if executor_run is not None
-                        else task.executor.adapter
-                    ),
-                    run_id=run_id,
-                    issue_id=executor_run.issue_id if executor_run is not None else None,
-                )
-            state = record.get("state")
-            if state == "completed":
-                phase = "done"
-            elif state == "running":
-                phase = "executing"
-            else:
-                phase = "blocked"
-
-    ledger_head = str(records[-1]["hash"]) if records else ""
-    return Status(
-        task_id=task.id,
-        phase=phase,
-        executor_run=executor_run,
-        gates=gate_states,
-        ledger_head_hash=ledger_head,
-        last_event_seq=last_event_seq,
-    )
-
-
-def _nonempty_text(value: object) -> str | None:
-    if value is None:
-        return None
-    text = str(value).strip()
-    return text or None
+    status, _warnings = _project_status(task, records)
+    return status

@@ -66,8 +66,9 @@ from agos.core.review_orchestrator import (
     ReviewRunResult,
 )
 from agos.core.review_service import ReviewService
-from agos.core.status import TaskStatus, load_status, save_status
+from agos.core.status import TaskStatus, load_status
 from agos.core.task import Task, load_task
+from agos.core.task_state import TaskEvent, TaskState
 
 
 class ExecutionService:
@@ -82,6 +83,7 @@ class ExecutionService:
         orchestration_backends: dict[str, OrchestrationBackend] | None = None,
     ) -> None:
         self.paths = paths
+        self.task_state = TaskState(paths)
         self.store = ExecutionStore(paths)
         self.workspace_manager = ExecutionWorkspaceManager(
             paths,
@@ -1175,11 +1177,10 @@ class ExecutionService:
         return f"execution/{name}"
 
     def _append_event(self, record: dict[str, Any]) -> dict[str, Any]:
-        status = _load_active_status(self.paths)
-        appended = Ledger(self.paths.ledger).append(record)
-        status.ledger_head_hash = appended["hash"]
-        save_status(status, self.paths)
-        return appended
+        event_name = str(record["type"])
+        facts = {key: value for key, value in record.items() if key != "type"}
+        commit = self.task_state.record(TaskEvent(event_name, facts))
+        return commit.records[-1]
 
     def _task_id_or_placeholder(self) -> str:
         status = load_status(self.paths)

@@ -9,7 +9,16 @@ import pytest
 from agos.core.adapter import ExecutorRun
 from agos.core.ledger import Ledger, LedgerTamperError
 from agos.core.repo import repo_paths
-from agos.core.status import GateState, Status, derive_status, load_status, replay_status, save_status
+from agos.core.status import (
+    GateState,
+    Status,
+    derive_status,
+    load_status,
+    read_status_cache,
+    repair_status_from_verified_records,
+    replay_status,
+    save_status,
+)
 from agos.core.task import ExecutorBinding, Task, save_task
 
 
@@ -191,7 +200,7 @@ def test_load_status_does_not_rewrite_current_compatible_cache(
     paths, task, _ledger, started = _task_with_ledger(tmp_repo)
     cached = Status(
         task_id=task.id,
-        phase="gated",
+        phase="executing",
         gates={},
         ledger_head_hash=started["hash"],
     )
@@ -202,6 +211,26 @@ def test_load_status_does_not_rewrite_current_compatible_cache(
     )
 
     assert load_status(paths) == cached
+
+
+def test_repair_from_stale_verified_records_does_not_overwrite_newer_cache(tmp_repo: Path):
+    paths, task, ledger, _started = _task_with_ledger(tmp_repo)
+    stale_records = ledger.read_verified()
+    latest = ledger.append({"type": "checkpoint", "last_seq": 7})
+    latest_status = replay_status(task, ledger.read_verified())
+    save_status(latest_status, paths)
+
+    recovered = repair_status_from_verified_records(
+        paths,
+        task,
+        stale_records,
+        cached=latest_status,
+    )
+
+    assert recovered.ledger_head_hash == stale_records[-1]["hash"]
+    cached = read_status_cache(paths)
+    assert cached is not None
+    assert cached.ledger_head_hash == latest["hash"]
 
 
 def test_load_status_rejects_tampered_ledger_without_replacing_cache(tmp_repo: Path):

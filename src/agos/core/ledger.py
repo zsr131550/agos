@@ -136,20 +136,26 @@ class Ledger:
 
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with exclusive_file_lock(self.path):
-            tail = self._last_record_unlocked()
-            prev_hash = tail["hash"] if tail else ""
-            full = dict(record)
-            full.setdefault("seq", tail["seq"] + 1 if tail else 1)
-            full.setdefault("ts", utc_now())
-            full["prev_hash"] = prev_hash
-            body = {key: value for key, value in full.items() if key != "hash"}
-            full["hash"] = compute_hash(prev_hash, body)
+            return self._append_unlocked(record)
 
-            with self.path.open("a", encoding="utf-8") as handle:
-                handle.write(json.dumps(full, ensure_ascii=False) + "\n")
-                handle.flush()
-                os.fsync(handle.fileno())
-            return full
+    def _append_unlocked(self, record: dict) -> dict:
+        """Append while the caller holds this ledger's exclusive file lock."""
+
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        tail = self._last_record_unlocked()
+        prev_hash = tail["hash"] if tail else ""
+        full = dict(record)
+        full.setdefault("seq", tail["seq"] + 1 if tail else 1)
+        full.setdefault("ts", utc_now())
+        full["prev_hash"] = prev_hash
+        body = {key: value for key, value in full.items() if key != "hash"}
+        full["hash"] = compute_hash(prev_hash, body)
+
+        with self.path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(full, ensure_ascii=False) + "\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        return full
 
     def verify_chain(self) -> None:
         """Recompute every hash from line 1 and raise on any mismatch."""

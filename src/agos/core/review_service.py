@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 from pathlib import Path
-from typing import Any, cast
+from typing import cast
 
 from ulid import ULID
 
@@ -18,8 +18,7 @@ from agos.core.review import (
     ReviewReport,
 )
 from agos.core.review_store import ReviewStore
-from agos.core.status import TaskStatus, load_status, save_status
-from agos.core.task import load_task
+from agos.core.task_state import TaskEvent, TaskSnapshot, TaskState
 
 
 def new_review_id() -> str:
@@ -35,6 +34,7 @@ class ReviewService:
         self.paths = paths
         self.store = ReviewStore(paths)
         self.ledger = Ledger(paths.ledger)
+        self.task_state = TaskState(paths)
 
     def create_packet(
         self,
@@ -44,8 +44,8 @@ class ReviewService:
         subject: dict[str, str] | None = None,
         context_refs: list[str] | None = None,
     ) -> tuple[str, ReviewPacket]:
-        status = _load_active_status(self.paths)
-        task = load_task(self.paths.task_yaml)
+        snapshot = self._active_snapshot()
+        task = snapshot.task
         packet = ReviewPacket(
             review_id=new_review_id(),
             task_id=task.id,
@@ -56,19 +56,20 @@ class ReviewService:
             context_refs=list(context_refs or []),
             diff_kind=cast(ReviewDiffKind, diff_kind),
             diff_evidence_ref=diff_evidence_ref,
-            ledger_head_hash=status.ledger_head_hash,
+            ledger_head_hash=snapshot.status.ledger_head_hash,
             checkpoint_refs=self._checkpoint_refs(),
             gate_refs=self._gate_refs(),
         )
         packet_ref = self.store.write_packet(packet)
-        self._append_and_save_status(
-            status,
-            {
-                "type": "review_started",
-                "review_id": packet.review_id,
-                "task_id": task.id,
-                "packet_ref": packet_ref,
-            },
+        self.task_state.record(
+            TaskEvent(
+                "review_started",
+                {
+                    "review_id": packet.review_id,
+                    "task_id": task.id,
+                    "packet_ref": packet_ref,
+                },
+            )
         )
         return packet_ref, packet
 
@@ -82,8 +83,7 @@ class ReviewService:
         review_id: str,
         findings: Iterable[Finding],
     ) -> tuple[str, ReviewReport]:
-        status = _load_active_status(self.paths)
-        task = load_task(self.paths.task_yaml)
+        task = self._active_snapshot().task
         normalized = [finding.model_copy(update={"review_id": review_id}) for finding in findings]
         packet_path = self._packet_path(review_id)
         if not packet_path.is_file():
@@ -100,11 +100,11 @@ class ReviewService:
         report_ref = self.store.write_report(report)
         self.store.write_markdown_report(report)
 
-        for finding in normalized:
-            self._append_and_save_status(
-                status,
+        events = [
+            TaskEvent(
+                "finding_opened",
                 {
-                    "type": "finding_opened",
+                    "task_id": task.id,
                     "review_id": review_id,
                     "finding_id": finding.id,
                     "severity": finding.severity,
@@ -113,20 +113,24 @@ class ReviewService:
                     "evidence_refs": list(finding.evidence_refs),
                 },
             )
-        self._append_and_save_status(
-            status,
-            {
-                "type": "review_completed",
-                "review_id": review_id,
-                "task_id": task.id,
-                "report_ref": report_ref,
-                "open_blocking_count": len(report.open_blocking_findings()),
-            },
+            for finding in normalized
+        ]
+        events.append(
+            TaskEvent(
+                "review_completed",
+                {
+                    "review_id": review_id,
+                    "task_id": task.id,
+                    "report_ref": report_ref,
+                    "open_blocking_count": len(report.open_blocking_findings()),
+                },
+            )
         )
+        self.task_state.record(events[0], *events[1:])
         return report_ref, report
 
     def resolve_finding(self, finding_id: str, resolution: FindingResolution) -> Finding:
-        status = _load_active_status(self.paths)
+        snapshot = self._active_snapshot()
         for report in self.store.read_reports():
             for index, finding in enumerate(report.findings):
                 if finding.id != finding_id:
@@ -144,27 +148,29 @@ class ReviewService:
                     if resolution.status == "accepted_risk"
                     else "finding_resolved"
                 )
-                self._append_and_save_status(
-                    status,
-                    {
-                        "type": event_type,
-                        "finding_id": finding_id,
-                        "review_id": report.review_id,
-                        "status": resolution.status,
-                        "evidence_refs": list(resolution.evidence_refs),
-                        "rationale": resolution.rationale,
-                        "approved_by": resolution.approved_by,
-                    },
+                self.task_state.record(
+                    TaskEvent(
+                        event_type,
+                        {
+                            "task_id": snapshot.task.id,
+                            "finding_id": finding_id,
+                            "review_id": report.review_id,
+                            "status": resolution.status,
+                            "evidence_refs": list(resolution.evidence_refs),
+                            "rationale": resolution.rationale,
+                            "approved_by": resolution.approved_by,
+                        },
+                    )
                 )
                 return updated
         raise ValueError(f"finding not found: {finding_id}")
 
     def closeout(self) -> CloseoutProof:
-        status = _load_active_status(self.paths)
-        if status.phase == "done":
+        snapshot = self._active_snapshot()
+        if snapshot.status.phase == "done":
             raise ValueError("task is already done")
 
-        task = load_task(self.paths.task_yaml)
+        task = snapshot.task
         reports = self.store.read_reports()
         if not reports:
             raise ValueError("at least one completed review report is required")
@@ -179,7 +185,7 @@ class ReviewService:
 
         proof = CloseoutProof(
             task_id=task.id,
-            ledger_head_hash=status.ledger_head_hash,
+            ledger_head_hash=snapshot.status.ledger_head_hash,
             review_refs=[
                 f"reviews/{report.review_id}/findings.json" for report in reports
             ],
@@ -188,20 +194,20 @@ class ReviewService:
             blocking_open_count=0,
         )
         proof_json_ref, proof_md_ref = self.store.write_proof(proof)
-        appended = self.ledger.append(
-            {
-                "type": "closeout_completed",
-                "task_id": task.id,
-                "proof_refs": {
-                    "json": proof_json_ref,
-                    "md": proof_md_ref,
+        self.task_state.record(
+            TaskEvent(
+                "closeout_completed",
+                {
+                    "task_id": task.id,
+                    "proof_refs": {
+                        "json": proof_json_ref,
+                        "md": proof_md_ref,
+                    },
+                    "finding_count": len(findings),
                 },
-                "finding_count": len(findings),
-            }
+            ),
+            expected=snapshot.revision,
         )
-        status.phase = "done"
-        status.ledger_head_hash = appended["hash"]
-        save_status(status, self.paths)
         return proof
 
     def open_blocking_findings(self) -> list[Finding]:
@@ -230,10 +236,11 @@ class ReviewService:
             if gate_log.is_file()
         }
 
-    def _append_and_save_status(self, status: TaskStatus, record: dict[str, Any]) -> None:
-        appended = self.ledger.append(record)
-        status.ledger_head_hash = appended["hash"]
-        save_status(status, self.paths)
+    def _active_snapshot(self) -> TaskSnapshot:
+        snapshot = self.task_state.current()
+        if snapshot is None:
+            raise ValueError("No active AGOS task found")
+        return snapshot
 
     def _packet_path(self, review_id: str) -> Path:
         return self.paths.reviews / review_id / "packet.json"
@@ -262,10 +269,3 @@ class ReviewService:
         for finding_id in incoming_ids:
             if finding_id in existing_ids:
                 raise ValueError(f"duplicate finding id: {finding_id}")
-
-
-def _load_active_status(paths: AgosPaths) -> TaskStatus:
-    status = load_status(paths)
-    if status is None:
-        raise ValueError("No active AGOS task found")
-    return status

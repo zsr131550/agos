@@ -556,7 +556,11 @@ def test_dashboard_server_post_current_lifecycle_actions(tmp_repo, monkeypatch) 
         title="Lifecycle task",
         workflow="feature",
         gates=[],
-        executor=ExecutorBinding(adapter="multica", agent="Lambda"),
+        executor=ExecutorBinding(
+            adapter="multica",
+            agent="Lambda",
+            selection_id="executor:multica:Lambda",
+        ),
     )
     save_task(task, paths.task_yaml)
     ledger = Ledger(paths.ledger)
@@ -607,16 +611,29 @@ def test_dashboard_server_serializes_concurrent_lifecycle_posts(tmp_repo, monkey
         title="Concurrent lifecycle task",
         workflow="feature",
         gates=[],
-        executor=ExecutorBinding(adapter="multica", agent="Lambda"),
+        executor=ExecutorBinding(
+            adapter="multica",
+            agent="Lambda",
+            selection_id="executor:multica:Lambda",
+        ),
     )
     save_task(task, paths.task_yaml)
     ledger = Ledger(paths.ledger)
-    started = ledger.append({"type": "task_started", "task_id": task.id, "title": task.title})
+    ledger.append({"type": "task_started", "task_id": task.id, "title": task.title})
+    dispatched = ledger.append(
+        {
+            "type": "executor_dispatched",
+            "task_id": task.id,
+            "adapter": "multica",
+            "run_id": "run-life-concurrent",
+            "issue_id": None,
+        }
+    )
     save_status(
         TaskStatus.for_started_task(
             task=task,
             run=ExecutorRun(adapter="multica", run_id="run-life-concurrent", issue_id=None),
-            ledger_head_hash=started["hash"],
+            ledger_head_hash=dispatched["hash"],
         ),
         paths,
     )
@@ -652,7 +669,7 @@ def test_dashboard_server_serializes_concurrent_lifecycle_posts(tmp_repo, monkey
     assert ledger_payload["verified"] is True
     assert ledger_payload["error"] is None
     assert dispatch_count == actions.count("resume") + actions.count("restart")
-    assert ledger_payload["count"] == 1 + actions.count("pause") + (
+    assert ledger_payload["count"] == 2 + actions.count("pause") + (
         actions.count("resume") + actions.count("restart")
     ) * 2
     Ledger(paths.ledger).verify_chain()
@@ -968,7 +985,11 @@ def test_dashboard_server_post_select_agent_option_dispatches_executor(
         title="Continue selected option",
         workflow="feature",
         gates=[],
-        executor=ExecutorBinding(adapter="multica", agent="Lambda"),
+        executor=ExecutorBinding(
+            adapter="multica",
+            agent="Lambda",
+            selection_id="executor:multica:Lambda",
+        ),
     )
     save_task(task, paths.task_yaml)
     ledger = Ledger(paths.ledger)

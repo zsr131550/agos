@@ -13,6 +13,7 @@ from agos.cli.main import app
 from agos.core.execution_store import ExecutionStore
 from agos.core.ledger import Ledger
 from agos.core.repo import repo_paths
+from agos.core.status import load_status
 
 
 runner = CliRunner()
@@ -60,7 +61,9 @@ def _git(repo: Path, *args: str) -> str:
     return subprocess.check_output(["git", *args], cwd=repo, text=True).strip()
 
 
-def test_prepare_merge_gate_builds_candidate_evidence_that_merge_gate_accepts(monkeypatch, tmp_path):
+def test_prepare_merge_gate_builds_candidate_evidence_that_merge_gate_accepts(
+    monkeypatch, tmp_path
+):
     _init_repo(tmp_path, gate_assertion="# changed")
     (tmp_path / "README.md").write_text("# changed\n", encoding="utf-8")
     subprocess.run(["git", "add", "README.md"], cwd=tmp_path, check=True)
@@ -100,6 +103,12 @@ def test_prepare_merge_gate_builds_candidate_evidence_that_merge_gate_accepts(mo
         in {"candidate_review_completed", "candidate_decision_recorded", "candidate_applied"}
         for record in Ledger(paths.ledger).read_all()
     )
+    paths.status_json.unlink()
+    replayed = load_status(paths)
+    assert replayed is not None
+    assert replayed.executor_run is not None
+    assert replayed.executor_run.adapter == "ci_prepare"
+    assert replayed.executor_run.run_id == "prepare-merge-gate"
     assert (paths.current_task / "evidence" / "anchors.json").is_file()
 
     gate = runner.invoke(

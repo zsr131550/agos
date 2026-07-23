@@ -16,6 +16,7 @@ from agos.core.task import load_task
 from agos.core.task_execution import TaskExecutionRequest
 from agos.core.task_execution_service import (
     ResolvedLegacyExecutor,
+    TaskExecutionDispatchUnreconciled,
     TaskExecutionError,
     TaskExecutionService,
 )
@@ -153,6 +154,51 @@ def test_legacy_start_returns_normalized_result_and_compatible_events(tmp_repo: 
     assert status.phase == "done"
     assert status.executor_run is not None
     assert status.executor_run.run_id == "legacy-run-1"
+
+
+def test_legacy_start_preserves_unreconciled_run_when_evidence_write_fails(
+    tmp_repo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _write_config(tmp_repo, mode="legacy")
+    monkeypatch.setattr(
+        "agos.core.task_execution_service.EvidenceStore.write_run",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("evidence unavailable")),
+    )
+
+    with pytest.raises(TaskExecutionDispatchUnreconciled, match="evidence_write_failed"):
+        _service(tmp_repo).start(TaskExecutionRequest(title="Legacy task"))
+
+    paths = repo_paths(tmp_repo)
+    assert paths.task_yaml.is_file()
+    records = Ledger(paths.ledger).read_all()
+    assert "executor_dispatched" not in [record["type"] for record in records]
+    unreconciled = [
+        record for record in records if record["type"] == "executor_dispatch_unreconciled"
+    ]
+    assert unreconciled[-1]["run_id"] == "legacy-run-1"
+    assert unreconciled[-1]["stage"] == "evidence_write_failed"
+
+
+def test_task_initialization_records_are_contiguous_and_project_started_seq(
+    tmp_repo: Path,
+) -> None:
+    _write_config(tmp_repo, mode="candidate", candidate_ready=True)
+
+    _service(tmp_repo).start(TaskExecutionRequest(title="Initialized task"))
+
+    paths = repo_paths(tmp_repo)
+    records = Ledger(paths.ledger).read_all()
+    initialization = records[:3]
+    assert [record["type"] for record in initialization] == [
+        "task_started",
+        "gates_locked",
+        "task_execution_started",
+    ]
+    assert [record["seq"] for record in initialization] == [1, 2, 3]
+    status = load_status(paths)
+    assert status is not None
+    assert status.last_event_seq == 3
 
 
 def test_old_config_uses_legacy_mode_and_reports_compatibility_warning(tmp_repo: Path) -> None:

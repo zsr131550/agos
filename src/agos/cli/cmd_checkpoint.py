@@ -1,4 +1,5 @@
 """`agos checkpoint` command."""
+
 from __future__ import annotations
 
 import time
@@ -10,9 +11,9 @@ from agos.core.config import load_config
 from agos.core.adapter import RunStatus
 from agos.core.adapter import ExecutorAdapter
 from agos.core.evidence import EvidenceStore
-from agos.core.ledger import Ledger
 from agos.core.repo import find_initialized_repo_root, git_head, git_status_porcelain, repo_paths
-from agos.core.status import ExecutorRunInfo, TaskStatus, load_status, save_status
+from agos.core.status import ExecutorRunInfo, TaskStatus
+from agos.core.task_state import TaskEvent, TaskSnapshot, TaskState, TaskStateConflict
 from agos.core.trust_anchor import publish_current_anchor, store_from_config
 
 
@@ -30,52 +31,73 @@ def _record_terminal_status(
     *,
     run_info: ExecutorRunInfo,
     run_status: RunStatus,
-    status: TaskStatus,
-    paths,
+    task_state: TaskState,
+    snapshot: TaskSnapshot,
 ) -> bool:
     if run_status.state == "running":
         return False
 
+    current_run = snapshot.status.executor_run
+    if current_run is None or current_run.run_id != run_info.run_id:
+        return False
+
     phase = "done" if run_status.state == "completed" else "blocked"
-    if status.phase == phase:
+    if snapshot.status.phase == phase:
         return True
 
-    ledger = Ledger(paths.ledger)
-    record = ledger.append(
-        {
-            "type": "executor_completed" if run_status.state == "completed" else "executor_blocked",
-            "run_id": run_info.run_id,
-            "issue_id": run_info.issue_id,
-            "state": run_status.state,
-            "detail": run_status.detail,
-        }
-    )
-    status.phase = phase
-    status.ledger_head_hash = record["hash"]
-    save_status(status, paths)
+    try:
+        task_state.record(
+            TaskEvent(
+                "executor_completed" if run_status.state == "completed" else "executor_blocked",
+                {
+                    "task_id": snapshot.task.id,
+                    "run_id": run_info.run_id,
+                    "issue_id": run_info.issue_id,
+                    "state": run_status.state,
+                    "detail": run_status.detail,
+                },
+            ),
+            expected=snapshot.revision,
+        )
+    except TaskStateConflict:
+        return False
     return True
 
 
-def _checkpoint_once(*, adapter: ExecutorAdapter, status: TaskStatus, paths) -> tuple[bool, int | None]:
+def _checkpoint_once(
+    *,
+    adapter: ExecutorAdapter,
+    status: TaskStatus,
+    paths,
+    task_state: TaskState | None = None,
+) -> tuple[bool, int | None]:
+    task_state = task_state or TaskState(paths)
     run_info = _as_run_info(status.executor_run)
     store = EvidenceStore(paths.evidence)
     events = list(adapter.stream_events(run_info.run_id, since=status.last_event_seq))
     if not events:
         run_status = adapter.status(run_info.run_id, issue_id=run_info.issue_id)
+        snapshot = task_state.current()
+        if snapshot is None:
+            raise typer.BadParameter("No active AGOS task found")
         return _record_terminal_status(
             run_info=run_info,
             run_status=run_status,
-            status=status,
-            paths=paths,
+            task_state=task_state,
+            snapshot=snapshot,
         ), status.last_event_seq
 
     for event in events:
-        store.append_message(run_info.run_id, event.raw or {
-            "seq": event.seq,
-            "ts": event.ts,
-            "kind": event.kind,
-            "content": event.content,
-        })
+        store.append_message(
+            run_info.run_id,
+            event.raw
+            or {
+                "seq": event.seq,
+                "ts": event.ts,
+                "kind": event.kind,
+                "content": event.content,
+            },
+        )
 
     anchor_name = f"{_anchor_ts()}-{events[-1].seq}"
     repo_head = git_head(paths.root)
@@ -84,29 +106,37 @@ def _checkpoint_once(*, adapter: ExecutorAdapter, status: TaskStatus, paths) -> 
         repo_head,
         git_status_porcelain(paths.root),
     )
-    ledger = Ledger(paths.ledger)
-    record = ledger.append(
-        {
-            "type": "checkpoint",
-            "run_id": run_info.run_id,
-            "evidence_refs": [
-                f"messages/{run_info.run_id}.jsonl",
-                f"repo_anchor/{anchor_path.name}",
-            ],
-            "repo_head": repo_head,
-            "last_seq": events[-1].seq,
-        }
-    )
-    status.last_event_seq = events[-1].seq
-    status.ledger_head_hash = record["hash"]
-    save_status(status, paths)
+    snapshot = task_state.current()
+    if snapshot is None:
+        raise typer.BadParameter("No active AGOS task found")
+    current_run = snapshot.status.executor_run
+    if current_run is None or current_run.run_id != run_info.run_id:
+        return False, status.last_event_seq
+    try:
+        checkpointed = task_state.record(
+            TaskEvent(
+                "checkpoint",
+                {
+                    "task_id": snapshot.task.id,
+                    "run_id": run_info.run_id,
+                    "evidence_refs": [
+                        f"messages/{run_info.run_id}.jsonl",
+                        f"repo_anchor/{anchor_path.name}",
+                    ],
+                    "repo_head": repo_head,
+                    "last_seq": events[-1].seq,
+                },
+            )
+        )
+    except TaskStateConflict:
+        return False, status.last_event_seq
     if any(event.kind == "run_complete" for event in events):
         run_status = adapter.status(run_info.run_id, issue_id=run_info.issue_id)
         completed = _record_terminal_status(
             run_info=run_info,
             run_status=run_status,
-            status=status,
-            paths=paths,
+            task_state=task_state,
+            snapshot=checkpointed.snapshot,
         )
         return completed, events[-1].seq
     return False, events[-1].seq
@@ -127,10 +157,12 @@ def checkpoint_command(
         typer.echo(str(exc), err=True)
         raise typer.Exit(code=1) from exc
     paths = repo_paths(repo_root)
-    status = load_status(paths)
-    if status is None:
+    task_state = TaskState(paths)
+    snapshot = task_state.current()
+    if snapshot is None:
         typer.echo("No active AGOS task found", err=True)
         raise typer.Exit(code=1)
+    status = snapshot.status
 
     try:
         adapter = configured_executor_adapter(paths)
@@ -141,7 +173,12 @@ def checkpoint_command(
     poll_once = once or not follow
 
     while True:
-        completed, _last_seq = _checkpoint_once(adapter=adapter, status=status, paths=paths)
+        completed, _last_seq = _checkpoint_once(
+            adapter=adapter,
+            status=status,
+            paths=paths,
+            task_state=task_state,
+        )
         if config.trust_anchor.auto_publish_on_checkpoint:
             try:
                 publish_current_anchor(
@@ -154,4 +191,9 @@ def checkpoint_command(
                 raise typer.Exit(code=1) from exc
         if poll_once or completed:
             return
+        snapshot = task_state.current()
+        if snapshot is None:
+            typer.echo("No active AGOS task found", err=True)
+            raise typer.Exit(code=1)
+        status = snapshot.status
         time.sleep(3)

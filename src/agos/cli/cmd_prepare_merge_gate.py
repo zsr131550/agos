@@ -1,4 +1,5 @@
 """`agos prepare-merge-gate` command."""
+
 from __future__ import annotations
 
 import shutil
@@ -9,7 +10,6 @@ from uuid import uuid4
 
 import typer
 
-from agos.core.adapter import ExecutorRun
 from agos.core.command import run_command
 from agos.core.config import AGOSConfig, load_config, resolve_gates
 from agos.core.execution import (
@@ -22,10 +22,9 @@ from agos.core.execution import (
 from agos.core.execution_store import ExecutionStore
 from agos.core.execution_workspace import candidate_patch_paths
 from agos.core.gate import GateContext, build_gate, gate_command_text, gates_locked_payload
-from agos.core.ledger import Ledger
 from agos.core.repo import find_initialized_repo_root, git_head, repo_paths
-from agos.core.status import TaskStatus, load_status, save_status
 from agos.core.task import ExecutorBinding, Task, new_task_id, save_task
+from agos.core.task_state import TaskEvent, TaskRevision, TaskState
 from agos.core.trust_anchor import FileTrustAnchorStore, publish_current_anchor
 
 
@@ -55,13 +54,21 @@ def prepare_merge_gate_command(
     try:
         repo_root = find_initialized_repo_root()
         paths = repo_paths(repo_root)
-        config = AGOSConfig.load(trusted_config) if trusted_config is not None else load_config(repo_root)
+        config = (
+            AGOSConfig.load(trusted_config)
+            if trusted_config is not None
+            else load_config(repo_root)
+        )
         if trusted_config is not None and workflow not in {None, config.default_workflow}:
             raise ValueError(
                 "--workflow must match the trusted config default_workflow: "
                 f"{workflow!r} != {config.default_workflow!r}"
             )
-        workflow_name = config.default_workflow if trusted_config is not None else (workflow or config.default_workflow)
+        workflow_name = (
+            config.default_workflow
+            if trusted_config is not None
+            else (workflow or config.default_workflow)
+        )
         resolved_gates = resolve_gates(config, workflow_name)
         _require_head_checkout(repo_root, head)
 
@@ -114,30 +121,35 @@ def _write_task_state(
     )
     save_task(task, paths.task_yaml)
 
-    ledger = Ledger(paths.ledger)
-    started = ledger.append(
-        {
-            "type": "task_started",
-            "task_id": task.id,
-            "title": task.title,
-            "workflow": task.workflow,
-        }
-    )
-    locked = ledger.append(
-        {
-            "type": "gates_locked",
-            "task_id": task.id,
-            "gates": gates_locked_payload(list(resolved_gates)),
-        }
-    )
-    del started
-    save_status(
-        TaskStatus.for_started_task(
-            task=task,
-            run=ExecutorRun(adapter="ci_prepare", run_id="prepare-merge-gate"),
-            ledger_head_hash=locked["hash"],
+    task_state = TaskState(paths)
+    initialized = task_state.record(
+        TaskEvent(
+            "task_started",
+            {
+                "task_id": task.id,
+                "title": task.title,
+                "workflow": task.workflow,
+            },
         ),
-        paths,
+        TaskEvent(
+            "gates_locked",
+            {
+                "task_id": task.id,
+                "gates": gates_locked_payload(list(resolved_gates)),
+            },
+        ),
+        expected=TaskRevision.empty(),
+    )
+    task_state.record(
+        TaskEvent(
+            "executor_dispatched",
+            {
+                "task_id": task.id,
+                "adapter": "ci_prepare",
+                "run_id": "prepare-merge-gate",
+            },
+        ),
+        expected=initialized.snapshot.revision,
     )
     return task
 
@@ -214,12 +226,20 @@ def _materialize_candidate_evidence(
 
     diff_text = patch_bytes.decode("utf-8", errors="replace")
     runs = [
-        _record_patch_applies(paths, candidate_id=candidate_id, workspace_ref=workspace.ref, base=base, patch_bytes=patch_bytes)
+        _record_patch_applies(
+            paths,
+            task_id=task.id,
+            candidate_id=candidate_id,
+            workspace_ref=workspace.ref,
+            base=base,
+            patch_bytes=patch_bytes,
+        )
     ]
     for gate_spec in resolved_gates:
         runs.append(
             _run_gate(
                 paths,
+                task_id=task.id,
                 candidate_id=candidate_id,
                 workspace_ref=workspace.ref,
                 diff_text=diff_text,
@@ -240,6 +260,7 @@ def _materialize_candidate_evidence(
 def _record_patch_applies(
     paths,
     *,
+    task_id: str,
     candidate_id: str,
     workspace_ref: str,
     base: str,
@@ -249,7 +270,7 @@ def _record_patch_applies(
         paths,
         {
             "type": "candidate_test_started",
-            "task_id": load_status(paths).task_id if load_status(paths) is not None else "unknown-task",
+            "task_id": task_id,
             "candidate_id": candidate_id,
             "gate_id": "patch_applies",
         },
@@ -275,7 +296,7 @@ def _record_patch_applies(
         paths,
         {
             "type": "candidate_test_completed",
-            "task_id": load_status(paths).task_id if load_status(paths) is not None else "unknown-task",
+            "task_id": task_id,
             "candidate_id": candidate_id,
             "gate_id": "patch_applies",
             "state": run.state,
@@ -288,6 +309,7 @@ def _record_patch_applies(
 def _run_gate(
     paths,
     *,
+    task_id: str,
     candidate_id: str,
     workspace_ref: str,
     diff_text: str,
@@ -297,7 +319,7 @@ def _run_gate(
         paths,
         {
             "type": "candidate_test_started",
-            "task_id": load_status(paths).task_id if load_status(paths) is not None else "unknown-task",
+            "task_id": task_id,
             "candidate_id": candidate_id,
             "gate_id": gate_spec.id,
         },
@@ -324,7 +346,7 @@ def _run_gate(
         paths,
         {
             "type": "candidate_test_completed",
-            "task_id": load_status(paths).task_id if load_status(paths) is not None else "unknown-task",
+            "task_id": task_id,
             "candidate_id": candidate_id,
             "gate_id": gate_spec.id,
             "state": run.state,
@@ -348,7 +370,9 @@ def _check_patch_applies_against_base(
     log_name = f"{candidate_id}-patch_applies-{_fsafe_ts()}-{uuid4().hex[:8]}.log"
     log_path = log_dir / log_name
     ref = f"gates/{log_name}"
-    with tempfile.TemporaryDirectory(prefix="agos-merge-gate-verify-", dir=str(repo_root.parent)) as tmp:
+    with tempfile.TemporaryDirectory(
+        prefix="agos-merge-gate-verify-", dir=str(repo_root.parent)
+    ) as tmp:
         workspace = Path(tmp)
         run_command(
             ["git", "worktree", "add", "--detach", str(workspace), base],
@@ -399,13 +423,12 @@ def _submitted_diff(repo_root: Path, base: str, head: str) -> bytes:
 
 
 def _append_event(paths, record: dict[str, object]) -> dict[str, object]:
-    status = load_status(paths)
-    if status is None:
-        raise ValueError("No active AGOS task found")
-    appended = Ledger(paths.ledger).append(record)
-    status.ledger_head_hash = appended["hash"]
-    save_status(status, paths)
-    return appended
+    event_name = record.get("type")
+    if not isinstance(event_name, str) or not event_name:
+        raise ValueError("task event type must be non-empty text")
+    facts = {key: value for key, value in record.items() if key != "type"}
+    commit = TaskState(paths).record(TaskEvent(event_name, facts))
+    return commit.records[-1]
 
 
 def _require_head_checkout(repo_root: Path, expected_head: str) -> None:

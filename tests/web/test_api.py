@@ -1,8 +1,10 @@
 ﻿from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 import json
 import shutil
 import subprocess
+import threading
 from pathlib import Path
 
 import pytest
@@ -24,8 +26,9 @@ from agos.core.ledger import Ledger
 from agos.core.repo import repo_paths, task_paths
 from agos.core.review import ReviewPacket, ReviewReport
 from agos.core.review_store import ReviewStore
-from agos.core.status import TaskStatus, load_status, save_status
+from agos.core.status import GateState, TaskStatus, load_status, save_status
 from agos.core.task import ExecutorBinding, Task, load_task, save_task
+from agos.core.task_state import TaskEvent, TaskState, TaskStateWriteError
 from agos.core.task_execution import TaskExecutionResult
 from agos.core.task_execution_service import TaskExecutionError
 from agos.web.api import (
@@ -676,6 +679,30 @@ def test_archive_current_task_payload_moves_active_task_to_archive(dashboard_rep
     assert load_status(task_paths(dashboard_repo, archive_path)).phase == "done"
 
 
+def test_archive_current_task_preserves_pending_legacy_baseline(dashboard_repo: Path) -> None:
+    paths = repo_paths(dashboard_repo)
+    legacy = load_status(paths)
+    assert legacy is not None
+    legacy.gates["tests_pass"] = GateState(state="pass")
+    save_status(legacy, paths)
+
+    payload = archive_current_task_payload(dashboard_repo)
+
+    archive_paths = task_paths(dashboard_repo, Path(payload["archive_path"]))
+    records = Ledger(archive_paths.ledger).read_all()
+    assert [record["type"] for record in records][-2:] == [
+        "task_state_baselined",
+        "dashboard_archived",
+    ]
+    archive_paths.status_json.unlink()
+    recovered = load_status(archive_paths)
+    assert recovered is not None
+    assert recovered.phase == "done"
+    assert recovered.executor_run is not None
+    assert recovered.executor_run.run_id == "run-01"
+    assert recovered.gates["tests_pass"].state == "pass"
+
+
 def test_runs_payload_lists_archived_tasks(dashboard_repo: Path) -> None:
     archived = archive_current_task_payload(dashboard_repo)
 
@@ -718,13 +745,116 @@ def test_runs_payload_uses_completed_executor_evidence_for_current_phase(dashboa
         json.dumps({"run_id": run_id, "adapter": "codex_cli", "state": "completed"}),
         encoding="utf-8",
     )
+    status_before = paths.status_json.read_text(encoding="utf-8")
 
     payload = runs_payload(dashboard_repo)
+    assert paths.status_json.read_text(encoding="utf-8") == status_before
     current = current_run_payload(dashboard_repo)
 
     assert payload["runs"][0]["phase"] == "done"
     assert current["run"]["phase"] == "done"
-    assert load_status(paths).phase == "done"
+    assert current["run"]["status"]["phase"] == "done"
+    assert current["run"]["pipeline"]["phase"] == "done"
+    assert current["status"]["phase"] == "done"
+    assert current["pipeline"]["phase"] == "done"
+    assert paths.status_json.read_text(encoding="utf-8") == status_before
+    assert load_status(paths).phase == "executing"
+
+
+@pytest.mark.parametrize(
+    ("event_type", "facts", "expected_phase"),
+    [
+        (
+            "agent_option_dispatch_failed",
+            {"error": "follow-up executor unavailable"},
+            "blocked",
+        ),
+        ("dashboard_restored", {"phase": "executing"}, "executing"),
+    ],
+)
+def test_completed_executor_evidence_respects_later_phase_transitions(
+    dashboard_repo: Path,
+    event_type: str,
+    facts: dict[str, str],
+    expected_phase: str,
+) -> None:
+    paths = repo_paths(dashboard_repo)
+    task = load_task(paths.task_yaml)
+    run_state = paths.evidence / "executor_runs" / "run-01.json"
+    run_state.parent.mkdir(parents=True, exist_ok=True)
+    run_state.write_text(
+        json.dumps({"run_id": "run-01", "adapter": "codex_cli", "state": "completed"}),
+        encoding="utf-8",
+    )
+    ledger = Ledger(paths.ledger)
+    ledger.append(
+        {
+            "type": "executor_completed",
+            "task_id": task.id,
+            "run_id": "run-01",
+            "state": "completed",
+        }
+    )
+    ledger.append({"type": event_type, "task_id": task.id, **facts})
+
+    payload = current_run_payload(dashboard_repo)
+
+    assert payload["run"]["phase"] == expected_phase
+    assert payload["run"]["status"]["phase"] == expected_phase
+    assert payload["run"]["pipeline"]["phase"] == expected_phase
+
+
+def test_completed_executor_evidence_ignores_lifecycle_before_current_dispatch(
+    dashboard_repo: Path,
+) -> None:
+    paths = repo_paths(dashboard_repo)
+    task = load_task(paths.task_yaml)
+    status = load_status(paths)
+    assert status is not None
+    ledger = Ledger(paths.ledger)
+    ledger.append(
+        {
+            "type": "dashboard_paused",
+            "task_id": task.id,
+            "phase": "blocked",
+        }
+    )
+    current_run = ExecutorRun(adapter="codex_cli", run_id="run-current", issue_id=None)
+    dispatched = ledger.append(
+        {
+            "type": "executor_dispatched",
+            "task_id": task.id,
+            "adapter": current_run.adapter,
+            "run_id": current_run.run_id,
+            "issue_id": current_run.issue_id,
+        }
+    )
+    current_status = TaskStatus.for_started_task(
+        task=task,
+        run=current_run,
+        ledger_head_hash=dispatched["hash"],
+    )
+    current_status.gates = status.gates
+    save_status(current_status, paths)
+    run_state = paths.evidence / "executor_runs" / f"{current_run.run_id}.json"
+    run_state.parent.mkdir(parents=True, exist_ok=True)
+    run_state.write_text(
+        json.dumps(
+            {
+                "run_id": current_run.run_id,
+                "adapter": current_run.adapter,
+                "state": "completed",
+            }
+        ),
+        encoding="utf-8",
+    )
+    status_before = paths.status_json.read_text(encoding="utf-8")
+
+    current = current_run_payload(dashboard_repo)
+
+    assert current["run"]["phase"] == "done"
+    assert current["run"]["status"]["phase"] == "done"
+    assert paths.status_json.read_text(encoding="utf-8") == status_before
 
 
 def test_restart_payload_dispatches_new_executor_for_completed_output(
@@ -778,13 +908,20 @@ def test_completed_executor_without_outputs_is_blocked_not_done(dashboard_repo: 
         json.dumps({"run_id": run_id, "adapter": "codex_cli", "state": "completed"}),
         encoding="utf-8",
     )
+    status_before = paths.status_json.read_text(encoding="utf-8")
 
     payload = runs_payload(dashboard_repo)
+    assert paths.status_json.read_text(encoding="utf-8") == status_before
     current = current_run_payload(dashboard_repo)
 
     assert payload["runs"][0]["phase"] == "blocked"
     assert current["run"]["phase"] == "blocked"
-    assert load_status(paths).phase == "blocked"
+    assert current["run"]["status"]["phase"] == "blocked"
+    assert current["run"]["pipeline"]["phase"] == "blocked"
+    assert current["status"]["phase"] == "blocked"
+    assert current["pipeline"]["phase"] == "blocked"
+    assert paths.status_json.read_text(encoding="utf-8") == status_before
+    assert load_status(paths).phase == "executing"
 
 
 def test_completed_source_code_executor_with_repo_change_is_done(tmp_repo: Path) -> None:
@@ -802,10 +939,19 @@ def test_completed_source_code_executor_with_repo_change_is_done(tmp_repo: Path)
     )
     save_task(task, paths.task_yaml)
     ledger = Ledger(paths.ledger)
-    started = ledger.append({"type": "task_started", "task_id": task.id, "title": task.title})
+    ledger.append({"type": "task_started", "task_id": task.id, "title": task.title})
     run = ExecutorRun(adapter="codex_cli", run_id="source-run", issue_id=None)
+    dispatched = ledger.append(
+        {
+            "type": "executor_dispatched",
+            "task_id": task.id,
+            "adapter": run.adapter,
+            "run_id": run.run_id,
+            "issue_id": run.issue_id,
+        }
+    )
     save_status(
-        TaskStatus.for_started_task(task=task, run=run, ledger_head_hash=started["hash"]),
+        TaskStatus.for_started_task(task=task, run=run, ledger_head_hash=dispatched["hash"]),
         paths,
     )
     run_state = paths.evidence / "executor_runs" / "source-run.json"
@@ -900,6 +1046,45 @@ def test_continue_archived_task_payload_restores_archive_as_current(dashboard_re
     assert payload["run"]["id"] == "agos-dashboard-01"
     assert paths.task_yaml.is_file()
     assert not Path(archived["archive_path"]).exists()
+    assert Ledger(paths.ledger).read_all()[-1]["type"] == "dashboard_restored"
+    assert load_status(paths).phase == "executing"
+
+
+def test_concurrent_continue_returns_a_structured_archive_error(
+    dashboard_repo: Path,
+    monkeypatch,
+) -> None:
+    archived = archive_current_task_payload(dashboard_repo)
+    archive_path = Path(archived["archive_path"])
+    archive_id = archive_path.name
+    barrier = threading.Barrier(2)
+    real_rename = Path.rename
+
+    def synchronized_archive_rename(self: Path, target: Path):
+        if self == archive_path:
+            try:
+                barrier.wait(timeout=0.1)
+            except threading.BrokenBarrierError:
+                pass
+        return real_rename(self, target)
+
+    monkeypatch.setattr(Path, "rename", synchronized_archive_rename)
+
+    def restore() -> dict[str, object] | Exception:
+        try:
+            return continue_archived_task_payload(dashboard_repo, archive_id)
+        except Exception as exc:
+            return exc
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        futures = [pool.submit(restore) for _ in range(2)]
+        outcomes = [future.result(timeout=2) for future in futures]
+
+    assert sum(isinstance(outcome, dict) and outcome["ok"] is True for outcome in outcomes) == 1
+    errors = [outcome for outcome in outcomes if isinstance(outcome, Exception)]
+    assert len(errors) == 1
+    assert isinstance(errors[0], DashboardApiError)
+    assert errors[0].code == "archive_missing"
 
 
 def test_current_task_lifecycle_payloads_dispatch_executor_runs(
@@ -962,6 +1147,140 @@ def test_current_task_lifecycle_payloads_dispatch_executor_runs(
         "run-dashboard-1",
         "run-dashboard-2",
     ]
+
+
+def test_dashboard_dispatch_conflict_records_and_blocks_unreconciled_run(
+    dashboard_repo: Path,
+    monkeypatch,
+) -> None:
+    paths = repo_paths(dashboard_repo)
+    starts: list[str] = []
+
+    def fake_start(self, task: Task) -> ExecutorRun:
+        starts.append(task.id)
+        TaskState(paths).record(
+            TaskEvent(
+                "checkpoint",
+                {"task_id": task.id, "run_id": "run-01", "last_seq": 1},
+            )
+        )
+        return ExecutorRun(adapter=self.name, run_id="run-conflicted", issue_id="AGO-409")
+
+    monkeypatch.setattr("agos.adapters.local_cli_executor.CodexCliExecutorAdapter.start", fake_start)
+
+    with pytest.raises(DashboardApiError) as err:
+        restart_current_task_payload(dashboard_repo)
+
+    assert err.value.code == "executor_dispatch_conflict"
+    assert starts == ["agos-dashboard-01"]
+    records = Ledger(paths.ledger).read_all()
+    assert not [
+        record
+        for record in records
+        if record["type"] == "executor_dispatched" and record.get("run_id") == "run-conflicted"
+    ]
+    unreconciled = [
+        record for record in records if record["type"] == "executor_dispatch_unreconciled"
+    ]
+    assert unreconciled[-1]["run_id"] == "run-conflicted"
+    assert (paths.evidence / "runs" / "run-conflicted.json").is_file()
+    current = current_run_payload(dashboard_repo)
+    assert current["run"]["unreconciled_dispatches"][-1]["run_id"] == "run-conflicted"
+
+    with pytest.raises(DashboardApiError) as repeated:
+        restart_current_task_payload(dashboard_repo)
+
+    assert repeated.value.code == "executor_dispatch_conflict"
+    assert starts == ["agos-dashboard-01"]
+
+
+def test_dashboard_dispatch_write_failure_records_and_blocks_unreconciled_run(
+    dashboard_repo: Path,
+    monkeypatch,
+) -> None:
+    paths = repo_paths(dashboard_repo)
+    original_record = TaskState.record
+
+    def fail_dispatch_record(self, event, *more, expected=None):
+        if event.name == "executor_dispatched":
+            raise TaskStateWriteError(event, OSError("ledger unavailable"))
+        return original_record(self, event, *more, expected=expected)
+
+    monkeypatch.setattr(TaskState, "record", fail_dispatch_record)
+    monkeypatch.setattr(
+        "agos.adapters.local_cli_executor.CodexCliExecutorAdapter.start",
+        lambda self, _task: ExecutorRun(adapter=self.name, run_id="run-write-failed", issue_id=None),
+    )
+
+    with pytest.raises(DashboardApiError) as err:
+        restart_current_task_payload(dashboard_repo)
+
+    assert err.value.code == "executor_dispatch_conflict"
+    records = Ledger(paths.ledger).read_all()
+    assert not [
+        record
+        for record in records
+        if record["type"] == "executor_dispatched" and record.get("run_id") == "run-write-failed"
+    ]
+    unreconciled = [
+        record for record in records if record["type"] == "executor_dispatch_unreconciled"
+    ]
+    assert unreconciled[-1]["run_id"] == "run-write-failed"
+    assert unreconciled[-1]["stage"] == "ledger_write_failed"
+
+    with pytest.raises(DashboardApiError) as repeated:
+        restart_current_task_payload(dashboard_repo)
+
+    assert repeated.value.code == "executor_dispatch_conflict"
+
+
+def test_dashboard_initial_start_write_failure_records_and_blocks_unreconciled_run(
+    dashboard_repo: Path,
+    monkeypatch,
+) -> None:
+    paths = repo_paths(dashboard_repo)
+    archive_current_task_payload(dashboard_repo)
+    original_record = TaskState.record
+
+    def fail_dispatch_record(self, event, *more, expected=None):
+        if event.name == "executor_dispatched":
+            raise TaskStateWriteError(event, OSError("ledger unavailable"))
+        return original_record(self, event, *more, expected=expected)
+
+    monkeypatch.setattr(TaskState, "record", fail_dispatch_record)
+    monkeypatch.setattr(
+        "agos.adapters.local_cli_executor.CodexCliExecutorAdapter.start",
+        lambda self, _task: ExecutorRun(
+            adapter=self.name,
+            run_id="run-initial-write-failed",
+            issue_id=None,
+        ),
+    )
+
+    with pytest.raises(DashboardApiError) as err:
+        start_run_payload(dashboard_repo, {"title": "New task", "mode": "legacy"})
+
+    assert err.value.code == "executor_dispatch_conflict", err.value.message
+    records = Ledger(paths.ledger).read_all()
+    unreconciled = [
+        record for record in records if record["type"] == "executor_dispatch_unreconciled"
+    ]
+    assert unreconciled[-1]["run_id"] == "run-initial-write-failed"
+    assert unreconciled[-1]["stage"] == "ledger_write_failed"
+    assert paths.task_yaml.is_file()
+
+    with pytest.raises(DashboardApiError) as archive_attempt:
+        archive_current_task_payload(dashboard_repo)
+
+    assert archive_attempt.value.code == "executor_dispatch_conflict"
+
+    with pytest.raises(DashboardApiError) as repeated:
+        start_run_payload(
+            dashboard_repo,
+            {"title": "Retry task", "mode": "legacy", "replace_active": True},
+        )
+
+    assert repeated.value.code == "executor_dispatch_conflict"
 
 
 @pytest.mark.parametrize(
@@ -1307,6 +1626,102 @@ def test_select_agent_option_payload_dispatches_followup_executor(
     assert status.executor_run.run_id == "followup-run-01"
 
 
+def test_select_agent_option_payload_serializes_selection_and_dispatch(
+    dashboard_repo: Path,
+    monkeypatch,
+) -> None:
+    paths = repo_paths(dashboard_repo)
+    task = load_task(paths.task_yaml)
+    save_task(
+        task.model_copy(
+            update={
+                "executor": task.executor.model_copy(
+                    update={"selection_id": "executor:codex_cli:codex"}
+                )
+            }
+        ),
+        paths.task_yaml,
+    )
+    Ledger(paths.ledger).append(
+        {
+            "type": "executor_completed",
+            "run_id": "run-01",
+            "state": "completed",
+            "detail": json.dumps(
+                {
+                    "type": "item.completed",
+                    "item": {
+                        "type": "agent_message",
+                        "text": "方案 A：Add read-only dashboard API payloads",
+                    },
+                },
+                ensure_ascii=False,
+            ),
+        }
+    )
+    starts_lock = threading.Lock()
+    second_start_entered = threading.Event()
+    callers_ready = threading.Barrier(2)
+    active_starts = 0
+    max_active_starts = 0
+    start_count = 0
+
+    def fake_start(self, task: Task) -> ExecutorRun:
+        nonlocal active_starts, max_active_starts, start_count
+        del self, task
+        with starts_lock:
+            start_count += 1
+            call_number = start_count
+            active_starts += 1
+            max_active_starts = max(max_active_starts, active_starts)
+            if call_number == 2:
+                second_start_entered.set()
+        if call_number == 1:
+            second_start_entered.wait(timeout=0.25)
+        with starts_lock:
+            active_starts -= 1
+        return ExecutorRun(
+            adapter="codex_cli",
+            run_id=f"followup-run-{call_number}",
+            issue_id=None,
+        )
+
+    monkeypatch.setattr("agos.adapters.local_cli_executor.CodexCliExecutorAdapter.start", fake_start)
+    monkeypatch.setattr(
+        "agos.adapters.local_cli_executor.CodexCliExecutorAdapter.status",
+        lambda *_args, **_kwargs: RunStatus(state="running"),
+    )
+
+    def select_option() -> dict[str, object] | Exception:
+        callers_ready.wait(timeout=2)
+        try:
+            return select_agent_option_payload(dashboard_repo, {"option_id": "option-1"})
+        except Exception as exc:  # captured so concurrency assertions stay deterministic
+            return exc
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        futures = [pool.submit(select_option) for _ in range(2)]
+        outcomes = [future.result(timeout=5) for future in futures]
+
+    assert max_active_starts == 1
+    assert all(isinstance(outcome, dict) and outcome["ok"] is True for outcome in outcomes)
+    records = [
+        record["type"]
+        for record in Ledger(paths.ledger).read_all()
+        if record["type"] in {"agent_option_selected", "executor_dispatched"}
+        and (
+            record["type"] == "agent_option_selected"
+            or record.get("triggered_by") == "agent_option_selected"
+        )
+    ]
+    assert records[-4:] == [
+        "agent_option_selected",
+        "executor_dispatched",
+        "agent_option_selected",
+        "executor_dispatched",
+    ]
+
+
 def test_runs_payload_returns_empty_list_without_active_task(tmp_repo: Path) -> None:
     paths = repo_paths(tmp_repo)
     paths.agos_dir.mkdir(parents=True, exist_ok=True)
@@ -1489,12 +1904,16 @@ def dashboard_repo(tmp_repo: Path) -> Path:
         intent="展示 AGOS 流水线",
         workflow="feature",
         gates=["tests_pass"],
-        executor=ExecutorBinding(adapter="codex_cli", agent="codex"),
+        executor=ExecutorBinding(
+            adapter="codex_cli",
+            agent="codex",
+            selection_id="executor:codex_cli:codex",
+        ),
     )
     save_task(task, paths.task_yaml)
 
     ledger = Ledger(paths.ledger)
-    started = ledger.append({"type": "task_started", "task_id": task.id, "title": task.title})
+    ledger.append({"type": "task_started", "task_id": task.id, "title": task.title})
     ledger.append(
         {
             "type": "gates_locked",
@@ -1502,11 +1921,20 @@ def dashboard_repo(tmp_repo: Path) -> Path:
             "gates": gates_locked_payload(config.resolve_gates(task.workflow, task.gates)),
         }
     )
+    dispatched = ledger.append(
+        {
+            "type": "executor_dispatched",
+            "task_id": task.id,
+            "adapter": "codex_cli",
+            "run_id": "run-01",
+            "issue_id": None,
+        }
+    )
     save_status(
         TaskStatus.for_started_task(
             task=task,
             run=ExecutorRun(adapter="codex_cli", run_id="run-01", issue_id=None),
-            ledger_head_hash=started["hash"],
+            ledger_head_hash=dispatched["hash"],
         ),
         paths,
     )
